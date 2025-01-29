@@ -105,7 +105,12 @@ int aeron_udp_channel_transport_init(
         transport->interceptor_clientds[i] = NULL;
     }
 
+#if defined(SOCK_NONBLOCK)
+    // NOTE: passing SOCK_NONBLOCK here because `exasock` doesn't intercept `fcntl(O_NONBLOCK)` call
+    if ((transport->fd = aeron_socket(bind_addr->ss_family, SOCK_DGRAM | SOCK_NONBLOCK, 0)) < 0)
+#else
     if ((transport->fd = aeron_socket(bind_addr->ss_family, SOCK_DGRAM, 0)) < 0)
+#endif
     {
         AERON_APPEND_ERR("%s", "");
         goto error;
@@ -128,7 +133,12 @@ int aeron_udp_channel_transport_init(
     {
         if (NULL != connect_addr)
         {
+#if defined(SOCK_NONBLOCK)
+            // NOTE: passing SOCK_NONBLOCK here because `exasock` doesn't intercept `fcntl(O_NONBLOCK)` call
+            if ((transport->recv_fd = aeron_socket(bind_addr->ss_family, SOCK_DGRAM | SOCK_NONBLOCK, 0)) < 0)
+#else
             if ((transport->recv_fd = aeron_socket(bind_addr->ss_family, SOCK_DGRAM, 0)) < 0)
+#endif
             {
                 AERON_APPEND_ERR("%s", "");
                 goto error;
