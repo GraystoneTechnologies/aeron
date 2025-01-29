@@ -266,7 +266,12 @@ int aeron_http_retrieve(aeron_http_response_t **response, const char *url, int64
         return -1;
     }
 
+#if defined(SOCK_NONBLOCK)
+    // NOTE: passing SOCK_NONBLOCK here because `exasock` doesn't intercept `fcntl(O_NONBLOCK)` call
+    if ((sock = aeron_socket(parsed_url.address.ss_family, SOCK_STREAM | SOCK_NONBLOCK, 0)) == -1)
+#else
     if ((sock = aeron_socket(parsed_url.address.ss_family, SOCK_STREAM, 0)) == -1)
+#endif
     {
         AERON_APPEND_ERR("%s", "");
         return -1;
