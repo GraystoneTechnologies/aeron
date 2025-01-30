@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -151,7 +151,7 @@ class SystemTests
         public String toString()
         {
             final StringDescription description = new StringDescription();
-            final String lineSeparator = System.getProperty("line.separator");
+            final String lineSeparator = System.lineSeparator();
 
             description.appendText("Unable to match: ");
             matcher.describeTo(description);

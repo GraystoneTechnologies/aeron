@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,61 +16,51 @@
 package io.aeron.archive.checksum;
 
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledForJreRange;
-import org.junit.jupiter.api.condition.EnabledOnJre;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.junit.jupiter.api.condition.JRE.JAVA_8;
-import static org.junit.jupiter.api.condition.JRE.JAVA_9;
 
 class ChecksumsTest
 {
     @Test
     void crc32()
     {
-        assertSame(Crc32.INSTANCE, Checksums.crc32());
+        final Checksum instance = Checksums.crc32();
+        assertNotNull(instance);
+        assertSame(instance, Checksums.crc32());
     }
 
-    @EnabledForJreRange(min = JAVA_9)
     @Test
     void crc32c()
     {
-        assertSame(Crc32c.INSTANCE, Checksums.crc32c());
+        final Checksum instance = Checksums.crc32c();
+        assertNotNull(instance);
+        assertSame(instance, Checksums.crc32c());
     }
 
-    @EnabledOnJre(JAVA_8)
-    @Test
-    void crc32cThrowsIllegalStateExceptionIfCalledOnJdk8()
+    @ParameterizedTest
+    @ValueSource(strings = { "CRC-32", "io.aeron.archive.checksum.Crc32", "org.agrona.checksum.Crc32" })
+    void newInstanceReturnsSameInstanceOfCrc32(final String alias)
     {
-        assertThrows(IllegalStateException.class, Checksums::crc32c);
+        assertSame(Checksums.crc32(), Checksums.newInstance(alias));
     }
 
-    @Test
-    void newInstanceReturnsSameInstanceOfCrc32()
+    @ParameterizedTest
+    @ValueSource(strings = { "CRC-32C", "io.aeron.archive.checksum.Crc32c", "org.agrona.checksum.Crc32c" })
+    void newInstanceReturnsSameInstanceOfCrc32c(final String alias)
     {
-        assertSame(Crc32.INSTANCE, Checksums.newInstance(Crc32.class.getName()));
+        assertSame(Checksums.crc32c(), Checksums.newInstance(alias));
     }
 
-    @EnabledForJreRange(min = JAVA_9)
-    @Test
-    void newInstanceReturnsSameInstanceOfCrc32c()
+    @ParameterizedTest
+    @NullAndEmptySource
+    void newInstanceThrowsNullPointerExceptionIfClassNameIsNull(final String alias)
     {
-        assertSame(Crc32c.INSTANCE, Checksums.newInstance(Crc32c.class.getName()));
-    }
-
-    @EnabledOnJre(JAVA_8)
-    @Test
-    void newInstanceThrowsIllegalStateExceptionIfCalledWithCrc32cOnJdk8()
-    {
-        assertThrows(IllegalStateException.class, () -> Checksums.newInstance(Crc32c.class.getName()));
-    }
-
-    @Test
-    void newInstanceThrowsNullPointerExceptionIfClassNameIsNull()
-    {
-        assertThrows(NullPointerException.class, () -> Checksums.newInstance(null));
+        assertThrows(IllegalArgumentException.class, () -> Checksums.newInstance(alias));
     }
 
     @Test
@@ -100,8 +90,8 @@ class ChecksumsTest
     {
         final Checksum instance1 = Checksums.newInstance(TestChecksum.class.getName());
         final Checksum instance2 = Checksums.newInstance(TestChecksum.class.getName());
-        assertTrue(instance1 instanceof TestChecksum);
-        assertTrue(instance2 instanceof TestChecksum);
+        assertInstanceOf(TestChecksum.class, instance1);
+        assertInstanceOf(TestChecksum.class, instance2);
         assertNotSame(instance1, instance2);
     }
 

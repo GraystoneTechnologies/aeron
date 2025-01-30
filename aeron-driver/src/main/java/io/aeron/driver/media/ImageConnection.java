@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -38,7 +38,12 @@ abstract class ImageConnectionFields extends ImageConnectionLhsPadding
     public long timeOfLastFrameNs;
 
     /**
-     * Is the end of the stream from source been observed.
+     * End of the stream position.
+     */
+    public long eosPosition = Long.MAX_VALUE;
+
+    /**
+     * Was the end of the stream from source observed?
      */
     public boolean isEos;
 

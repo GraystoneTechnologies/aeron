@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 package io.aeron.cluster;
 
 import io.aeron.Publication;
+import io.aeron.cluster.client.ClusterEvent;
 import io.aeron.cluster.client.ClusterException;
 import io.aeron.cluster.codecs.*;
 import io.aeron.cluster.service.Cluster;
@@ -61,13 +62,13 @@ final class ServiceProxy implements AutoCloseable
     {
         final int length = MessageHeaderEncoder.ENCODED_LENGTH + JoinLogEncoder.BLOCK_LENGTH +
             JoinLogEncoder.logChannelHeaderLength() + channel.length();
-        long result;
+        long position;
 
         int attempts = SEND_ATTEMPTS;
         do
         {
-            result = publication.tryClaim(length, bufferClaim);
-            if (result > 0)
+            position = publication.tryClaim(length, bufferClaim);
+            if (position > 0)
             {
                 joinLogEncoder
                     .wrapAndApplyHeader(bufferClaim.buffer(), bufferClaim.offset(), messageHeaderEncoder)
@@ -85,20 +86,21 @@ final class ServiceProxy implements AutoCloseable
                 return;
             }
 
-            checkResult(result);
-            if (Publication.BACK_PRESSURED == result)
+            checkResult(position, publication);
+            if (Publication.BACK_PRESSURED == position)
             {
                 Thread.yield();
             }
         }
         while (--attempts > 0);
 
-        throw new ClusterException("failed to send join log request: result=" + result);
+        throw new ClusterException("failed to send join log request: " + Publication.errorString(position));
     }
 
     void clusterMembersResponse(
-        final long correlationId, final int leaderMemberId, final String activeMembers, final String passiveFollowers)
+        final long correlationId, final int leaderMemberId, final String activeMembers)
     {
+        final String passiveFollowers = "";
         final int length = MessageHeaderEncoder.ENCODED_LENGTH + ClusterMembersResponseEncoder.BLOCK_LENGTH +
             ClusterMembersResponseEncoder.activeMembersHeaderLength() + activeMembers.length() +
             ClusterMembersResponseEncoder.passiveFollowersHeaderLength() + passiveFollowers.length();
@@ -137,8 +139,7 @@ final class ServiceProxy implements AutoCloseable
         final long currentTimeNs,
         final int leaderMemberId,
         final int memberId,
-        final ClusterMember[] activeMembers,
-        final ClusterMember[] passiveMembers)
+        final ClusterMember[] activeMembers)
     {
         clusterMembersExtendedResponseEncoder
             .wrapAndApplyHeader(expandableArrayBuffer, 0, messageHeaderEncoder)
@@ -163,21 +164,7 @@ final class ServiceProxy implements AutoCloseable
                 .archiveEndpoint(member.archiveEndpoint());
         }
 
-        final ClusterMembersExtendedResponseEncoder.PassiveMembersEncoder passiveMembersEncoder =
-            clusterMembersExtendedResponseEncoder.passiveMembersCount(passiveMembers.length);
-        for (final ClusterMember member : passiveMembers)
-        {
-            passiveMembersEncoder.next()
-                .leadershipTermId(member.leadershipTermId())
-                .logPosition(member.logPosition())
-                .timeOfLastAppendNs(member.timeOfLastAppendPositionNs())
-                .memberId(member.id())
-                .ingressEndpoint(member.ingressEndpoint())
-                .consensusEndpoint(member.consensusEndpoint())
-                .logEndpoint(member.logEndpoint())
-                .catchupEndpoint(member.catchupEndpoint())
-                .archiveEndpoint(member.archiveEndpoint());
-        }
+        clusterMembersExtendedResponseEncoder.passiveMembersCount(0);
 
         final int length = MessageHeaderEncoder.ENCODED_LENGTH + clusterMembersExtendedResponseEncoder.encodedLength();
 
@@ -230,7 +217,7 @@ final class ServiceProxy implements AutoCloseable
             }
             while (--attempts > 0);
 
-            errorHandler.onError(new ClusterException(
+            errorHandler.onError(new ClusterEvent(
                 "failed to send service termination position: result=" + result, AeronException.Category.WARN));
         }
     }
@@ -265,13 +252,21 @@ final class ServiceProxy implements AutoCloseable
         throw new ClusterException("failed to send request for service ack: result=" + Publication.errorString(result));
     }
 
-    private static void checkResult(final long result)
+    private static void checkResult(final long position, final Publication publication)
     {
-        if (result == Publication.NOT_CONNECTED ||
-            result == Publication.CLOSED ||
-            result == Publication.MAX_POSITION_EXCEEDED)
+        if (Publication.NOT_CONNECTED == position)
         {
-            throw new ClusterException("unexpected publication state: " + result);
+            throw new ClusterException("publication is not connected");
+        }
+
+        if (Publication.CLOSED == position)
+        {
+            throw new ClusterException("publication is closed");
+        }
+
+        if (Publication.MAX_POSITION_EXCEEDED == position)
+        {
+            throw new ClusterException("publication at max position: term-length=" + publication.termBufferLength());
         }
     }
 }

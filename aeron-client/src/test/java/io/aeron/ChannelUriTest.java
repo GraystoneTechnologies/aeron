@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,17 +15,23 @@
  */
 package io.aeron;
 
+import io.aeron.test.Tests;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
+import java.util.function.BiConsumer;
 
+import static io.aeron.ChannelUri.MAX_URI_LENGTH;
 import static java.util.Arrays.asList;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.params.provider.Arguments.arguments;
+import static org.mockito.Mockito.*;
 
 class ChannelUriTest
 {
@@ -68,6 +74,17 @@ class ChannelUriTest
     void shouldRejectWithInvalidParams()
     {
         assertInvalid("aeron:udp?endpoint=localhost:4652|-~@{]|=??#s!£$%====");
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = { MAX_URI_LENGTH + 1, 10000 })
+    void shouldRejectUriIfLengthExceedsMaxAllowed(final int length)
+    {
+        final String uri = Tests.generateStringWithSuffix("aeron:ipc?alias=", "x", length);
+        final IllegalArgumentException exception =
+            assertThrows(IllegalArgumentException.class, () -> ChannelUri.parse(uri));
+        assertEquals("URI length (" + uri.length() + ") exceeds max supported length (" + MAX_URI_LENGTH +
+            "): " + uri.substring(0, MAX_URI_LENGTH), exception.getMessage());
     }
 
     @Test
@@ -210,6 +227,70 @@ class ChannelUriTest
         assertThrows(IllegalArgumentException.class, () -> uri.replaceEndpointWildcardPort("localhost:0"));
         assertThrows(IllegalArgumentException.class, () -> uri.replaceEndpointWildcardPort("localhost"));
         assertThrows(NullPointerException.class, () -> uri.replaceEndpointWildcardPort(null));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void shouldIterateOverParameters()
+    {
+        final ChannelUri uri = ChannelUri.parse(
+            "aeron:udp?endpoint=myhost:0|ttl=1|mtu=8k|term-length=64M|alias=text|x=42");
+        final BiConsumer<String, String> parameterConsumer = mock(BiConsumer.class);
+
+        uri.forEachParameter(parameterConsumer);
+
+        verify(parameterConsumer).accept("endpoint", "myhost:0");
+        verify(parameterConsumer).accept("ttl", "1");
+        verify(parameterConsumer).accept("mtu", "8k");
+        verify(parameterConsumer).accept("term-length", "64M");
+        verify(parameterConsumer).accept("alias", "text");
+        verify(parameterConsumer).accept("x", "42");
+        verifyNoMoreInteractions(parameterConsumer);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void shouldNotCallConsumerIfNoParameters()
+    {
+        final ChannelUri uri = ChannelUri.parse("aeron:ipc");
+        final BiConsumer<String, String> parameterConsumer = mock(BiConsumer.class);
+
+        uri.forEachParameter(parameterConsumer);
+
+        verifyNoInteractions(parameterConsumer);
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    void shouldReturnOriginalUriWhenAliasIsEmpty(final String alias)
+    {
+        final String uri = "aeron:udp";
+        assertEquals(uri, ChannelUri.addAliasIfAbsent(uri, alias));
+    }
+
+    @Test
+    void shouldReturnOriginalUriWhenAliasIsAlreadyDefined()
+    {
+        final String uri = "aeron:udp?alias=xyz|term-length=64k";
+        final String alias = "new alias";
+        assertEquals(uri, ChannelUri.addAliasIfAbsent(uri, alias));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "aeron:udp?term-length=64k|ssc=false|mtu=8k",
+        "aeron:ipc",
+        "aeron:udp?custom=alias",
+    })
+    void shouldReturnNewUriWtihAnAliasAdded(final String uri)
+    {
+        final String alias = "my alias";
+        final ChannelUri channelUri = ChannelUri.parse(uri);
+        channelUri.put(CommonContext.ALIAS_PARAM_NAME, alias);
+
+        final String result = ChannelUri.addAliasIfAbsent(uri, alias);
+        assertNotNull(result);
+        assertEquals(channelUri, ChannelUri.parse(result));
     }
 
     private static void assertSubstitution(

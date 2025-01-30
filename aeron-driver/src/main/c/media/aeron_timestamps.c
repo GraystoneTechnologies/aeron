@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ void aeron_timestamps_set_timestamp(
 
     if (frame_length >= sizeof(aeron_data_header_t) &&
         AERON_HDR_TYPE_DATA == data_header->frame_header.type &&
+        AERON_DATA_HEADER_BEGIN_FLAG & data_header->frame_header.flags &&
         0 != data_header->frame_header.frame_length)
     {
         size_t body_length = frame_length - sizeof(aeron_data_header_t);

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -54,12 +54,14 @@ typedef struct aeron_driver_sender_stct
 
     aeron_udp_channel_data_paths_t data_paths;
 
-    int64_t *total_bytes_sent_counter;
-    int64_t *errors_counter;
-    int64_t *invalid_frames_counter;
-    int64_t *status_messages_received_counter;
-    int64_t *nak_messages_received_counter;
-    int64_t *resolution_changes_counter;
+    volatile int64_t *total_bytes_sent_counter;
+    volatile int64_t *errors_counter;
+    volatile int64_t *invalid_frames_counter;
+    volatile int64_t *status_messages_received_counter;
+    volatile int64_t *nak_messages_received_counter;
+    volatile int64_t *error_messages_received_counter;
+    volatile int64_t *resolution_changes_counter;
+    volatile int64_t *short_sends_counter;
 
     aeron_driver_context_t *context;
     aeron_udp_transport_poller_poll_func_t poller_poll_func;
@@ -98,6 +100,7 @@ void aeron_driver_sender_on_add_publication(void *clientd, void *command);
 void aeron_driver_sender_on_remove_publication(void *clientd, void *command);
 void aeron_driver_sender_on_add_destination(void *clientd, void *command);
 void aeron_driver_sender_on_remove_destination(void *clientd, void *command);
+void aeron_driver_sender_on_remove_destination_by_id(void *clientd, void *command);
 void aeron_driver_sender_on_resolution_change(void *clientd, void *command);
 
 int aeron_driver_sender_do_send(aeron_driver_sender_t *sender, int64_t now_ns);

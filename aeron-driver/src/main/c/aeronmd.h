@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ extern "C"
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
 typedef struct aeron_driver_context_stct aeron_driver_context_t;
 typedef struct aeron_driver_stct aeron_driver_t;
@@ -152,6 +153,14 @@ bool aeron_driver_context_get_term_buffer_sparse_file(aeron_driver_context_t *co
 
 int aeron_driver_context_set_perform_storage_checks(aeron_driver_context_t *context, bool value);
 bool aeron_driver_context_get_perform_storage_checks(aeron_driver_context_t *context);
+
+/**
+ * Specify the interval which checks for re-resolutions of names occurs.
+ */
+#define AERON_LOW_FILE_STORE_WARNING_THRESHOLD_ENV_VAR "AERON_LOW_FILE_STORE_WARNING_THRESHOLD"
+
+int aeron_driver_context_set_low_file_store_warning_threshold(aeron_driver_context_t *context, uint64_t value);
+uint64_t aeron_driver_context_get_low_file_store_warning_threshold(aeron_driver_context_t *context);
 
 /**
  * Should a spy subscription simulate a connection to a network publication.
@@ -613,12 +622,28 @@ int aeron_driver_context_set_nak_multicast_max_backoff_ns(aeron_driver_context_t
 uint64_t aeron_driver_context_get_nak_multicast_max_backoff_ns(aeron_driver_context_t *context);
 
 /**
- * How long to delay before resending a NAK.
+ * How long to delay before sending an initial NAK.
  */
 #define AERON_NAK_UNICAST_DELAY_ENV_VAR "AERON_NAK_UNICAST_DELAY"
 
 int aeron_driver_context_set_nak_unicast_delay_ns(aeron_driver_context_t *context, uint64_t value);
 uint64_t aeron_driver_context_get_nak_unicast_delay_ns(aeron_driver_context_t *context);
+
+/**
+ * A ratio to apply to the nak unicast delay to calculate the resend delay. Used as a multipler.
+ */
+#define AERON_NAK_UNICAST_RETRY_DELAY_RATIO_ENV_VAR "AERON_NAK_UNICAST_RETRY_DELAY_RATIO"
+
+int aeron_driver_context_set_nak_unicast_retry_delay_ratio(aeron_driver_context_t *context, uint64_t value);
+uint64_t aeron_driver_context_get_nak_unicast_retry_delay_ratio(aeron_driver_context_t *context);
+
+/**
+ * Max number of active retransmissions tracked for udp streams with group semantics.
+ */
+#define AERON_MAX_RESEND_ENV_VAR "AERON_MAX_RESEND"
+
+int aeron_driver_context_set_max_resend(aeron_driver_context_t *context, uint32_t value);
+uint32_t aeron_driver_context_get_max_resend(aeron_driver_context_t *context);
 
 /**
  * How long to delay before sending a retransmit following a NAK.
@@ -665,11 +690,6 @@ bool aeron_driver_context_get_rejoin_stream(aeron_driver_context_t *context);
 
 int aeron_driver_context_set_connect_enabled(aeron_driver_context_t *context, bool value);
 int aeron_driver_context_get_connect_enabled(aeron_driver_context_t *context);
-
-#define AERON_IPC_CHANNEL "aeron:ipc"
-#define AERON_IPC_CHANNEL_LEN strlen(AERON_IPC_CHANNEL)
-#define AERON_SPY_PREFIX "aeron-spy:"
-#define AERON_SPY_PREFIX_LEN strlen(AERON_SPY_PREFIX)
 
 /**
  * Bindings for UDP Channel Transports.
@@ -793,6 +813,36 @@ int aeron_driver_context_set_name_resolver_time_tracker(
 aeron_duty_cycle_tracker_t *aeron_driver_context_get_name_resolver_time_tracker(aeron_driver_context_t *context);
 
 /**
+ * Specify the sender wildcard port range.
+ */
+#define AERON_DRIVER_SENDER_WILDCARD_PORT_RANGE_ENV_VAR "AERON_SENDER_WILDCARD_PORT_RANGE"
+
+int aeron_driver_context_set_sender_wildcard_port_range(
+    aeron_driver_context_t *context, uint16_t low_port, uint16_t high_port);
+int aeron_driver_context_get_sender_wildcard_port_range(
+    aeron_driver_context_t *context, uint16_t *low_port, uint16_t *high_port);
+
+/**
+ * Specify the receiver wildcard port range.
+ */
+#define AERON_DRIVER_RECEIVER_WILDCARD_PORT_RANGE_ENV_VAR "AERON_RECEIVER_WILDCARD_PORT_RANGE"
+
+int aeron_driver_context_set_receiver_wildcard_port_range(
+    aeron_driver_context_t *context, uint16_t low_port, uint16_t high_port);
+int aeron_driver_context_get_receiver_wildcard_port_range(
+    aeron_driver_context_t *context, uint16_t *low_port, uint16_t *high_port);
+
+typedef struct aeron_port_manager_stct aeron_port_manager_t;
+
+int aeron_driver_context_set_sender_port_manager(
+    aeron_driver_context_t *context, aeron_port_manager_t *value);
+aeron_port_manager_t *aeron_driver_context_get_sender_port_manager(aeron_driver_context_t *context);
+
+int aeron_driver_context_set_receiver_port_manager(
+    aeron_driver_context_t *context, aeron_port_manager_t *value);
+aeron_port_manager_t *aeron_driver_context_get_receiver_port_manager(aeron_driver_context_t *context);
+
+/**
  * Specify the duty cycle time threshold for the conductor.
  */
 #define AERON_DRIVER_CONDUCTOR_CYCLE_THRESHOLD_ENV_VAR "AERON_DRIVER_CONDUCTOR_CYCLE_THRESHOLD"
@@ -840,6 +890,10 @@ uint32_t aeron_driver_context_get_network_publication_max_messages_per_send(aero
 int aeron_driver_context_set_resource_free_limit(aeron_driver_context_t *context, uint32_t value);
 uint32_t aeron_driver_context_get_resource_free_limit(aeron_driver_context_t *context);
 
+#define AERON_DRIVER_ASYNC_EXECUTOR_THREADS_ENV_VAR "AERON_DRIVER_ASYNC_EXECUTOR_THREADS"
+int aeron_driver_context_set_async_executor_threads(aeron_driver_context_t *context, uint32_t value);
+uint32_t aeron_driver_context_get_async_executor_threads(aeron_driver_context_t *context);
+
 #define AERON_CONDUCTOR_CPU_AFFINITY_ENV_VAR "AERON_CONDUCTOR_CPU_AFFINITY"
 #define AERON_RECEIVER_CPU_AFFINITY_ENV_VAR "AERON_RECEIVER_CPU_AFFINITY"
 #define AERON_SENDER_CPU_AFFINITY_ENV_VAR "AERON_SENDER_CPU_AFFINITY"
@@ -848,6 +902,19 @@ uint32_t aeron_driver_context_get_resource_free_limit(aeron_driver_context_t *co
  * Set the list of filenames to dynamic libraries to load upon context init.
  */
 #define AERON_DRIVER_DYNAMIC_LIBRARIES_ENV_VAR "AERON_DRIVER_DYNAMIC_LIBRARIES"
+
+#define AERON_ENABLE_EXPERIMENTAL_FEATURES_ENV_VAR "AERON_ENABLE_EXPERIMENTAL_FEATURES"
+int aeron_driver_context_set_enable_experimental_features(aeron_driver_context_t *context, bool value);
+int aeron_driver_context_get_enable_experimental_features(aeron_driver_context_t *context);
+
+/**
+ * Limit the number of sessions for a given stream that the driver will support
+ */
+#define AERON_DRIVER_STREAM_SESSION_LIMIT_ENV_VAR "AERON_DRIVER_STREAM_SESSION_LIMIT"
+
+int aeron_driver_context_set_stream_session_limit(aeron_driver_context_t *context, int32_t value);
+int32_t aeron_driver_context_get_stream_session_limit(aeron_driver_context_t *context);
+
 
 /**
  * Return full version and build string.

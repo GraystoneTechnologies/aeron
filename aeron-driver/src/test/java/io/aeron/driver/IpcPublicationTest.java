@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,7 +21,11 @@ import io.aeron.driver.buffer.TestLogFactory;
 import io.aeron.driver.status.SystemCounters;
 import io.aeron.logbuffer.LogBufferDescriptor;
 import io.aeron.test.Tests;
-import org.agrona.concurrent.*;
+import org.agrona.concurrent.CachedEpochClock;
+import org.agrona.concurrent.CachedNanoClock;
+import org.agrona.concurrent.ManyToOneConcurrentLinkedQueue;
+import org.agrona.concurrent.SystemEpochClock;
+import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.ringbuffer.ManyToOneRingBuffer;
 import org.agrona.concurrent.ringbuffer.RingBuffer;
 import org.agrona.concurrent.status.CountersManager;
@@ -57,7 +61,7 @@ class IpcPublicationTest
         final RingBuffer toDriverCommands = new ManyToOneRingBuffer(new UnsafeBuffer(
             ByteBuffer.allocateDirect(Configuration.CONDUCTOR_BUFFER_LENGTH_DEFAULT)));
 
-        final CountersManager countersManager = Tests.newCountersMananger(BUFFER_LENGTH);
+        final CountersManager countersManager = Tests.newCountersManager(BUFFER_LENGTH);
         final SystemCounters systemCounters = new SystemCounters(countersManager);
 
         final SenderProxy senderProxy = mock(SenderProxy.class);
@@ -71,7 +75,7 @@ class IpcPublicationTest
             .clientProxy(mock(ClientProxy.class))
             .senderProxy(senderProxy)
             .receiverProxy(receiverProxy)
-            .driverCommandQueue(new ManyToOneConcurrentArrayQueue<>(256))
+            .driverCommandQueue(new ManyToOneConcurrentLinkedQueue<>())
             .epochClock(SystemEpochClock.INSTANCE)
             .cachedEpochClock(new CachedEpochClock())
             .cachedNanoClock(new CachedNanoClock())
@@ -104,7 +108,7 @@ class IpcPublicationTest
     @Test
     void shouldKeepPublisherLimitZeroOnNoSubscriptionUpdate()
     {
-        ipcPublication.updatePublisherLimit();
+        ipcPublication.updatePublisherPositionAndLimit();
         assertThat(publisherLimit.get(), is(0L));
     }
 

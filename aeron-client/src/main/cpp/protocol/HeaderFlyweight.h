@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,7 +35,7 @@ struct HeaderDefn
 {
     std::int32_t frameLength;
     std::int8_t version;
-    std::int8_t flags;
+    std::uint8_t flags;
     std::int16_t type;
 };
 #pragma pack(pop)
@@ -73,7 +73,7 @@ public:
         return *this;
     }
 
-    inline std::int8_t flags() const
+    inline std::uint8_t flags() const
     {
         return m_struct.flags;
     }

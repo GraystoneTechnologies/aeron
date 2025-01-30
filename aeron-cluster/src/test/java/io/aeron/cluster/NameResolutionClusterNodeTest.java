@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@ package io.aeron.cluster;
 
 import io.aeron.archive.ArchiveThreadingMode;
 import io.aeron.cluster.client.AeronCluster;
-import io.aeron.cluster.client.EgressListener;
 import io.aeron.cluster.service.ClientSession;
 import io.aeron.cluster.service.ClusteredService;
 import io.aeron.cluster.service.ClusteredServiceContainer;
@@ -52,8 +51,6 @@ import static org.mockito.Mockito.verify;
 @ExtendWith(InterruptingTestCallback.class)
 class NameResolutionClusterNodeTest
 {
-    private static final long CATALOG_CAPACITY = 1024 * 1024;
-
     private ClusteredMediaDriver clusteredMediaDriver;
     private ClusteredServiceContainer container;
     private AeronCluster aeronCluster;
@@ -70,7 +67,7 @@ class NameResolutionClusterNodeTest
                 .errorHandler(mockErrorHandler)
                 .dirDeleteOnStart(true),
             TestContexts.localhostArchive()
-                .catalogCapacity(CATALOG_CAPACITY)
+                .catalogCapacity(ClusterTestConstants.CATALOG_CAPACITY)
                 .threadingMode(ArchiveThreadingMode.SHARED)
                 .recordingEventsEnabled(false)
                 .deleteArchiveOnStart(true),
@@ -106,7 +103,7 @@ class NameResolutionClusterNodeTest
     void shouldConnectAndSendKeepAliveWithBadName()
     {
         container = launchEchoService();
-        aeronCluster = connectToCluster(null);
+        aeronCluster = connectToCluster();
 
         assertTrue(aeronCluster.sendKeepAlive());
 
@@ -131,11 +128,7 @@ class NameResolutionClusterNodeTest
                 final int length,
                 final Header header)
             {
-                idleStrategy.reset();
-                while (session.offer(buffer, offset, length) < 0)
-                {
-                    idleStrategy.idle();
-                }
+                echoMessage(session, buffer, offset, length);
             }
         };
 
@@ -145,18 +138,20 @@ class NameResolutionClusterNodeTest
                 .errorHandler(Tests::onError));
     }
 
-    private AeronCluster connectToCluster(final EgressListener egressListener)
+    private AeronCluster connectToCluster()
     {
+        final ErrorHandler errorHandler =
+            (t) ->
+            {
+                System.err.println("** MY HANDLER **");
+                t.printStackTrace();
+            };
+
         return AeronCluster.connect(
             new AeronCluster.Context()
-                .egressListener(egressListener)
-                .errorHandler(
-                    (t) ->
-                    {
-                        System.err.println("** MY HANDLER **");
-                        t.printStackTrace();
-                    })
+                .errorHandler(errorHandler)
                 .ingressChannel("aeron:udp")
-                .ingressEndpoints(INGRESS_ENDPOINTS + ",1=badname:9011"));
+                .ingressEndpoints(INGRESS_ENDPOINTS + ",1=badname:9011")
+                .egressChannel("aeron:udp?endpoint=localhost:0"));
     }
 }

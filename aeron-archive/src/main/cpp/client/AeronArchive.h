@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@
 #include "concurrent/BackOffIdleStrategy.h"
 #include "concurrent/YieldingIdleStrategy.h"
 #include "ArchiveException.h"
+#include "AeronCounters.h"
 
 namespace aeron { namespace archive { namespace client
 {
@@ -54,7 +55,8 @@ public:
         std::unique_ptr<RecordingDescriptorPoller> recordingDescriptorPoller,
         std::unique_ptr<RecordingSubscriptionDescriptorPoller> recordingSubscriptionDescriptorPoller,
         std::shared_ptr<Aeron> aeron,
-        std::int64_t controlSessionId);
+        std::int64_t controlSessionId,
+        std::int64_t archiveId);
 
     ~AeronArchive();
 
@@ -81,6 +83,21 @@ public:
             std::int64_t publicationId,
             long long deadlineNs);
 
+        /// Represents connection state
+        enum State : std::uint8_t
+        {
+            ADD_PUBLICATION = 0,
+            AWAIT_PUBLICATION_CONNECTED = 1,
+            SEND_CONNECT_REQUEST = 2,
+            AWAIT_SUBSCRIPTION_CONNECTED = 3,
+            AWAIT_CONNECT_RESPONSE = 4,
+            SEND_ARCHIVE_ID_REQUEST = 5,
+            AWAIT_ARCHIVE_ID_RESPONSE = 6,
+            DONE = 7,
+            SEND_CHALLENGE_RESPONSE = 8,
+            AWAIT_CHALLENGE_RESPONSE = 9
+        };
+
         /**
          * Poll for a complete connection.
          *
@@ -95,7 +112,17 @@ public:
          */
         inline std::uint8_t step() const
         {
-            return m_step;
+            return m_state;
+        }
+
+        /**
+         * The state in the connect process this connect attempt has reached.
+         *
+         * @return the connection state.
+         */
+        inline State state() const
+        {
+            return m_state;
         }
 
     private:
@@ -110,9 +137,37 @@ public:
         const std::int64_t m_publicationId;
         const long long m_deadlineNs;
         std::int64_t m_correlationId = aeron::NULL_VALUE;
-        std::int64_t m_challengeControlSessionId = aeron::NULL_VALUE;
-        std::uint8_t m_step = 0;
+        std::int64_t m_controlSessionId = aeron::NULL_VALUE;
+        State m_state = State::ADD_PUBLICATION;
         std::pair<const char *, std::uint32_t> m_encodedCredentialsFromChallenge = { nullptr, 0 };
+
+        std::shared_ptr<AeronArchive> transitionToDone(std::int64_t archiveId)
+        {
+            if (!m_archiveProxy->keepAlive(aeron::NULL_VALUE, m_controlSessionId))
+            {
+                m_archiveProxy->closeSession(m_controlSessionId);
+                throw ArchiveException("failed to send keep alive after archive connect",SOURCEINFO);
+            }
+
+            m_state = State::DONE;
+
+            std::unique_ptr<RecordingDescriptorPoller> recordingDescriptorPoller(
+                new RecordingDescriptorPoller(
+                    m_subscription, m_ctx->errorHandler(), m_ctx->recordingSignalConsumer(), m_controlSessionId));
+            std::unique_ptr<RecordingSubscriptionDescriptorPoller> recordingSubscriptionDescriptorPoller(
+                new RecordingSubscriptionDescriptorPoller(
+                    m_subscription, m_ctx->errorHandler(), m_ctx->recordingSignalConsumer(), m_controlSessionId));
+
+            return std::make_shared<AeronArchive>(
+                std::move(m_ctx),
+                std::move(m_archiveProxy),
+                std::move(m_controlResponsePoller),
+                std::move(recordingDescriptorPoller),
+                std::move(recordingSubscriptionDescriptorPoller),
+                m_aeron,
+                m_controlSessionId,
+                archiveId);
+        }
     };
 
     /**
@@ -198,6 +253,16 @@ public:
     inline Context_t &context()
     {
         return *m_ctx;
+    }
+
+    /**
+     * The id of the archive.
+     *
+     * @return id of the archive this client is connected to.
+     */
+    inline std::int64_t archiveId() const
+    {
+        return m_archiveId;
     }
 
     /**
@@ -814,6 +879,14 @@ public:
         ensureOpen();
         ensureNotReentrant();
 
+        std::shared_ptr<ChannelUri> replayChannelUri = ChannelUri::parse(replayChannel);
+
+        if (replayChannelUri->hasControlModeResponse())
+        {
+            return startReplayViaResponseChannel<IdleStrategy>(
+                recordingId, replayChannel, replayStreamId, replayParams);
+        }
+
         m_lastCorrelationId = m_aeron->nextCorrelationId();
 
         if (!m_archiveProxy->replay<IdleStrategy>(
@@ -979,11 +1052,18 @@ public:
         std::int32_t replayStreamId,
         const ReplayParams &replayParams)
     {
+        IdleStrategy idle;
         std::lock_guard<std::recursive_mutex> lock(m_lock);
         ensureOpen();
         ensureNotReentrant();
 
         std::shared_ptr<ChannelUri> replayChannelUri = ChannelUri::parse(replayChannel);
+
+        if (replayChannelUri->hasControlModeResponse())
+        {
+            return replayViaResponseChannel<IdleStrategy>(recordingId, replayChannel, replayStreamId, replayParams);
+        }
+
         m_lastCorrelationId = m_aeron->nextCorrelationId();
 
         if (!m_archiveProxy->replay<IdleStrategy>(
@@ -997,7 +1077,6 @@ public:
         replayChannelUri->put(SESSION_ID_PARAM_NAME, std::to_string(replaySessionId));
 
         const std::int64_t subscriptionId = m_aeron->addSubscription(replayChannelUri->toString(), replayStreamId);
-        IdleStrategy idle;
 
         std::shared_ptr<Subscription> subscription = m_aeron->findSubscription(subscriptionId);
         while (!subscription)
@@ -1290,6 +1369,31 @@ public:
         }
 
         return pollForResponse<IdleStrategy>("AeronArchive::getStopPosition", m_lastCorrelationId);
+    }
+
+    /**
+     * Get the stop or active recorded position of a recording.
+     *
+     * @param recordingId of the recording that the stop of active recording position is being requested for.
+     * @tparam IdleStrategy to use for polling operations.
+     * @return the recorded length in bytes.
+     */
+    template<typename IdleStrategy = aeron::concurrent::BackoffIdleStrategy>
+    inline std::int64_t getMaxRecordedPosition(std::int64_t recordingId)
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_lock);
+        ensureOpen();
+        ensureNotReentrant();
+
+        m_lastCorrelationId = m_aeron->nextCorrelationId();
+
+        if (!m_archiveProxy->getMaxRecordedPosition<IdleStrategy>(
+            recordingId, m_lastCorrelationId, m_controlSessionId))
+        {
+            throw ArchiveException("failed to send MaxRecordedPosition request", SOURCEINFO);
+        }
+
+        return pollForResponse<IdleStrategy>("AeronArchive::getMaxRecordedPosition", m_lastCorrelationId);
     }
 
     /**
@@ -1894,6 +1998,7 @@ private:
     nano_clock_t m_nanoClock;
 
     const std::int64_t m_controlSessionId;
+    const std::int64_t m_archiveId;
     std::int64_t m_lastCorrelationId = NULL_VALUE;
     const long long m_messageTimeoutNs;
     bool m_isClosed = false;
@@ -2190,6 +2295,183 @@ private:
             checkDeadline(deadlineNs, operationName, "awaiting subscription descriptors", correlationId);
             idle.idle();
         }
+    }
+
+    static void checkAndSetupResponseChannel(AeronArchive::Context_t &ctx, std::int64_t subscriptionId);
+
+    template<typename IdleStrategy = aeron::concurrent::BackoffIdleStrategy>
+    std::shared_ptr<Subscription> replayViaResponseChannel(
+        std::int64_t recordingId,
+        const std::string &replayChannel,
+        std::int32_t replayStreamId,
+        const ReplayParams &replayParams)
+    {
+        m_lastCorrelationId = m_aeron->nextCorrelationId();
+        ReplayParams responseChannelReplayParams{replayParams};
+        IdleStrategy idle;
+
+        if (!m_archiveProxy->requestReplayToken(m_lastCorrelationId, m_controlSessionId, recordingId))
+        {
+            throw ArchiveException("failed to send replay token request", SOURCEINFO);
+        }
+
+        const std::int64_t replayToken = pollForResponse<IdleStrategy>(
+            "AeronArchive::replayToken", m_lastCorrelationId);
+
+        responseChannelReplayParams.replayToken(replayToken);
+        int64_t subscriptionId = m_aeron->addSubscription(replayChannel, replayStreamId);
+        std::int64_t deadlineNs = m_nanoClock() + m_ctx->messageTimeoutNs();
+
+        std::shared_ptr<Subscription> replaySubscription = m_aeron->findSubscription(subscriptionId);
+        while (nullptr == replaySubscription)
+        {
+            replaySubscription = m_aeron->findSubscription(subscriptionId);
+            checkDeadline<IdleStrategy>(deadlineNs, "timed out waiting for subscription from driver");
+        }
+
+        const std::shared_ptr<ChannelUri> controlChannelUri = ChannelUri::parse(m_ctx->controlRequestChannel());
+        controlChannelUri->remove(TERM_OFFSET_PARAM_NAME);
+        controlChannelUri->remove(TERM_ID_PARAM_NAME);
+        controlChannelUri->remove(INITIAL_TERM_ID_PARAM_NAME);
+        controlChannelUri->put(RESPONSE_CORRELATION_ID_PARAM_NAME, std::to_string(subscriptionId));
+        controlChannelUri->put(TERM_LENGTH_PARAM_NAME, "64k");
+        controlChannelUri->put(SPIES_SIMULATE_CONNECTION_PARAM_NAME, "false");
+
+        int64_t publicationId = m_aeron->addExclusivePublication(
+            controlChannelUri->toString(), m_ctx->controlRequestStreamId());
+
+        std::shared_ptr<ExclusivePublication> publication = m_aeron->findExclusivePublication(publicationId);
+        while (!publication)
+        {
+            publication = m_aeron->findExclusivePublication(publicationId);
+            checkDeadline<IdleStrategy>(deadlineNs, "timed out waiting for publication from driver");
+        }
+
+        ArchiveProxy archiveProxy{publication};
+
+        while (!publication->isConnected())
+        {
+            checkDeadline<IdleStrategy>(deadlineNs, "timed out waiting to establish replay connection");
+        }
+
+        while (0 == publication->publicationLimit())
+        {
+            checkDeadline<IdleStrategy>(
+                deadlineNs, "timed out waiting for replay connection to have available publication limit");
+        }
+
+        m_lastCorrelationId = m_aeron->nextCorrelationId();
+        if (!archiveProxy.replay(
+            recordingId,
+            replayChannel,
+            replayStreamId,
+            responseChannelReplayParams,
+            m_lastCorrelationId,
+            m_controlSessionId))
+        {
+            throw ArchiveException("failed to send replay request", SOURCEINFO);
+        }
+
+        pollForResponse<IdleStrategy>("AeronArchiveProxy::replay", m_lastCorrelationId);
+
+        while (!replaySubscription->isConnected())
+        {
+            checkDeadline<IdleStrategy>(deadlineNs, "timed out wait for replay subscription to connect");
+        }
+
+        return replaySubscription;
+    }
+
+    template<typename IdleStrategy = aeron::concurrent::BackoffIdleStrategy>
+    std::int64_t startReplayViaResponseChannel(
+        std::int64_t recordingId,
+        const std::string &replayChannel,
+        std::int32_t replayStreamId,
+        const ReplayParams &replayParams)
+    {
+        IdleStrategy idle;
+
+        if (NULL_VALUE == replayParams.subscriptionRegistrationId())
+        {
+            throw ArchiveException(
+                "when using startReplay with a response channel, ReplayParams::subscriptionRegistrationId must be set",
+                SOURCEINFO);
+        }
+
+        m_lastCorrelationId = m_aeron->nextCorrelationId();
+        if (!m_archiveProxy->requestReplayToken(m_lastCorrelationId, m_controlSessionId, recordingId))
+        {
+            throw ArchiveException("failed to send replay token request", SOURCEINFO);
+        }
+
+        ReplayParams responseChannelReplayParams{replayParams};
+
+        const std::int64_t replayToken = pollForResponse<IdleStrategy>(
+            "AeronArchive::replayToken", m_lastCorrelationId);
+
+        responseChannelReplayParams.replayToken(replayToken);
+        std::int64_t deadlineNs = m_nanoClock() + m_ctx->messageTimeoutNs();
+
+        const std::shared_ptr<ChannelUri> controlChannelUri = ChannelUri::parse(m_ctx->controlRequestChannel());
+        controlChannelUri->remove(TERM_OFFSET_PARAM_NAME);
+        controlChannelUri->remove(TERM_ID_PARAM_NAME);
+        controlChannelUri->remove(INITIAL_TERM_ID_PARAM_NAME);
+        controlChannelUri->put(
+            RESPONSE_CORRELATION_ID_PARAM_NAME, std::to_string(replayParams.subscriptionRegistrationId()));
+        controlChannelUri->put(TERM_LENGTH_PARAM_NAME, "64k");
+        controlChannelUri->put(SPIES_SIMULATE_CONNECTION_PARAM_NAME, "false");
+
+        int64_t publicationId = m_aeron->addExclusivePublication(
+            controlChannelUri->toString(), m_ctx->controlRequestStreamId());
+
+        std::shared_ptr<ExclusivePublication> publication = m_aeron->findExclusivePublication(publicationId);
+        while (!publication)
+        {
+            publication = m_aeron->findExclusivePublication(publicationId);
+            checkDeadline<IdleStrategy>(deadlineNs, "timed out waiting for publication from driver");
+        }
+
+        ArchiveProxy archiveProxy{publication};
+
+        const int pubLmtCounterId = m_aeron->countersReader().findByTypeIdAndRegistrationId(
+            AeronCounters::DRIVER_PUBLISHER_LIMIT_TYPE_ID, publicationId);
+
+        while (!publication->isConnected())
+        {
+            checkDeadline<IdleStrategy>(deadlineNs, "timed out waiting for replay publication to connect");
+        }
+
+        while (0 == m_aeron->countersReader().getCounterValue(pubLmtCounterId))
+        {
+            checkDeadline<IdleStrategy>(deadlineNs, "timed out waiting for replay publication to have available limit");
+        }
+
+        m_lastCorrelationId = m_aeron->nextCorrelationId();
+        if (!archiveProxy.replay(
+            recordingId,
+            replayChannel,
+            replayStreamId,
+            responseChannelReplayParams,
+            m_lastCorrelationId,
+            m_controlSessionId))
+        {
+            throw ArchiveException("failed to send replay request", SOURCEINFO);
+        }
+
+        return pollForResponse<IdleStrategy>("AeronArchiveProxy::replay", m_lastCorrelationId);
+    }
+
+    template<typename IdleStrategy = aeron::concurrent::BackoffIdleStrategy>
+    inline void checkDeadline(const std::int64_t deadlineNs, const std::string message)
+    {
+        IdleStrategy idle;
+
+        if (deadlineNs <= m_nanoClock())
+        {
+            throw ArchiveException(message, SOURCEINFO);
+        }
+
+        idle.idle();
     }
 };
 

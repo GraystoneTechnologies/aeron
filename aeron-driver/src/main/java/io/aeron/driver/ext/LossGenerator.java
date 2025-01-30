@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,4 +34,28 @@ public interface LossGenerator
      * @return true to drop, false to process
      */
     boolean shouldDropFrame(InetSocketAddress address, UnsafeBuffer buffer, int length);
+
+    /**
+     * Should a frame be dropped?
+     *
+     * @param address    The source address of the frame if inbound or the remote address if outbound.
+     * @param buffer     The buffer containing the frame data.
+     * @param streamId   of the incoming frame.
+     * @param sessionId  of the incoming frame
+     * @param termId     of the incoming frame.
+     * @param termOffset of the incoming frame.
+     * @param length     of the incoming frame.
+     * @return true to drop, false to process
+     */
+    default boolean shouldDropFrame(
+        InetSocketAddress address,
+        UnsafeBuffer buffer,
+        final int streamId,
+        final int sessionId,
+        int termId,
+        int termOffset,
+        int length)
+    {
+        return shouldDropFrame(address, buffer, length);
+    }
 }

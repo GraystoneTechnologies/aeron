@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,11 +15,8 @@
  */
 package io.aeron.agent;
 
-import io.aeron.archive.client.AeronArchive;
 import net.bytebuddy.asm.Advice;
 
-import static io.aeron.agent.ArchiveEventCode.CONTROL_SESSION_STATE_CHANGE;
-import static io.aeron.agent.ArchiveEventCode.REPLICATION_SESSION_STATE_CHANGE;
 import static io.aeron.agent.ArchiveEventLogger.LOGGER;
 
 /**
@@ -27,6 +24,36 @@ import static io.aeron.agent.ArchiveEventLogger.LOGGER;
  */
 class ArchiveInterceptor
 {
+    static class ReplaySessionStateChange
+    {
+        @Advice.OnMethodEnter
+        static <E extends Enum<E>> void logStateChange(
+            final E oldState,
+            final E newState,
+            final long sessionId,
+            final long recordingId,
+            final long position,
+            final String reason)
+        {
+            LOGGER.logReplaySessionStateChange(
+                oldState, newState, sessionId, recordingId, position, reason);
+        }
+    }
+
+    static class RecordingSessionStateChange
+    {
+        @Advice.OnMethodEnter
+        static <E extends Enum<E>> void logStateChange(
+            final E oldState,
+            final E newState,
+            final long recordingId,
+            final long position,
+            final String reason)
+        {
+            LOGGER.logRecordingSessionStateChange(oldState, newState, recordingId, position, reason);
+        }
+    }
+
     static class ReplicationSessionStateChange
     {
         @Advice.OnMethodEnter
@@ -34,19 +61,54 @@ class ArchiveInterceptor
             final E oldState,
             final E newState,
             final long replicationId,
-            final long position)
+            final long srcRecordingId,
+            final long dstRecordingId,
+            final long position,
+            final String reason)
         {
-            LOGGER.logSessionStateChange(REPLICATION_SESSION_STATE_CHANGE, oldState, newState, replicationId, position);
+            LOGGER.logReplicationSessionStateChange(
+                oldState, newState, replicationId, srcRecordingId, dstRecordingId, position, reason);
+        }
+    }
+
+    static class ReplicationSessionDone
+    {
+        @Advice.OnMethodEnter
+        static void logReplicationSessionDone(
+            final long controlSessionId,
+            final long replicationId,
+            final long srcRecordingId,
+            final long replayPosition,
+            final long srcStopPosition,
+            final long dstRecordingId,
+            final long dstStopPosition,
+            final long position,
+            final boolean isClosed,
+            final boolean isEndOfStream,
+            final boolean isSynced)
+        {
+            LOGGER.logReplicationSessionDone(
+                controlSessionId,
+                replicationId,
+                srcRecordingId,
+                replayPosition,
+                srcStopPosition,
+                dstRecordingId,
+                dstStopPosition,
+                position,
+                isClosed,
+                isEndOfStream,
+                isSynced);
         }
     }
 
     static class ControlSessionStateChange
     {
         @Advice.OnMethodEnter
-        static <E extends Enum<E>> void logStateChange(final E oldState, final E newState, final long controlSessionId)
+        static <E extends Enum<E>> void logStateChange(
+            final E oldState, final E newState, final long controlSessionId, final String reason)
         {
-            LOGGER.logSessionStateChange(
-                CONTROL_SESSION_STATE_CHANGE, oldState, newState, controlSessionId, AeronArchive.NULL_POSITION);
+            LOGGER.logControlSessionStateChange(oldState, newState, controlSessionId, reason);
         }
     }
 

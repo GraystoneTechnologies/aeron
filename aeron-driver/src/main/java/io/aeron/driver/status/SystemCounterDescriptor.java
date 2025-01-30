@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,7 +15,9 @@
  */
 package io.aeron.driver.status;
 
+import io.aeron.Aeron;
 import io.aeron.AeronCounters;
+import io.aeron.driver.MediaDriverVersion;
 import org.agrona.collections.Int2ObjectHashMap;
 import org.agrona.concurrent.status.*;
 
@@ -102,7 +104,7 @@ public enum SystemCounterDescriptor
     /**
      * Count of errors observed by the driver and an indication to read the distinct error log.
      */
-    ERRORS(15, "Errors"),
+    ERRORS(15, "Errors: " + AeronCounters.formatVersionInfo(MediaDriverVersion.VERSION, MediaDriverVersion.GIT_SHA)),
 
     /**
      * Count of socket send operation which resulted in less than the packet length being sent.
@@ -192,7 +194,44 @@ public enum SystemCounterDescriptor
     /**
      * Count of the number of times the time threshold has been exceeded by the NameResolver.
      */
-    NAME_RESOLVER_TIME_THRESHOLD_EXCEEDED(33, "NameResolver exceeded threshold count");
+    NAME_RESOLVER_TIME_THRESHOLD_EXCEEDED(33, "NameResolver exceeded threshold count"),
+
+    /**
+     * The version of the media driver.
+     */
+    AERON_VERSION(34, "Aeron software: " +
+        AeronCounters.formatVersionInfo(MediaDriverVersion.VERSION, MediaDriverVersion.GIT_SHA)),
+
+    /**
+     * The total number of bytes currently mapped in log buffers, CnC file, and loss report.
+     */
+    BYTES_CURRENTLY_MAPPED(35, "Bytes currently mapped"),
+
+    /**
+     * A minimum bound on the number of bytes re-transmitted as a result of NAKs.
+     * <p>
+     * MDC retransmits are only counted once; therefore, this is a minimum bound rather than the actual number
+     * of retransmitted bytes. We may change this in the future.
+     * <p>
+     * Note that retransmitted bytes are not included in the {@link SystemCounterDescriptor#BYTES_SENT}
+     * counter value. We may change this in the future.
+     */
+    RETRANSMITTED_BYTES(36, "Retransmitted bytes"),
+
+    /**
+     * A count of the number of times that the retransmit pool has been overflowed.
+     */
+    RETRANSMIT_OVERFLOW(37, "Retransmit Pool Overflow count"),
+
+    /**
+     * A count of the number of error frames received by this driver.
+     */
+    ERROR_FRAMES_RECEIVED(38, "Error Frames received"),
+
+    /**
+     * A count of the number of error frames sent by this driver.
+     */
+    ERROR_FRAMES_SENT(39, "Error Frames sent");
 
     /**
      * All system counters have the same type id, i.e. system counters are the same type. Other types can exist.
@@ -260,6 +299,10 @@ public enum SystemCounterDescriptor
      */
     public AtomicCounter newCounter(final CountersManager countersManager)
     {
-        return countersManager.newCounter(label, SYSTEM_COUNTER_TYPE_ID, (buffer) -> buffer.putInt(0, id));
+        final AtomicCounter counter =
+            countersManager.newCounter(label, SYSTEM_COUNTER_TYPE_ID, (buffer) -> buffer.putInt(0, id));
+        countersManager.setCounterRegistrationId(counter.id(), id);
+        countersManager.setCounterOwnerId(counter.id(), Aeron.NULL_VALUE);
+        return counter;
     }
 }

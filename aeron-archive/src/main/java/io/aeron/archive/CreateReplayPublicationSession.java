@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,13 +25,17 @@ class CreateReplayPublicationSession implements Session
     private final long recordingId;
     private final long replayPosition;
     private final long replayLength;
+    private final long startPosition;
+    private final long stopPosition;
+    private final int segmentFileLength;
+    private final int termBufferLength;
+    private final int streamId;
     private long publicationRegistrationId;
     private final int fileIoMaxLength;
     private boolean isDone = false;
     private final Aeron aeron;
     private final Counter limitPositionCounter;
     private final ControlSession controlSession;
-    private final ControlResponseProxy controlResponseProxy;
     private final ArchiveConductor conductor;
 
     CreateReplayPublicationSession(
@@ -39,24 +43,32 @@ class CreateReplayPublicationSession implements Session
         final long recordingId,
         final long replayPosition,
         final long replayLength,
+        final long startPosition,
+        final long stopPosition,
+        final int segmentFileLength,
+        final int termBufferLength,
+        final int streamId,
         final long publicationRegistrationId,
         final int fileIoMaxLength,
         final Counter limitPositionCounter,
         final Aeron aeron,
         final ControlSession controlSession,
-        final ControlResponseProxy controlResponseProxy,
         final ArchiveConductor conductor)
     {
         this.correlationId = correlationId;
         this.recordingId = recordingId;
         this.replayPosition = replayPosition;
         this.replayLength = replayLength;
+        this.startPosition = startPosition;
+        this.stopPosition = stopPosition;
+        this.segmentFileLength = segmentFileLength;
+        this.termBufferLength = termBufferLength;
+        this.streamId = streamId;
         this.publicationRegistrationId = publicationRegistrationId;
         this.fileIoMaxLength = fileIoMaxLength;
         this.limitPositionCounter = limitPositionCounter;
         this.aeron = aeron;
         this.controlSession = controlSession;
-        this.controlResponseProxy = controlResponseProxy;
         this.conductor = conductor;
     }
 
@@ -74,7 +86,7 @@ class CreateReplayPublicationSession implements Session
     /**
      * {@inheritDoc}
      */
-    public void abort()
+    public void abort(final String reason)
     {
         isDone = true;
     }
@@ -113,7 +125,7 @@ class CreateReplayPublicationSession implements Session
             {
                 isDone = true;
                 final String msg = "failed to create replay publication: " + ex.getMessage();
-                controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+                controlSession.sendErrorResponse(correlationId, msg);
                 throw ex;
             }
 
@@ -124,10 +136,15 @@ class CreateReplayPublicationSession implements Session
                 workCount += 1;
 
                 conductor.newReplaySession(
+                    correlationId,
                     recordingId,
                     replayPosition,
                     replayLength,
-                    correlationId,
+                    startPosition,
+                    stopPosition,
+                    segmentFileLength,
+                    termBufferLength,
+                    streamId,
                     fileIoMaxLength,
                     controlSession,
                     limitPositionCounter,

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,7 +31,6 @@ class ListRecordingSubscriptionsSession implements Session
     private final String channelFragment;
     private final Object2ObjectHashMap<String, Subscription> subscriptionByKeyMap;
     private final ControlSession controlSession;
-    private final ControlResponseProxy proxy;
 
     ListRecordingSubscriptionsSession(
         final Object2ObjectHashMap<String, Subscription> subscriptionByKeyMap,
@@ -41,8 +40,7 @@ class ListRecordingSubscriptionsSession implements Session
         final boolean applyStreamId,
         final String channelFragment,
         final long correlationId,
-        final ControlSession controlSession,
-        final ControlResponseProxy proxy)
+        final ControlSession controlSession)
     {
         this.subscriptionByKeyMap = subscriptionByKeyMap;
         this.pseudoIndex = pseudoIndex;
@@ -52,7 +50,6 @@ class ListRecordingSubscriptionsSession implements Session
         this.channelFragment = channelFragment;
         this.correlationId = correlationId;
         this.controlSession = controlSession;
-        this.proxy = proxy;
     }
 
     /**
@@ -66,7 +63,7 @@ class ListRecordingSubscriptionsSession implements Session
     /**
      * {@inheritDoc}
      */
-    public void abort()
+    public void abort(final String reason)
     {
         isDone = true;
     }
@@ -103,11 +100,11 @@ class ListRecordingSubscriptionsSession implements Session
                 if (!(applyStreamId && subscription.streamId() != streamId) &&
                     subscription.channel().contains(channelFragment))
                 {
-                    if (!controlSession.sendSubscriptionDescriptor(correlationId, subscription, proxy))
+                    if (!controlSession.sendSubscriptionDescriptor(correlationId, subscription))
                     {
+                        isDone = controlSession.isDone();
                         break;
                     }
-
                     workCount += 1;
 
                     if (++sent >= subscriptionCount)
@@ -123,7 +120,7 @@ class ListRecordingSubscriptionsSession implements Session
 
         if (!isDone && index >= size)
         {
-            controlSession.sendSubscriptionUnknown(correlationId, proxy);
+            controlSession.sendSubscriptionUnknown(correlationId);
             isDone = true;
             workCount += 1;
         }

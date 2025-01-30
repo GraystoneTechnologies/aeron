@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -219,4 +219,26 @@ TEST_F(SystemTest, shouldAddRemoveCloseHandler)
 
     EXPECT_EQ(1, closeCount1);
     EXPECT_EQ(0, closeCount2);
+}
+
+TEST_F(SystemTest, shouldRejectClientNameThatIsTooLong)
+{
+    std::string name =
+        "this is a very long value that we are hoping with be reject when the value gets "
+        "set on the the context without causing issues will labels";
+
+    Context ctx;
+    ctx.useConductorAgentInvoker(true);
+    ctx.clientName(name);
+    {
+        try
+        {
+            std::shared_ptr<Aeron> aeron = Aeron::connect(ctx);
+            FAIL();
+        }
+        catch (IllegalArgumentException &ex)
+        {
+            ASSERT_STREQ("clientName length must <= 100", ex.what());
+        }
+    }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,17 +33,17 @@ import static org.agrona.BitUtil.SIZE_OF_LONG;
 public class StatusMessageFlyweight extends HeaderFlyweight
 {
     /**
-     * Length of the Status Message Frame
+     * Length of the Status Message Frame.
      */
     public static final int HEADER_LENGTH = 36;
 
     /**
-     * Publisher should send SETUP frame
+     * Publisher should send SETUP frame.
      */
     public static final short SEND_SETUP_FLAG = 0x80;
 
     /**
-     * Publisher should treat Subscriber as going away
+     * Publisher should treat Subscriber as going away.
      */
     public static final short END_OF_STREAM_FLAG = 0x40;
 

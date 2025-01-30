@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,17 +26,76 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
 import static org.junit.jupiter.api.Assertions.*;
 
-public class ClusterMemberTest
+class ClusterMemberTest
 {
     private final ClusterMember[] members = ClusterMember.parse(
         "0,ingressEndpoint,consensusEndpoint,logEndpoint,catchupEndpoint,archiveEndpoint|" +
         "1,ingressEndpoint,consensusEndpoint,logEndpoint,catchupEndpoint,archiveEndpoint|" +
         "2,ingressEndpoint,consensusEndpoint,logEndpoint,catchupEndpoint,archiveEndpoint|");
 
+    private final ClusterMember[] membersWithArchiveResponse = ClusterMember.parse(
+        "0,ingressEndpoint,consensusEndpoint,logEndpoint,catchupEndpoint,archiveEndpoint,archiveResponseEndpoint|" +
+        "1,ingressEndpoint,consensusEndpoint,logEndpoint,catchupEndpoint,archiveEndpoint,archiveResponseEndpoint|" +
+        "2,ingressEndpoint,consensusEndpoint,logEndpoint,catchupEndpoint,archiveEndpoint,archiveResponseEndpoint|");
+
+    private final ClusterMember[] membersWithEgressResponse = ClusterMember.parse(
+        "0,ingressEndpoint,consensusEndpoint,logEndpoint,catchupEndpoint,archiveEndpoint,archiveResponseEndpoint," +
+        "egressResponseEndpoint|" +
+        "1,ingressEndpoint,consensusEndpoint,logEndpoint,catchupEndpoint,archiveEndpoint,archiveResponseEndpoint," +
+        "egressResponseEndpoint|" +
+        "2,ingressEndpoint,consensusEndpoint,logEndpoint,catchupEndpoint,archiveEndpoint,archiveResponseEndpoint," +
+        "egressResponseEndpoint|");
+
     private final long[] rankedPositions = new long[quorumThreshold(members.length)];
 
     @Test
-    public void shouldDetermineQuorumSize()
+    void shouldParseCorrectly()
+    {
+        for (final ClusterMember member : members)
+        {
+            assertEquals("ingressEndpoint", member.ingressEndpoint());
+            assertEquals("consensusEndpoint", member.consensusEndpoint());
+            assertEquals("logEndpoint", member.logEndpoint());
+            assertEquals("catchupEndpoint", member.catchupEndpoint());
+            assertEquals("archiveEndpoint", member.archiveEndpoint());
+            assertNull(member.archiveResponseEndpoint());
+            assertNull(member.egressResponseEndpoint());
+            assertEquals(
+                "ingressEndpoint,consensusEndpoint,logEndpoint,catchupEndpoint,archiveEndpoint", member.endpoints());
+        }
+
+        for (final ClusterMember member : membersWithArchiveResponse)
+        {
+            assertEquals("ingressEndpoint", member.ingressEndpoint());
+            assertEquals("consensusEndpoint", member.consensusEndpoint());
+            assertEquals("logEndpoint", member.logEndpoint());
+            assertEquals("catchupEndpoint", member.catchupEndpoint());
+            assertEquals("archiveEndpoint", member.archiveEndpoint());
+            assertEquals("archiveResponseEndpoint", member.archiveResponseEndpoint());
+            assertNull(member.egressResponseEndpoint());
+            assertEquals(
+                "ingressEndpoint,consensusEndpoint,logEndpoint,catchupEndpoint,archiveEndpoint,archiveResponseEndpoint",
+                member.endpoints());
+        }
+
+        for (final ClusterMember member : membersWithEgressResponse)
+        {
+            assertEquals("ingressEndpoint", member.ingressEndpoint());
+            assertEquals("consensusEndpoint", member.consensusEndpoint());
+            assertEquals("logEndpoint", member.logEndpoint());
+            assertEquals("catchupEndpoint", member.catchupEndpoint());
+            assertEquals("archiveEndpoint", member.archiveEndpoint());
+            assertEquals("archiveResponseEndpoint", member.archiveResponseEndpoint());
+            assertEquals("egressResponseEndpoint", member.egressResponseEndpoint());
+            assertEquals(
+                "ingressEndpoint,consensusEndpoint,logEndpoint,catchupEndpoint,archiveEndpoint," +
+                "archiveResponseEndpoint,egressResponseEndpoint",
+                member.endpoints());
+        }
+    }
+
+    @Test
+    void shouldDetermineQuorumSize()
     {
         final int[] clusterSizes = new int[]{ 1, 2, 3, 4, 5, 6, 7 };
         final int[] quorumValues = new int[]{ 1, 2, 2, 3, 3, 4, 4 };
@@ -49,13 +108,13 @@ public class ClusterMemberTest
     }
 
     @Test
-    public void shouldRankClusterStart()
+    void shouldRankClusterStart()
     {
         assertThat(quorumPosition(members, rankedPositions), is(0L));
     }
 
     @Test
-    public void shouldDetermineQuorumPosition()
+    void shouldDetermineQuorumPosition()
     {
         final long[][] positions = new long[][]
         {

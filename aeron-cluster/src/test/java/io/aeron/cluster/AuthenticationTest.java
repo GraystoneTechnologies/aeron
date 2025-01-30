@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -50,9 +50,8 @@ import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.spy;
 
 @ExtendWith(InterruptingTestCallback.class)
-public class AuthenticationTest
+class AuthenticationTest
 {
-    private static final long CATALOG_CAPACITY = 1024 * 1024;
     private static final String CREDENTIALS_STRING = "username=\"admin\"|password=\"secret\"";
     private static final String CHALLENGE_STRING = "I challenge you!";
     private static final String PRINCIPAL_STRING = "I am THE Principal!";
@@ -67,7 +66,7 @@ public class AuthenticationTest
     private final byte[] encodedChallenge = CHALLENGE_STRING.getBytes();
 
     @AfterEach
-    public void after()
+    void after()
     {
         final ConsensusModule consensusModule = null == clusteredMediaDriver ?
             null : clusteredMediaDriver.consensusModule();
@@ -84,7 +83,7 @@ public class AuthenticationTest
 
     @Test
     @InterruptAfter(10)
-    public void shouldAuthenticateOnConnectRequestWithEmptyCredentials()
+    void shouldAuthenticateOnConnectRequestWithEmptyCredentials()
     {
         final AtomicLong serviceMsgCounter = new AtomicLong(0L);
         final MutableLong serviceSessionId = new MutableLong(-1L);
@@ -146,7 +145,7 @@ public class AuthenticationTest
 
     @Test
     @InterruptAfter(10)
-    public void shouldAuthenticateOnConnectRequestWithCredentials()
+    void shouldAuthenticateOnConnectRequestWithCredentials()
     {
         final AtomicLong serviceMsgCounter = new AtomicLong(0L);
         final MutableLong serviceSessionId = new MutableLong(-1L);
@@ -208,7 +207,7 @@ public class AuthenticationTest
 
     @Test
     @InterruptAfter(10)
-    public void shouldAuthenticateOnChallengeResponse()
+    void shouldAuthenticateOnChallengeResponse()
     {
         final AtomicLong serviceMsgCounter = new AtomicLong(0L);
         final MutableLong serviceSessionId = new MutableLong(-1L);
@@ -278,7 +277,7 @@ public class AuthenticationTest
 
     @Test
     @InterruptAfter(10)
-    public void shouldRejectOnConnectRequest()
+    void shouldRejectOnConnectRequest()
     {
         final AtomicLong serviceMsgCounter = new AtomicLong(0L);
         final MutableLong serviceSessionId = new MutableLong(-1L);
@@ -344,7 +343,7 @@ public class AuthenticationTest
 
     @Test
     @InterruptAfter(10)
-    public void shouldRejectOnChallengeResponse()
+    void shouldRejectOnChallengeResponse()
     {
         final AtomicLong serviceMsgCounter = new AtomicLong(0L);
         final MutableLong serviceSessionId = new MutableLong(-1L);
@@ -466,6 +465,7 @@ public class AuthenticationTest
             new AeronCluster.Context()
                 .ingressChannel("aeron:udp")
                 .ingressEndpoints(INGRESS_ENDPOINTS)
+                .egressChannel("aeron:udp?endpoint=localhost:0")
                 .credentialsSupplier(credentialsSupplier));
     }
 
@@ -484,7 +484,7 @@ public class AuthenticationTest
                 .dirDeleteOnStart(true)
                 .dirDeleteOnShutdown(false),
             TestContexts.localhostArchive()
-                .catalogCapacity(CATALOG_CAPACITY)
+                .catalogCapacity(ClusterTestConstants.CATALOG_CAPACITY)
                 .threadingMode(ArchiveThreadingMode.SHARED)
                 .recordingEventsEnabled(false)
                 .deleteArchiveOnStart(true),

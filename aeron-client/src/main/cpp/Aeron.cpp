@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,12 +21,11 @@
 namespace aeron
 {
 
-static const std::chrono::duration<long, std::milli> IDLE_SLEEP_MS(4);
 static const std::chrono::duration<long, std::milli> IDLE_SLEEP_MS_1(1);
 static const std::chrono::duration<long, std::milli> IDLE_SLEEP_MS_16(16);
 static const std::chrono::duration<long, std::milli> IDLE_SLEEP_MS_100(100);
 
-static const char *AGENT_NAME = "client-conductor";
+static const char *AGENT_NAME = "aeron-client-conductor";
 
 Aeron::Aeron(Context &context) :
     m_context(context.conclude()),
@@ -55,8 +54,9 @@ Aeron::Aeron(Context &context) :
         m_context.m_mediaDriverTimeout,
         m_context.m_resourceLingerTimeout,
         CncFileDescriptor::clientLivenessTimeout(m_cncBuffer),
-        m_context.m_preTouchMappedMemory),
-    m_idleStrategy(IDLE_SLEEP_MS),
+        m_context.m_preTouchMappedMemory,
+        m_context.m_clientName),
+    m_idleStrategy(std::chrono::duration<long, std::milli>(m_context.idleSleepDuration())),
     m_conductorRunner(m_conductor, m_idleStrategy, m_context.m_exceptionHandler, AGENT_NAME),
     m_conductorInvoker(m_conductor, m_context.m_exceptionHandler)
 {
@@ -135,7 +135,7 @@ MemoryMappedFile::ptr_t Aeron::mapCncFile(Context &context)
         {
             throw AeronException(
                 "Driver version insufficient: client=" + semanticVersionToString(CncFileDescriptor::CNC_VERSION) +
-                    " file=" + semanticVersionToString(cncVersion),
+                " file=" + semanticVersionToString(cncVersion),
                 SOURCEINFO);
         }
 
@@ -180,7 +180,7 @@ MemoryMappedFile::ptr_t Aeron::mapCncFile(Context &context)
 
 std::string Aeron::version()
 {
-    return { "aeron version " AERON_VERSION_TXT " built " __DATE__ " " __TIME__ };
+    return { "aeron version=" AERON_VERSION_TXT " commit=" AERON_VERSION_GITSHA };
 }
 
 }

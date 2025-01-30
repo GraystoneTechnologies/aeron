@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,48 +20,49 @@ import io.aeron.driver.ThreadingMode;
 import io.aeron.driver.ext.DebugChannelEndpointConfiguration;
 import io.aeron.driver.ext.DebugSendChannelEndpoint;
 import io.aeron.driver.ext.LossGenerator;
-import io.aeron.logbuffer.FragmentHandler;
-import io.aeron.logbuffer.Header;
-import io.aeron.logbuffer.RawBlockHandler;
-import io.aeron.test.InterruptAfter;
-import io.aeron.test.InterruptingTestCallback;
-import io.aeron.test.SlowTest;
-import io.aeron.test.SystemTestWatcher;
-import io.aeron.test.Tests;
+import io.aeron.exceptions.RegistrationException;
+import io.aeron.logbuffer.*;
+import io.aeron.test.*;
 import io.aeron.test.driver.TestMediaDriver;
 import org.agrona.BitUtil;
 import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
+import org.agrona.collections.MutableBoolean;
 import org.agrona.collections.MutableInteger;
+import org.agrona.collections.MutableLong;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
+import java.util.Objects;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.Supplier;
 
 import static io.aeron.SystemTests.verifyLossOccurredForStream;
-import static io.aeron.logbuffer.FrameDescriptor.FRAME_ALIGNMENT;
-import static io.aeron.protocol.DataHeaderFlyweight.HEADER_LENGTH;
+import static io.aeron.logbuffer.FrameDescriptor.*;
+import static io.aeron.logbuffer.LogBufferDescriptor.computeFragmentedFrameLength;
+import static io.aeron.protocol.DataHeaderFlyweight.*;
 import static java.util.Arrays.asList;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.agrona.BitUtil.SIZE_OF_INT;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.lessThan;
+import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
-import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.anyInt;
-import static org.mockito.Mockito.eq;
-import static org.mockito.Mockito.inOrder;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.*;
 
 @ExtendWith(InterruptingTestCallback.class)
 class PubAndSubTest
@@ -72,6 +73,7 @@ class PubAndSubTest
     {
         return asList(
             "aeron:udp?endpoint=localhost:24325",
+            "aeron:udp?endpoint=localhost:24325|session=id=55555",
             "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost",
             IPC_URI);
     }
@@ -80,9 +82,10 @@ class PubAndSubTest
     final SystemTestWatcher watcher = new SystemTestWatcher();
 
     private static final int STREAM_ID = 1001;
-    private static final ThreadingMode THREADING_MODE = ThreadingMode.SHARED;
 
-    private final MediaDriver.Context context = new MediaDriver.Context();
+    private final MediaDriver.Context context = new MediaDriver.Context()
+        .publicationConnectionTimeoutNs(MILLISECONDS.toNanos(500))
+        .timerIntervalNs(MILLISECONDS.toNanos(100));
 
     private Aeron publishingClient;
     private Aeron subscribingClient;
@@ -96,11 +99,7 @@ class PubAndSubTest
 
     private void launch(final String channel)
     {
-        context
-            .threadingMode(THREADING_MODE)
-            .errorHandler(Tests::onError)
-            .publicationConnectionTimeoutNs(TimeUnit.MILLISECONDS.toNanos(500))
-            .timerIntervalNs(TimeUnit.MILLISECONDS.toNanos(100));
+        context.dirDeleteOnStart(true).threadingMode(ThreadingMode.SHARED);
 
         driver = TestMediaDriver.launch(context, watcher);
         watcher.dataCollector().add(driver.context().aeronDirectory());
@@ -151,6 +150,39 @@ class PubAndSubTest
             anyInt());
 
         assertTrue(channelArgumentCaptor.getValue().isOpen(), "File Channel is closed");
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = { 1408, 128 })
+    void shouldSendAndReceiveMessage(final int mtu)
+    {
+        launch("aeron:udp?endpoint=localhost:24325|mtu=" + mtu);
+        final MutableInteger frameLength = new MutableInteger(-1);
+        final MutableLong position = new MutableLong(-1);
+
+        final int payloadLength = 500;
+        final FragmentHandler handler = (buffer, offset, length, header) ->
+        {
+            frameLength.set(header.frameLength());
+            position.set(header.position());
+        };
+
+        final FragmentHandler assembler =
+            HEADER_LENGTH + payloadLength < mtu ? handler : new FragmentAssembler(handler);
+
+        while (publication.offer(buffer, 0, payloadLength) < 0)
+        {
+            Tests.yield();
+        }
+
+        while (-1 == frameLength.get() || -1 == position.get())
+        {
+            subscription.poll(assembler, 10);
+            Tests.yield();
+        }
+
+        assertEquals(HEADER_LENGTH + payloadLength, frameLength.get());
+        assertEquals(subscription.imageAtIndex(0).position(), position.get());
     }
 
     @ParameterizedTest
@@ -245,7 +277,7 @@ class PubAndSubTest
                 fragmentsRead.value += fragments;
             },
             Integer.MAX_VALUE,
-            TimeUnit.MILLISECONDS.toNanos(500));
+            MILLISECONDS.toNanos(500));
 
         final InOrder inOrder = inOrder(fragmentHandler);
 
@@ -287,7 +319,7 @@ class PubAndSubTest
         context.sendChannelEndpointSupplier((udpChannel, statusIndicator, context) -> new DebugSendChannelEndpoint(
             udpChannel, statusIndicator, context, noLossGenerator, noLossGenerator));
 
-        TestMediaDriver.enableLossGenerationOnReceive(context, 0.1, 0xcafebabeL, true, false);
+        TestMediaDriver.enableRandomLoss(context, 0.1, 0xcafebabeL, true, false);
 
         launch(channel);
 
@@ -332,7 +364,7 @@ class PubAndSubTest
         context.sendChannelEndpointSupplier((udpChannel, statusIndicator, context) -> new DebugSendChannelEndpoint(
             udpChannel, statusIndicator, context, noLossGenerator, noLossGenerator));
 
-        TestMediaDriver.enableLossGenerationOnReceive(context, 0.1, 0xcafebabeL, true, false);
+        TestMediaDriver.enableRandomLoss(context, 0.1, 0xcafebabeL, true, false);
 
         launch(channel);
 
@@ -406,7 +438,7 @@ class PubAndSubTest
                 fragmentsRead.value += fragments;
             },
             Integer.MAX_VALUE,
-            TimeUnit.MILLISECONDS.toNanos(900));
+            MILLISECONDS.toNanos(900));
 
         verify(fragmentHandler, times(numMessagesToSend)).onFragment(
             any(DirectBuffer.class),
@@ -548,7 +580,7 @@ class PubAndSubTest
                 fragmentsRead.value += fragments;
             },
             Integer.MAX_VALUE,
-            TimeUnit.MILLISECONDS.toNanos(500));
+            MILLISECONDS.toNanos(500));
 
         verify(fragmentHandler, times(messagesToReceive)).onFragment(
             any(DirectBuffer.class),
@@ -643,7 +675,7 @@ class PubAndSubTest
                 fragmentsRead.value += fragments;
             },
             Integer.MAX_VALUE,
-            TimeUnit.MILLISECONDS.toNanos(500));
+            MILLISECONDS.toNanos(500));
 
         verify(fragmentHandler, times(numFramesToExpect)).onFragment(
             any(DirectBuffer.class),
@@ -666,6 +698,558 @@ class PubAndSubTest
         while (publication.isConnected())
         {
             Tests.yield();
+        }
+    }
+
+    @Test
+    void shouldAllowSubscriptionsIfUsingTagsAndParametersAndAllMatch()
+    {
+        launch("aeron:ipc");
+
+        final String pubChannel = "aeron:udp?control-mode=dynamic|control=127.0.0.1:9999";
+        final String channel = "aeron:udp?endpoint=127.0.0.1:0|control=127.0.0.1:9999|tags=1001";
+        try (
+            Publication pub = subscribingClient.addPublication(pubChannel, 1000);
+            Subscription sub1 = subscribingClient.addSubscription(channel, 1000);
+            Subscription sub2 = subscribingClient.addSubscription(channel, 1000))
+        {
+            Tests.awaitConnected(sub1);
+            Tests.awaitConnected(sub2);
+            Tests.awaitConnected(pub);
+        }
+    }
+
+    @Test
+    void shouldRejectSubscriptionsIfUsingTagsAndParametersAndEndpointDoesNotMatchEndpointWithExplicitControl()
+    {
+        watcher.ignoreErrorsMatching((s) -> s.contains("has mismatched endpoint or control"));
+        launch("aeron:ipc");
+
+        final ChannelUriStringBuilder builder = new ChannelUriStringBuilder(
+            "aeron:udp?endpoint=127.0.0.1:0|control=127.0.0.1:9999|tags=1001");
+
+        try (Subscription ignore1 = subscribingClient.addSubscription(builder.build(), 1000))
+        {
+            Objects.requireNonNull(ignore1);
+            assertThrows(
+                RegistrationException.class,
+                () -> subscribingClient.addSubscription(builder.endpoint("127.0.0.1:9999").build(), 1000));
+            assertThrows(
+                RegistrationException.class,
+                () -> subscribingClient.addSubscription(builder.endpoint("127.0.0.2:0").build(), 1000));
+        }
+    }
+
+    @Test
+    void shouldRejectSubscriptionsIfUsingTagsAndParametersAndEndpointDoesNotMatchEndpointWithoutControl()
+    {
+        watcher.ignoreErrorsMatching((s) -> s.contains("has mismatched endpoint or control"));
+        launch("aeron:ipc");
+
+        final ChannelUriStringBuilder builder = new ChannelUriStringBuilder(
+            "aeron:udp?endpoint=127.0.0.1:9999|tags=1001");
+
+        try (Subscription ignore1 = subscribingClient.addSubscription(builder.build(), 1000))
+        {
+            Objects.requireNonNull(ignore1);
+            assertThrows(
+                RegistrationException.class,
+                () -> subscribingClient.addSubscription(builder.endpoint("127.0.0.1:0").build(), 1000));
+            assertThrows(
+                RegistrationException.class,
+                () -> subscribingClient.addSubscription(builder.endpoint("127.0.0.2:9999").build(), 1000));
+        }
+    }
+
+    @Test
+    void shouldRejectSubscriptionsIfUsingTagsAndParametersAndEndpointDoesNotMatchControl()
+    {
+        watcher.ignoreErrorsMatching((s) -> s.contains("has mismatched endpoint or control"));
+        launch("aeron:ipc");
+
+        final ChannelUriStringBuilder builder = new ChannelUriStringBuilder(
+            "aeron:udp?endpoint=127.0.0.1:0|control=127.0.0.1:9999|tags=1001");
+
+        try (Subscription ignore1 = subscribingClient.addSubscription(builder.build(), 1000))
+        {
+            Objects.requireNonNull(ignore1);
+            assertThrows(
+                RegistrationException.class,
+                () -> subscribingClient.addSubscription(builder.controlEndpoint("127.0.0.1:10000").build(), 1000));
+            assertThrows(
+                RegistrationException.class,
+                () -> subscribingClient.addSubscription(builder.controlEndpoint("127.0.0.2:9999").build(), 1000));
+        }
+    }
+
+    @Test
+    void shouldRejectSubscriptionsIfUsingTagsAndParametersAndEndpointDoesNotMatchSocketReceiveBufferLength()
+    {
+        watcher.ignoreErrorsMatching((s) -> true);
+        launch("aeron:ipc");
+
+        final ChannelUriStringBuilder builder = new ChannelUriStringBuilder(
+            "aeron:udp?endpoint=127.0.0.1:0|control=127.0.0.1:9999|so-rcvbuf=128K|tags=1001");
+
+        try (Subscription ignore1 = subscribingClient.addSubscription(builder.build(), 1000))
+        {
+            Objects.requireNonNull(ignore1);
+            assertThrows(
+                RegistrationException.class,
+                () -> subscribingClient.addSubscription(builder.socketRcvbufLength(64 * 1024).build(), 1000));
+        }
+    }
+
+    @Test
+    void shouldAllowPublicationsIfUsingTagsAndParametersAndAllMatch()
+    {
+        launch("aeron:ipc");
+
+        final String channel = "aeron:udp?endpoint=127.0.0.1:9999|control=127.0.0.1:0|tags=1001";
+        try (
+            Publication ignore1 = subscribingClient.addPublication(channel, 1000);
+            Publication ignore2 = subscribingClient.addPublication(channel, 1000))
+        {
+            Objects.requireNonNull(ignore1);
+            Objects.requireNonNull(ignore2);
+        }
+    }
+
+    @Test
+    void shouldRejectPublicationsIfUsingTagsAndParametersAndEndpointDoesNotMatchEndpointWithExplicitControl()
+    {
+        watcher.ignoreErrorsMatching((s) -> s.contains("has mismatched endpoint or control"));
+        launch("aeron:ipc");
+
+        final ChannelUriStringBuilder builder = new ChannelUriStringBuilder(
+            "aeron:udp?endpoint=127.0.0.1:10000|control=127.0.0.1:0|tags=1001");
+
+        try (Publication ignore1 = subscribingClient.addPublication(builder.build(), 1000))
+        {
+            Objects.requireNonNull(ignore1);
+            assertThrows(
+                RegistrationException.class,
+                () -> subscribingClient.addPublication(builder.endpoint("127.0.0.1:9999").build(), 1000));
+            assertThrows(
+                RegistrationException.class,
+                () -> subscribingClient.addPublication(builder.endpoint("127.0.0.2:10000").build(), 1000));
+        }
+    }
+
+    @Test
+    void shouldRejectPublicationsIfUsingTagsAndParametersAndEndpointDoesNotMatchEndpointWithoutControl()
+    {
+        watcher.ignoreErrorsMatching((s) -> s.contains("has mismatched endpoint or control"));
+        launch("aeron:ipc");
+
+        final ChannelUriStringBuilder builder = new ChannelUriStringBuilder(
+            "aeron:udp?endpoint=127.0.0.1:10000|tags=1001");
+
+        try (Subscription ignore1 = subscribingClient.addSubscription(builder.build(), 1000))
+        {
+            Objects.requireNonNull(ignore1);
+            assertThrows(
+                RegistrationException.class,
+                () -> subscribingClient.addSubscription(builder.endpoint("127.0.0.1:9999").build(), 1000));
+            assertThrows(
+                RegistrationException.class,
+                () -> subscribingClient.addSubscription(builder.endpoint("127.0.0.2:10000").build(), 1000));
+        }
+    }
+
+    @Test
+    void shouldRejectPublicationsIfUsingTagsAndParametersAndEndpointDoesNotMatchControl()
+    {
+        watcher.ignoreErrorsMatching((s) -> s.contains("has mismatched endpoint or control"));
+        launch("aeron:ipc");
+
+        final ChannelUriStringBuilder builder = new ChannelUriStringBuilder(
+            "aeron:udp?endpoint=127.0.0.1:10000|control=127.0.0.1:0|tags=1001");
+
+        try (Publication ignore1 = subscribingClient.addPublication(builder.build(), 1000))
+        {
+            Objects.requireNonNull(ignore1);
+            assertThrows(
+                RegistrationException.class,
+                () -> subscribingClient.addPublication(builder.controlEndpoint("127.0.0.1:10000").build(), 1000));
+            assertThrows(
+                RegistrationException.class,
+                () -> subscribingClient.addPublication(builder.controlEndpoint("127.0.0.2:0").build(), 1000));
+        }
+    }
+
+    @Test
+    void shouldRejectPublicationsIfUsingTagsAndParametersAndMtuDoesNotMatch()
+    {
+        watcher.ignoreErrorsMatching((s) -> true);
+        launch("aeron:ipc");
+
+        final ChannelUriStringBuilder builder = new ChannelUriStringBuilder(
+            "aeron:udp?endpoint=127.0.0.1:10000|control=127.0.0.1:0|mtu=1408|tags=1001");
+
+        try (Publication ignore1 = subscribingClient.addPublication(builder.build(), 1000))
+        {
+            Objects.requireNonNull(ignore1);
+            assertThrows(
+                RegistrationException.class,
+                () -> subscribingClient.addPublication(builder.mtu(8192).build(), 1000));
+        }
+    }
+
+    @ParameterizedTest
+    @MethodSource("fragmentAssemblers")
+    @SuppressWarnings("MethodLength")
+    void shouldReturnCompleteHeaderForAssembledMessages(final Class<?> assemblerClass)
+        throws ReflectiveOperationException
+    {
+        final ArrayList<ExpectedFragment> messages = new ArrayList<>();
+        final MutableInteger messageIndex = new MutableInteger();
+        final FragmentHandler rawFragmentHandler =
+            (buffer, offset, length, header) -> verifyFragment(buffer, offset, length, header, messageIndex, messages);
+        final FragmentHandler fragmentAssembler;
+        final ControlledFragmentHandler controlledFragmentAssembler;
+        if (FragmentHandler.class.isAssignableFrom(assemblerClass))
+        {
+            fragmentAssembler = (FragmentHandler)assemblerClass.getConstructor(FragmentHandler.class)
+                .newInstance(rawFragmentHandler);
+            controlledFragmentAssembler = null;
+        }
+        else
+        {
+            final ControlledFragmentHandler delegate = (buffer, offset, length, header) ->
+            {
+                rawFragmentHandler.onFragment(buffer, offset, length, header);
+                return ControlledFragmentHandler.Action.COMMIT;
+            };
+            controlledFragmentAssembler =
+                (ControlledFragmentHandler)assemblerClass.getConstructor(ControlledFragmentHandler.class)
+                    .newInstance(delegate);
+            fragmentAssembler = null;
+        }
+
+        final int mtu = 2048;
+        final int maxPayloadLength = mtu - HEADER_LENGTH;
+        final int termLength = 64 * 1024;
+        final int paddingLength = 1376;
+        final int termOffset = termLength - paddingLength;
+        final int initialTermId = 5;
+        final int termId = 13;
+        final long initialPosition = termLength * (termId - initialTermId) + termOffset;
+        final UnsafeBuffer data = new UnsafeBuffer(new byte[maxPayloadLength * 3 + 317]);
+        ThreadLocalRandom.current().nextBytes(data.byteArray());
+        launch("aeron:ipc?mtu=" + mtu + "|term-length=64K|init-term-id=" + initialTermId +
+            "|term-id=" + termId + "|term-offset=" + termOffset);
+
+        try (Subscription unfragmentedSubscription =
+            subscribingClient.addSubscription(subscription.channel(), STREAM_ID))
+        {
+            Tests.awaitConnected(publication);
+            Tests.awaitConnected(subscription);
+            Tests.awaitConnected(unfragmentedSubscription);
+
+            final BufferClaim bufferClaim = new BufferClaim();
+            final int firstMessageLength = 100;
+            while (publication.tryClaim(firstMessageLength, bufferClaim) < 0)
+            {
+                Tests.yield();
+            }
+            final int headerType = HDR_TYPE_RSP_SETUP;
+            final byte expectedFlags = (byte)(BEGIN_END_AND_EOS_FLAGS | 0xA);
+            final long reservedValue = 13131313139871L;
+            bufferClaim.headerType(headerType);
+            bufferClaim.flags(expectedFlags);
+            bufferClaim.reservedValue(reservedValue);
+            bufferClaim.buffer().putBytes(bufferClaim.offset(), data, 0, firstMessageLength);
+            bufferClaim.commit();
+
+            final long secondReservedValue = -4239462982749823794L;
+            final MutableLong fragmentedReservedValue = new MutableLong(secondReservedValue);
+            final ReservedValueSupplier reservedValueSupplier =
+                (tb, to, fl) -> fragmentedReservedValue.getAndAdd(reservedValue);
+            while (publication.offer(data, 0, data.capacity(), reservedValueSupplier) < 0)
+            {
+                Tests.yield();
+            }
+            final int fragmentedMessageLength = computeFragmentedFrameLength(data.capacity(), maxPayloadLength);
+            final int frameLength = HEADER_LENGTH + data.capacity();
+            final int position1 = ((termId + 1 - initialTermId) * termLength) + fragmentedMessageLength;
+
+            long position2;
+            while ((position2 = publication.tryClaim(maxPayloadLength, bufferClaim)) < 0)
+            {
+                Tests.yield();
+            }
+            bufferClaim.headerType(HDR_TYPE_SM);
+            bufferClaim.flags((byte)0xFF);
+            bufferClaim.reservedValue(42);
+            bufferClaim.buffer().putBytes(bufferClaim.offset(), data, 0, maxPayloadLength);
+            bufferClaim.commit();
+
+            messageIndex.set(0);
+            messages.clear();
+            final Image fragmentedImage = subscription.imageAtIndex(0);
+            messages.add(new ExpectedFragment(
+                fragmentedImage,
+                firstMessageLength + HEADER_LENGTH,
+                CURRENT_VERSION,
+                expectedFlags,
+                (short)headerType,
+                termOffset,
+                publication.sessionId(),
+                STREAM_ID,
+                termId,
+                reservedValue,
+                initialTermId,
+                publication.positionBitsToShift(),
+                BitUtil.align(initialPosition + firstMessageLength + HEADER_LENGTH, FRAME_ALIGNMENT),
+                data,
+                0,
+                firstMessageLength));
+            messages.add(new ExpectedFragment(
+                fragmentedImage,
+                frameLength,
+                CURRENT_VERSION,
+                (byte)BEGIN_AND_END_FLAGS,
+                (short)HDR_TYPE_DATA,
+                0,
+                publication.sessionId(),
+                STREAM_ID,
+                termId + 1,
+                secondReservedValue,
+                initialTermId,
+                publication.positionBitsToShift(),
+                position1,
+                data,
+                0,
+                data.capacity()));
+            messages.add(new ExpectedFragment(
+                fragmentedImage,
+                mtu,
+                CURRENT_VERSION,
+                (byte)0xFF,
+                (short)HDR_TYPE_SM,
+                fragmentedMessageLength,
+                publication.sessionId(),
+                STREAM_ID,
+                termId + 1,
+                42,
+                initialTermId,
+                publication.positionBitsToShift(),
+                position2,
+                data,
+                0,
+                maxPayloadLength));
+
+            if (null != fragmentAssembler)
+            {
+                while (messages.size() != messageIndex.get())
+                {
+                    if (0 == subscription.poll(fragmentAssembler, 10))
+                    {
+                        Tests.yield();
+                    }
+                }
+            }
+            else
+            {
+                while (messages.size() != messageIndex.get())
+                {
+                    if (0 == subscription.controlledPoll(controlledFragmentAssembler, 10))
+                    {
+                        Tests.yield();
+                    }
+                }
+            }
+
+            messageIndex.set(0);
+            messages.clear();
+            final Image unfragmentedImage = unfragmentedSubscription.imageAtIndex(0);
+            messages.add(new ExpectedFragment(
+                unfragmentedImage,
+                firstMessageLength + HEADER_LENGTH,
+                CURRENT_VERSION,
+                expectedFlags,
+                (short)headerType,
+                termOffset,
+                publication.sessionId(),
+                STREAM_ID,
+                termId,
+                reservedValue,
+                initialTermId,
+                publication.positionBitsToShift(),
+                BitUtil.align(initialPosition + firstMessageLength + HEADER_LENGTH, FRAME_ALIGNMENT),
+                data,
+                0,
+                firstMessageLength));
+            messages.add(new ExpectedFragment(
+                unfragmentedImage,
+                mtu,
+                CURRENT_VERSION,
+                BEGIN_FRAG_FLAG,
+                (short)HDR_TYPE_DATA,
+                0,
+                publication.sessionId(),
+                STREAM_ID,
+                termId + 1,
+                secondReservedValue,
+                initialTermId,
+                publication.positionBitsToShift(),
+                (termId + 1 - initialTermId) * termLength + mtu,
+                data,
+                0,
+                maxPayloadLength));
+            messages.add(new ExpectedFragment(
+                unfragmentedImage,
+                mtu,
+                CURRENT_VERSION,
+                (byte)0,
+                (short)HDR_TYPE_DATA,
+                mtu,
+                publication.sessionId(),
+                STREAM_ID,
+                termId + 1,
+                secondReservedValue + reservedValue,
+                initialTermId,
+                publication.positionBitsToShift(),
+                ((termId + 1 - initialTermId) * termLength) + 2 * mtu,
+                data,
+                maxPayloadLength,
+                maxPayloadLength));
+            messages.add(new ExpectedFragment(
+                unfragmentedImage,
+                mtu,
+                CURRENT_VERSION,
+                (byte)0,
+                (short)HDR_TYPE_DATA,
+                2 * mtu,
+                publication.sessionId(),
+                STREAM_ID,
+                termId + 1,
+                secondReservedValue + 2 * reservedValue,
+                initialTermId,
+                publication.positionBitsToShift(),
+                ((termId + 1 - initialTermId) * termLength) + 3 * mtu,
+                data,
+                2 * maxPayloadLength,
+                maxPayloadLength));
+            messages.add(new ExpectedFragment(
+                unfragmentedImage,
+                317 + HEADER_LENGTH,
+                CURRENT_VERSION,
+                END_FRAG_FLAG,
+                (short)HDR_TYPE_DATA,
+                3 * mtu,
+                publication.sessionId(),
+                STREAM_ID,
+                termId + 1,
+                secondReservedValue + 3 * reservedValue,
+                initialTermId,
+                publication.positionBitsToShift(),
+                position1,
+                data,
+                3 * maxPayloadLength,
+                317));
+            messages.add(new ExpectedFragment(
+                unfragmentedImage,
+                mtu,
+                CURRENT_VERSION,
+                (byte)0xFF,
+                (short)HDR_TYPE_SM,
+                fragmentedMessageLength,
+                publication.sessionId(),
+                STREAM_ID,
+                termId + 1,
+                42,
+                initialTermId,
+                publication.positionBitsToShift(),
+                position2,
+                data,
+                0,
+                maxPayloadLength));
+
+            while (messages.size() != messageIndex.get())
+            {
+                if (0 == unfragmentedSubscription.poll(rawFragmentHandler, 1))
+                {
+                    Tests.yield();
+                }
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @MethodSource("channels")
+    void shouldMarkPublicationNotConnectedWhenItLoosesAllSubscribers(final String channel)
+    {
+        TestMediaDriver.notSupportedOnCMediaDriver("publication image state management");
+
+        context.timerIntervalNs(MILLISECONDS.toNanos(1500))
+            .publicationConnectionTimeoutNs(SECONDS.toNanos(2));
+        launch(channel);
+        Tests.awaitConnected(publication);
+        Tests.awaitConnected(subscription);
+
+        final BufferClaim bufferClaim = new BufferClaim();
+        final ThreadLocalRandom random = ThreadLocalRandom.current();
+        while (publication.tryClaim(random.nextInt(1, 1000), bufferClaim) < 0)
+        {
+            Tests.yield();
+        }
+        final int msgLength = bufferClaim.length();
+        bufferClaim.buffer().setMemory(bufferClaim.offset(), msgLength, (byte)random.nextInt());
+        bufferClaim.commit();
+
+        final MutableBoolean received = new MutableBoolean();
+        final FragmentHandler fragmentHandler = (buffer, offset, length, header) ->
+        {
+            received.set(true);
+            assertEquals(msgLength, length);
+        };
+        while (0 == subscription.poll(fragmentHandler, 1))
+        {
+            Tests.yield();
+        }
+        assertTrue(received.get());
+
+        subscription.close();
+
+        final long startNs = System.nanoTime();
+        Tests.await(() -> !publication.isConnected());
+        final long durationNs = System.nanoTime() - startNs;
+        assertThat(durationNs, lessThan(driver.context().timerIntervalNs() / 2));
+    }
+
+    private static void verifyFragment(
+        final DirectBuffer buffer,
+        final int offset,
+        final int length,
+        final Header header,
+        final MutableInteger messageIndex,
+        final ArrayList<ExpectedFragment> messages)
+    {
+        final int index = messageIndex.getAndIncrement();
+        final Supplier<String> errorMsg = () -> "index=" + index;
+        final ExpectedFragment expectedFragment = messages.get(index);
+        assertSame(expectedFragment.image, header.context(), errorMsg);
+        assertEquals(expectedFragment.frameLength, header.frameLength(), errorMsg);
+        assertEquals(
+            expectedFragment.version,
+            header.buffer().getByte(header.offset() + VERSION_FIELD_OFFSET),
+            errorMsg);
+        assertEquals(expectedFragment.flags, header.flags(), errorMsg);
+        assertEquals(expectedFragment.type, (short)header.type(), errorMsg);
+        assertEquals(expectedFragment.termOffset, header.termOffset(), errorMsg);
+        assertEquals(expectedFragment.sessionId, header.sessionId(), errorMsg);
+        assertEquals(expectedFragment.streamId, header.streamId(), errorMsg);
+        assertEquals(expectedFragment.termId, header.termId(), errorMsg);
+        assertEquals(expectedFragment.reservedValue, header.reservedValue(), errorMsg);
+        assertEquals(expectedFragment.initialTermId, header.initialTermId(), errorMsg);
+        assertEquals(expectedFragment.positionBitsToShift, header.positionBitsToShift(), errorMsg);
+        assertEquals(expectedFragment.position, header.position(), errorMsg);
+        assertEquals(expectedFragment.payload.length, length, errorMsg);
+        for (int i = 0; i < length; i++)
+        {
+            assertEquals(expectedFragment.payload[i], buffer.getByte(offset + i), errorMsg);
         }
     }
 
@@ -711,6 +1295,68 @@ class PubAndSubTest
             {
                 Tests.yield();
             }
+        }
+    }
+
+    private static List<Class<?>> fragmentAssemblers()
+    {
+        return Arrays.asList(
+            FragmentAssembler.class,
+            ImageFragmentAssembler.class,
+            ControlledFragmentAssembler.class,
+            ImageControlledFragmentAssembler.class);
+    }
+
+    private static final class ExpectedFragment
+    {
+        private final Image image;
+        final int frameLength;
+        final byte version;
+        final byte flags;
+        final short type;
+        final int termOffset;
+        final int sessionId;
+        final int streamId;
+        final int termId;
+        final long reservedValue;
+        final int initialTermId;
+        final int positionBitsToShift;
+        final long position;
+        final byte[] payload;
+
+        private ExpectedFragment(
+            final Image image,
+            final int frameLength,
+            final byte version,
+            final byte flags,
+            final short type,
+            final int termOffset,
+            final int sessionId,
+            final int streamId,
+            final int termId,
+            final long reservedValue,
+            final int initialTermId,
+            final int positionBitsToShift,
+            final long position,
+            final UnsafeBuffer payload,
+            final int payloadOffset,
+            final int payloadLength)
+        {
+            this.image = image;
+            this.frameLength = frameLength;
+            this.version = version;
+            this.flags = flags;
+            this.type = type;
+            this.termOffset = termOffset;
+            this.sessionId = sessionId;
+            this.streamId = streamId;
+            this.termId = termId;
+            this.reservedValue = reservedValue;
+            this.initialTermId = initialTermId;
+            this.positionBitsToShift = positionBitsToShift;
+            this.position = position;
+            this.payload = new byte[payloadLength];
+            payload.getBytes(payloadOffset, this.payload);
         }
     }
 }

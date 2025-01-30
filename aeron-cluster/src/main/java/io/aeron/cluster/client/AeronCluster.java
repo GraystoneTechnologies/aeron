@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,8 @@ package io.aeron.cluster.client;
 
 import io.aeron.*;
 import io.aeron.cluster.codecs.*;
+import io.aeron.config.Config;
+import io.aeron.config.DefaultType;
 import io.aeron.exceptions.*;
 import io.aeron.logbuffer.BufferClaim;
 import io.aeron.logbuffer.ControlledFragmentHandler;
@@ -24,16 +26,17 @@ import io.aeron.logbuffer.Header;
 import io.aeron.security.AuthenticationException;
 import io.aeron.security.CredentialsSupplier;
 import io.aeron.security.NullCredentialsSupplier;
+import io.aeron.version.Versioned;
 import org.agrona.*;
 import org.agrona.collections.ArrayUtil;
 import org.agrona.collections.Int2ObjectHashMap;
 import org.agrona.concurrent.*;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 
 import static io.aeron.Aeron.NULL_VALUE;
-import static java.util.concurrent.atomic.AtomicIntegerFieldUpdater.newUpdater;
 import static org.agrona.SystemUtil.getDurationInNanos;
 
 /**
@@ -44,6 +47,7 @@ import static org.agrona.SystemUtil.getDurationInNanos;
  * <p>
  * <b>Note:</b> Instances of this class are not threadsafe.
  */
+@Versioned
 public final class AeronCluster implements AutoCloseable
 {
     /**
@@ -80,6 +84,8 @@ public final class AeronCluster implements AutoCloseable
     private final EgressListener egressListener;
     private final ControlledFragmentAssembler controlledFragmentAssembler;
     private final ControlledEgressListener controlledEgressListener;
+    private EgressListenerExtension egressListenerExtension;
+    private ControlledEgressListenerExtension controlledEgressListenerExtension;
     private Int2ObjectHashMap<MemberIngress> endpointByIdMap;
 
     /**
@@ -113,7 +119,7 @@ public final class AeronCluster implements AutoCloseable
             final IdleStrategy idleStrategy = ctx.idleStrategy();
 
             AeronCluster aeronCluster;
-            int step = asyncConnect.step();
+            AsyncConnect.State state = asyncConnect.state();
             while (null == (aeronCluster = asyncConnect.poll()))
             {
                 if (null != aeronClientInvoker)
@@ -126,9 +132,9 @@ public final class AeronCluster implements AutoCloseable
                     agentInvoker.invoke();
                 }
 
-                if (step != asyncConnect.step())
+                if (state != asyncConnect.state())
                 {
-                    step = asyncConnect.step();
+                    state = asyncConnect.state();
                     idleStrategy.reset();
                 }
                 else
@@ -224,6 +230,26 @@ public final class AeronCluster implements AutoCloseable
             .wrapAndApplyHeader(headerBuffer, 0, messageHeaderEncoder)
             .clusterSessionId(clusterSessionId)
             .leadershipTermId(leadershipTermId);
+    }
+
+    /**
+     * An EgressListener for extension schemas.
+     *
+     * @param listenerExtension listener extension.
+     */
+    public void egressListenerExtension(final EgressListenerExtension listenerExtension)
+    {
+        this.egressListenerExtension = listenerExtension;
+    }
+
+    /**
+     * A ControlledEgressListener for extension schemas.
+     *
+     * @param listenerExtension listener extension.
+     */
+    public void controlledEgressListenerExtension(final ControlledEgressListenerExtension listenerExtension)
+    {
+        this.controlledEgressListenerExtension = listenerExtension;
     }
 
     /**
@@ -416,8 +442,8 @@ public final class AeronCluster implements AutoCloseable
 
         while (true)
         {
-            final long result = publication.tryClaim(length, bufferClaim);
-            if (result > 0)
+            final long position = publication.tryClaim(length, bufferClaim);
+            if (position > 0)
             {
                 sessionKeepAliveEncoder
                     .wrapAndApplyHeader(bufferClaim.buffer(), bufferClaim.offset(), messageHeaderEncoder)
@@ -429,9 +455,9 @@ public final class AeronCluster implements AutoCloseable
                 return true;
             }
 
-            if (result == Publication.MAX_POSITION_EXCEEDED)
+            if (position == Publication.MAX_POSITION_EXCEEDED)
             {
-                throw new ClusterException("max position exceeded");
+                throw new ClusterException("max position exceeded: term-length=" + publication.termBufferLength());
             }
 
             if (--attempts <= 0)
@@ -466,8 +492,8 @@ public final class AeronCluster implements AutoCloseable
 
         while (true)
         {
-            final long result = publication.tryClaim(length, bufferClaim);
-            if (result > 0)
+            final long position = publication.tryClaim(length, bufferClaim);
+            if (position > 0)
             {
                 adminRequestEncoder
                     .wrapAndApplyHeader(bufferClaim.buffer(), bufferClaim.offset(), messageHeaderEncoder)
@@ -482,14 +508,14 @@ public final class AeronCluster implements AutoCloseable
                 return true;
             }
 
-            if (result == Publication.CLOSED)
+            if (position == Publication.CLOSED)
             {
                 throw new ClusterException("ingress publication is closed");
             }
 
-            if (result == Publication.MAX_POSITION_EXCEEDED)
+            if (position == Publication.MAX_POSITION_EXCEEDED)
             {
-                throw new ClusterException("max position exceeded");
+                throw new ClusterException("max position exceeded: term-length=" + publication.termBufferLength());
             }
 
             if (--attempts <= 0)
@@ -601,7 +627,7 @@ public final class AeronCluster implements AutoCloseable
         controlledEgressListener.onNewLeader(clusterSessionId, leadershipTermId, leaderMemberId, ingressEndpoints);
     }
 
-    static Int2ObjectHashMap<MemberIngress> parseIngressEndpoints(final String endpoints)
+    static Int2ObjectHashMap<MemberIngress> parseIngressEndpoints(final Context ctx, final String endpoints)
     {
         final Int2ObjectHashMap<MemberIngress> endpointByIdMap = new Int2ObjectHashMap<>();
 
@@ -616,7 +642,7 @@ public final class AeronCluster implements AutoCloseable
                 }
 
                 final int memberId = AsciiEncoding.parseIntAscii(endpoint, 0, i);
-                endpointByIdMap.put(memberId, new MemberIngress(memberId, endpoint.substring(i + 1)));
+                endpointByIdMap.put(memberId, new MemberIngress(ctx, memberId, endpoint.substring(i + 1)));
             }
         }
 
@@ -663,7 +689,7 @@ public final class AeronCluster implements AutoCloseable
     {
         CloseHelper.closeAll(endpointByIdMap.values());
 
-        final Int2ObjectHashMap<MemberIngress> map = parseIngressEndpoints(ingressEndpoints);
+        final Int2ObjectHashMap<MemberIngress> map = parseIngressEndpoints(ctx, ingressEndpoints);
         final MemberIngress newLeader = map.get(leaderMemberId);
         final ChannelUri channelUri = ChannelUri.parse(ctx.ingressChannel());
 
@@ -682,103 +708,139 @@ public final class AeronCluster implements AutoCloseable
     {
         messageHeaderDecoder.wrap(buffer, offset);
 
+        final int schemaId = messageHeaderDecoder.schemaId();
         final int templateId = messageHeaderDecoder.templateId();
-        if (SessionMessageHeaderDecoder.TEMPLATE_ID == templateId)
-        {
-            sessionMessageHeaderDecoder.wrap(
-                buffer,
-                offset + MessageHeaderDecoder.ENCODED_LENGTH,
-                messageHeaderDecoder.blockLength(),
-                messageHeaderDecoder.version());
 
-            final long sessionId = sessionMessageHeaderDecoder.clusterSessionId();
-            if (sessionId == clusterSessionId)
+        if (schemaId != MessageHeaderDecoder.SCHEMA_ID)
+        {
+            if (egressListenerExtension != null)
             {
-                egressListener.onMessage(
-                    sessionId,
-                    sessionMessageHeaderDecoder.timestamp(),
+                egressListenerExtension.onExtensionMessage(
+                    messageHeaderDecoder.blockLength(),
+                    templateId,
+                    schemaId,
+                    messageHeaderDecoder.version(),
                     buffer,
-                    offset + SESSION_HEADER_LENGTH,
-                    length - SESSION_HEADER_LENGTH,
-                    header);
+                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
+                    length - MessageHeaderDecoder.ENCODED_LENGTH);
+            }
+            else
+            {
+                throw new ClusterException(
+                    "expected cluster egress schemaId=" + MessageHeaderDecoder.SCHEMA_ID + " actual=" + schemaId);
             }
         }
-        else if (NewLeaderEventDecoder.TEMPLATE_ID == templateId)
-        {
-            newLeaderEventDecoder.wrap(
-                buffer,
-                offset + MessageHeaderDecoder.ENCODED_LENGTH,
-                messageHeaderDecoder.blockLength(),
-                messageHeaderDecoder.version());
 
-            final long sessionId = newLeaderEventDecoder.clusterSessionId();
-            if (sessionId == clusterSessionId)
-            {
-                egressImage = (Image)header.context();
-                onNewLeader(
-                    sessionId,
-                    newLeaderEventDecoder.leadershipTermId(),
-                    newLeaderEventDecoder.leaderMemberId(),
-                    newLeaderEventDecoder.ingressEndpoints());
-            }
-        }
-        else if (SessionEventDecoder.TEMPLATE_ID == templateId)
+        switch (templateId)
         {
-            sessionEventDecoder.wrap(
-                buffer,
-                offset + MessageHeaderDecoder.ENCODED_LENGTH,
-                messageHeaderDecoder.blockLength(),
-                messageHeaderDecoder.version());
-
-            final long sessionId = sessionEventDecoder.clusterSessionId();
-            if (sessionId == clusterSessionId)
+            case SessionMessageHeaderDecoder.TEMPLATE_ID:
             {
-                final EventCode code = sessionEventDecoder.code();
-                if (EventCode.CLOSED == code)
+                sessionMessageHeaderDecoder.wrap(
+                    buffer,
+                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
+                    messageHeaderDecoder.blockLength(),
+                    messageHeaderDecoder.version());
+
+                final long sessionId = sessionMessageHeaderDecoder.clusterSessionId();
+                if (sessionId == clusterSessionId)
                 {
-                    isClosed = true;
+                    egressListener.onMessage(
+                        sessionId,
+                        sessionMessageHeaderDecoder.timestamp(),
+                        buffer,
+                        offset + SESSION_HEADER_LENGTH,
+                        length - SESSION_HEADER_LENGTH,
+                        header);
                 }
-
-                egressListener.onSessionEvent(
-                    sessionEventDecoder.correlationId(),
-                    sessionId,
-                    sessionEventDecoder.leadershipTermId(),
-                    sessionEventDecoder.leaderMemberId(),
-                    code,
-                    sessionEventDecoder.detail());
+                break;
             }
-        }
-        else if (AdminResponseDecoder.TEMPLATE_ID == templateId)
-        {
-            adminResponseDecoder.wrap(
-                buffer,
-                offset + MessageHeaderDecoder.ENCODED_LENGTH,
-                messageHeaderDecoder.blockLength(),
-                messageHeaderDecoder.version());
 
-            final long sessionId = adminResponseDecoder.clusterSessionId();
-            if (sessionId == clusterSessionId)
+            case SessionEventDecoder.TEMPLATE_ID:
             {
-                final long correlationId = adminResponseDecoder.correlationId();
-                final AdminRequestType requestType = adminResponseDecoder.requestType();
-                final AdminResponseCode responseCode = adminResponseDecoder.responseCode();
-                final String message = adminResponseDecoder.message();
-                final int payloadOffset = adminResponseDecoder.offset() +
-                    AdminResponseDecoder.BLOCK_LENGTH +
-                    AdminResponseDecoder.messageHeaderLength() +
-                    message.length() +
-                    AdminResponseDecoder.payloadHeaderLength();
-                final int payloadLength = adminResponseDecoder.payloadLength();
-                egressListener.onAdminResponse(
-                    sessionId,
-                    correlationId,
-                    requestType,
-                    responseCode,
-                    message,
+                sessionEventDecoder.wrap(
                     buffer,
-                    payloadOffset,
-                    payloadLength);
+                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
+                    messageHeaderDecoder.blockLength(),
+                    messageHeaderDecoder.version());
+
+                final long sessionId = sessionEventDecoder.clusterSessionId();
+                if (sessionId == clusterSessionId)
+                {
+                    final EventCode code = sessionEventDecoder.code();
+                    if (EventCode.CLOSED == code)
+                    {
+                        isClosed = true;
+                    }
+
+                    egressListener.onSessionEvent(
+                        sessionEventDecoder.correlationId(),
+                        sessionId,
+                        sessionEventDecoder.leadershipTermId(),
+                        sessionEventDecoder.leaderMemberId(),
+                        code,
+                        sessionEventDecoder.detail());
+                }
+                break;
             }
+
+            case NewLeaderEventDecoder.TEMPLATE_ID:
+            {
+                newLeaderEventDecoder.wrap(
+                    buffer,
+                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
+                    messageHeaderDecoder.blockLength(),
+                    messageHeaderDecoder.version());
+
+                final long sessionId = newLeaderEventDecoder.clusterSessionId();
+                if (sessionId == clusterSessionId)
+                {
+                    egressImage = (Image)header.context();
+                    onNewLeader(
+                        sessionId,
+                        newLeaderEventDecoder.leadershipTermId(),
+                        newLeaderEventDecoder.leaderMemberId(),
+                        newLeaderEventDecoder.ingressEndpoints());
+                }
+                break;
+            }
+
+            case AdminResponseDecoder.TEMPLATE_ID:
+            {
+                adminResponseDecoder.wrap(
+                    buffer,
+                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
+                    messageHeaderDecoder.blockLength(),
+                    messageHeaderDecoder.version());
+
+                final long sessionId = adminResponseDecoder.clusterSessionId();
+                if (sessionId == clusterSessionId)
+                {
+                    final long correlationId = adminResponseDecoder.correlationId();
+                    final AdminRequestType requestType = adminResponseDecoder.requestType();
+                    final AdminResponseCode responseCode = adminResponseDecoder.responseCode();
+                    final String message = adminResponseDecoder.message();
+                    final int payloadOffset = adminResponseDecoder.offset() +
+                        AdminResponseDecoder.BLOCK_LENGTH +
+                        AdminResponseDecoder.messageHeaderLength() +
+                        message.length() +
+                        AdminResponseDecoder.payloadHeaderLength();
+                    final int payloadLength = adminResponseDecoder.payloadLength();
+
+                    egressListener.onAdminResponse(
+                        sessionId,
+                        correlationId,
+                        requestType,
+                        responseCode,
+                        message,
+                        buffer,
+                        payloadOffset,
+                        payloadLength);
+                }
+                break;
+            }
+
+            default:
+                break;
         }
     }
 
@@ -788,105 +850,141 @@ public final class AeronCluster implements AutoCloseable
     {
         messageHeaderDecoder.wrap(buffer, offset);
 
+        final int schemaId = messageHeaderDecoder.schemaId();
         final int templateId = messageHeaderDecoder.templateId();
-        if (SessionMessageHeaderDecoder.TEMPLATE_ID == templateId)
-        {
-            sessionMessageHeaderDecoder.wrap(
-                buffer,
-                offset + MessageHeaderDecoder.ENCODED_LENGTH,
-                messageHeaderDecoder.blockLength(),
-                messageHeaderDecoder.version());
 
-            final long sessionId = sessionMessageHeaderDecoder.clusterSessionId();
-            if (sessionId == clusterSessionId)
+        if (schemaId != MessageHeaderDecoder.SCHEMA_ID)
+        {
+            if (controlledEgressListenerExtension != null)
             {
-                return controlledEgressListener.onMessage(
-                    sessionId,
-                    sessionMessageHeaderDecoder.timestamp(),
+                return controlledEgressListenerExtension.onExtensionMessage(
+                    messageHeaderDecoder.blockLength(),
+                    templateId,
+                    schemaId,
+                    messageHeaderDecoder.version(),
                     buffer,
-                    offset + SESSION_HEADER_LENGTH,
-                    length - SESSION_HEADER_LENGTH,
-                    header);
+                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
+                    length - MessageHeaderDecoder.ENCODED_LENGTH);
+            }
+            else
+            {
+                throw new ClusterException(
+                    "expected cluster egress schemaId=" + MessageHeaderDecoder.SCHEMA_ID + " actual=" + schemaId);
             }
         }
-        else if (NewLeaderEventDecoder.TEMPLATE_ID == templateId)
+
+        switch (templateId)
         {
-            newLeaderEventDecoder.wrap(
-                buffer,
-                offset + MessageHeaderDecoder.ENCODED_LENGTH,
-                messageHeaderDecoder.blockLength(),
-                messageHeaderDecoder.version());
-
-            final long sessionId = newLeaderEventDecoder.clusterSessionId();
-            if (sessionId == clusterSessionId)
+            case SessionMessageHeaderDecoder.TEMPLATE_ID:
             {
-                egressImage = (Image)header.context();
-                onNewLeader(
-                    sessionId,
-                    newLeaderEventDecoder.leadershipTermId(),
-                    newLeaderEventDecoder.leaderMemberId(),
-                    newLeaderEventDecoder.ingressEndpoints());
+                sessionMessageHeaderDecoder.wrap(
+                    buffer,
+                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
+                    messageHeaderDecoder.blockLength(),
+                    messageHeaderDecoder.version());
 
-                return ControlledFragmentHandler.Action.COMMIT;
-            }
-        }
-        else if (SessionEventDecoder.TEMPLATE_ID == templateId)
-        {
-            sessionEventDecoder.wrap(
-                buffer,
-                offset + MessageHeaderDecoder.ENCODED_LENGTH,
-                messageHeaderDecoder.blockLength(),
-                messageHeaderDecoder.version());
-
-            final long sessionId = sessionEventDecoder.clusterSessionId();
-            if (sessionId == clusterSessionId)
-            {
-                final EventCode code = sessionEventDecoder.code();
-                if (EventCode.CLOSED == code)
+                final long sessionId = sessionMessageHeaderDecoder.clusterSessionId();
+                if (sessionId == clusterSessionId)
                 {
-                    isClosed = true;
+                    return controlledEgressListener.onMessage(
+                        sessionId,
+                        sessionMessageHeaderDecoder.timestamp(),
+                        buffer,
+                        offset + SESSION_HEADER_LENGTH,
+                        length - SESSION_HEADER_LENGTH,
+                        header);
                 }
-
-                controlledEgressListener.onSessionEvent(
-                    sessionEventDecoder.correlationId(),
-                    sessionId,
-                    sessionEventDecoder.leadershipTermId(),
-                    sessionEventDecoder.leaderMemberId(),
-                    code,
-                    sessionEventDecoder.detail());
+                break;
             }
-        }
-        else if (AdminResponseDecoder.TEMPLATE_ID == templateId)
-        {
-            adminResponseDecoder.wrap(
-                buffer,
-                offset + MessageHeaderDecoder.ENCODED_LENGTH,
-                messageHeaderDecoder.blockLength(),
-                messageHeaderDecoder.version());
 
-            final long sessionId = adminResponseDecoder.clusterSessionId();
-            if (sessionId == clusterSessionId)
+            case SessionEventDecoder.TEMPLATE_ID:
             {
-                final long correlationId = adminResponseDecoder.correlationId();
-                final AdminRequestType requestType = adminResponseDecoder.requestType();
-                final AdminResponseCode responseCode = adminResponseDecoder.responseCode();
-                final String message = adminResponseDecoder.message();
-                final int payloadOffset = adminResponseDecoder.offset() +
-                    AdminResponseDecoder.BLOCK_LENGTH +
-                    AdminResponseDecoder.messageHeaderLength() +
-                    message.length() +
-                    AdminResponseDecoder.payloadHeaderLength();
-                final int payloadLength = adminResponseDecoder.payloadLength();
-                controlledEgressListener.onAdminResponse(
-                    sessionId,
-                    correlationId,
-                    requestType,
-                    responseCode,
-                    message,
+                sessionEventDecoder.wrap(
                     buffer,
-                    payloadOffset,
-                    payloadLength);
+                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
+                    messageHeaderDecoder.blockLength(),
+                    messageHeaderDecoder.version());
+
+                final long sessionId = sessionEventDecoder.clusterSessionId();
+                if (sessionId == clusterSessionId)
+                {
+                    final EventCode code = sessionEventDecoder.code();
+                    if (EventCode.CLOSED == code)
+                    {
+                        isClosed = true;
+                    }
+
+                    controlledEgressListener.onSessionEvent(
+                        sessionEventDecoder.correlationId(),
+                        sessionId,
+                        sessionEventDecoder.leadershipTermId(),
+                        sessionEventDecoder.leaderMemberId(),
+                        code,
+                        sessionEventDecoder.detail());
+                }
+                break;
             }
+
+            case NewLeaderEventDecoder.TEMPLATE_ID:
+            {
+                newLeaderEventDecoder.wrap(
+                    buffer,
+                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
+                    messageHeaderDecoder.blockLength(),
+                    messageHeaderDecoder.version());
+
+                final long sessionId = newLeaderEventDecoder.clusterSessionId();
+                if (sessionId == clusterSessionId)
+                {
+                    egressImage = (Image)header.context();
+                    onNewLeader(
+                        sessionId,
+                        newLeaderEventDecoder.leadershipTermId(),
+                        newLeaderEventDecoder.leaderMemberId(),
+                        newLeaderEventDecoder.ingressEndpoints());
+
+                    return ControlledFragmentHandler.Action.COMMIT;
+                }
+                break;
+            }
+
+            case AdminResponseDecoder.TEMPLATE_ID:
+            {
+                adminResponseDecoder.wrap(
+                    buffer,
+                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
+                    messageHeaderDecoder.blockLength(),
+                    messageHeaderDecoder.version());
+
+                final long sessionId = adminResponseDecoder.clusterSessionId();
+                if (sessionId == clusterSessionId)
+                {
+                    final long correlationId = adminResponseDecoder.correlationId();
+                    final AdminRequestType requestType = adminResponseDecoder.requestType();
+                    final AdminResponseCode responseCode = adminResponseDecoder.responseCode();
+                    final String message = adminResponseDecoder.message();
+                    final int payloadOffset = adminResponseDecoder.offset() +
+                        AdminResponseDecoder.BLOCK_LENGTH +
+                        AdminResponseDecoder.messageHeaderLength() +
+                        message.length() +
+                        AdminResponseDecoder.payloadHeaderLength();
+                    final int payloadLength = adminResponseDecoder.payloadLength();
+
+                    controlledEgressListener.onAdminResponse(
+                        sessionId,
+                        correlationId,
+                        requestType,
+                        responseCode,
+                        message,
+                        buffer,
+                        payloadOffset,
+                        payloadLength);
+                }
+                break;
+            }
+
+            default:
+                break;
         }
 
         return ControlledFragmentHandler.Action.CONTINUE;
@@ -901,8 +999,8 @@ public final class AeronCluster implements AutoCloseable
 
         while (true)
         {
-            final long result = publication.tryClaim(length, bufferClaim);
-            if (result > 0)
+            final long position = publication.tryClaim(length, bufferClaim);
+            if (position > 0)
             {
                 sessionCloseRequestEncoder
                     .wrapAndApplyHeader(bufferClaim.buffer(), bufferClaim.offset(), messageHeaderEncoder)
@@ -939,6 +1037,7 @@ public final class AeronCluster implements AutoCloseable
     /**
      * Configuration options for cluster client.
      */
+    @Config(existsInC = false)
     public static final class Configuration
     {
         /**
@@ -970,11 +1069,13 @@ public final class AeronCluster implements AutoCloseable
         /**
          * Timeout when waiting on a message to be sent or received.
          */
+        @Config
         public static final String MESSAGE_TIMEOUT_PROP_NAME = "aeron.cluster.message.timeout";
 
         /**
          * Default timeout when waiting on a message to be sent or received.
          */
+        @Config(defaultType = DefaultType.LONG, defaultLong = 5L * 1000 * 1000 * 1000)
         public static final long MESSAGE_TIMEOUT_DEFAULT_NS = TimeUnit.SECONDS.toNanos(5);
 
         /**
@@ -986,11 +1087,13 @@ public final class AeronCluster implements AutoCloseable
          * <p>
          * Each member of the list will be substituted for the endpoint in the {@link #INGRESS_CHANNEL_PROP_NAME} value.
          */
+        @Config
         public static final String INGRESS_ENDPOINTS_PROP_NAME = "aeron.cluster.ingress.endpoints";
 
         /**
          * Default comma separated list of cluster ingress endpoints.
          */
+        @Config(defaultType = DefaultType.STRING, defaultString = "")
         public static final String INGRESS_ENDPOINTS_DEFAULT = null;
 
         /**
@@ -998,21 +1101,25 @@ public final class AeronCluster implements AutoCloseable
          * be required and the {@link #INGRESS_ENDPOINTS_PROP_NAME} is used to substitute the endpoints from the
          * {@link #INGRESS_ENDPOINTS_PROP_NAME} list.
          */
+        @Config
         public static final String INGRESS_CHANNEL_PROP_NAME = "aeron.cluster.ingress.channel";
 
         /**
          * Channel for sending messages to a cluster.
          */
+        @Config(defaultType = DefaultType.STRING, defaultString = "")
         public static final String INGRESS_CHANNEL_DEFAULT = null;
 
         /**
          * Stream id within a channel for sending messages to a cluster.
          */
+        @Config
         public static final String INGRESS_STREAM_ID_PROP_NAME = "aeron.cluster.ingress.stream.id";
 
         /**
          * Default stream id within a channel for sending messages to a cluster.
          */
+        @Config
         public static final int INGRESS_STREAM_ID_DEFAULT = 101;
 
         /**
@@ -1029,21 +1136,25 @@ public final class AeronCluster implements AutoCloseable
          *     <a href="https://en.wikipedia.org/wiki/Ephemeral_port">ephemeral port range</a>.</li>
          * </ul>
          */
+        @Config
         public static final String EGRESS_CHANNEL_PROP_NAME = "aeron.cluster.egress.channel";
 
         /**
          * Channel for receiving response messages from a cluster.
          */
-        public static final String EGRESS_CHANNEL_DEFAULT = "aeron:udp?endpoint=localhost:0";
+        @Config(defaultType = DefaultType.STRING, defaultString = "")
+        public static final String EGRESS_CHANNEL_DEFAULT = null;
 
         /**
          * Stream id within a channel for receiving messages from a cluster.
          */
+        @Config
         public static final String EGRESS_STREAM_ID_PROP_NAME = "aeron.cluster.egress.stream.id";
 
         /**
          * Default stream id within a channel for receiving messages from a cluster.
          */
+        @Config
         public static final int EGRESS_STREAM_ID_DEFAULT = 102;
 
         /**
@@ -1113,13 +1224,20 @@ public final class AeronCluster implements AutoCloseable
      */
     public static final class Context implements Cloneable
     {
-        /**
-         * Using an integer because there is no support for boolean. 1 is concluded, 0 is not concluded.
-         */
-        private static final AtomicIntegerFieldUpdater<Context> IS_CONCLUDED_UPDATER = newUpdater(
-            Context.class, "isConcluded");
-        private volatile int isConcluded;
+        private static final VarHandle IS_CONCLUDED_VH;
+        static
+        {
+            try
+            {
+                IS_CONCLUDED_VH = MethodHandles.lookup().findVarHandle(Context.class, "isConcluded", boolean.class);
+            }
+            catch (final ReflectiveOperationException ex)
+            {
+                throw new ExceptionInInitializerError(ex);
+            }
+        }
 
+        private volatile boolean isConcluded;
         private long messageTimeoutNs = Configuration.messageTimeoutNs();
         private String ingressEndpoints = Configuration.ingressEndpoints();
         private String ingressChannel = Configuration.ingressChannel();
@@ -1160,7 +1278,7 @@ public final class AeronCluster implements AutoCloseable
          */
         public void conclude()
         {
-            if (0 != IS_CONCLUDED_UPDATER.getAndSet(this, 1))
+            if ((boolean)IS_CONCLUDED_VH.getAndSet(this, true))
             {
                 throw new ConcurrentConcludeException();
             }
@@ -1218,6 +1336,21 @@ public final class AeronCluster implements AutoCloseable
                         "AeronCluster.Context ingressEndpoints must be null when using IPC ingress");
                 }
             }
+
+            if (Strings.isEmpty(egressChannel))
+            {
+                throw new ConfigurationException("egressChannel must be specified");
+            }
+        }
+
+        /**
+         * Has the context had the {@link #conclude()} method called.
+         *
+         * @return true of the {@link #conclude()} method has been called.
+         */
+        public boolean isConcluded()
+        {
+            return isConcluded;
         }
 
         /**
@@ -1239,6 +1372,7 @@ public final class AeronCluster implements AutoCloseable
          * @return the message timeout in nanoseconds to wait for sending or receiving a message.
          * @see Configuration#MESSAGE_TIMEOUT_PROP_NAME
          */
+        @Config
         public long messageTimeoutNs()
         {
             return CommonContext.checkDebugTimeout(messageTimeoutNs, TimeUnit.NANOSECONDS);
@@ -1267,6 +1401,7 @@ public final class AeronCluster implements AutoCloseable
          * @return member endpoints of the cluster which are all candidates to be leader.
          * @see Configuration#INGRESS_ENDPOINTS_PROP_NAME
          */
+        @Config
         public String ingressEndpoints()
         {
             return ingressEndpoints;
@@ -1298,6 +1433,7 @@ public final class AeronCluster implements AutoCloseable
          * @return the channel parameter for the ingress channel.
          * @see Configuration#INGRESS_CHANNEL_PROP_NAME
          */
+        @Config
         public String ingressChannel()
         {
             return ingressChannel;
@@ -1322,6 +1458,7 @@ public final class AeronCluster implements AutoCloseable
          * @return the stream id for the ingress channel.
          * @see Configuration#INGRESS_STREAM_ID_PROP_NAME
          */
+        @Config
         public int ingressStreamId()
         {
             return ingressStreamId;
@@ -1346,6 +1483,7 @@ public final class AeronCluster implements AutoCloseable
          * @return the channel parameter for the egress channel.
          * @see Configuration#EGRESS_CHANNEL_PROP_NAME
          */
+        @Config
         public String egressChannel()
         {
             return egressChannel;
@@ -1370,6 +1508,7 @@ public final class AeronCluster implements AutoCloseable
          * @return the stream id for the egress channel.
          * @see Configuration#EGRESS_STREAM_ID_PROP_NAME
          */
+        @Config
         public int egressStreamId()
         {
             return egressStreamId;
@@ -1661,7 +1800,7 @@ public final class AeronCluster implements AutoCloseable
         {
             return "AeronCluster.Context" +
                 "\n{" +
-                "\n    isConcluded=" + (1 == isConcluded) +
+                "\n    isConcluded=" + isConcluded() +
                 "\n    ownsAeronClient=" + ownsAeronClient +
                 "\n    aeronDirectoryName='" + aeronDirectoryName + '\'' +
                 "\n    aeron=" + aeron +
@@ -1689,13 +1828,66 @@ public final class AeronCluster implements AutoCloseable
      */
     public static final class AsyncConnect implements AutoCloseable
     {
+        /**
+         * Represents connection state.
+         */
+        public enum State
+        {
+            /**
+             * Create egress subscription.
+             */
+            CREATE_EGRESS_SUBSCRIPTION(-1),
+            /**
+             * Create ingress publication.
+             */
+            CREATE_INGRESS_PUBLICATIONS(0),
+            /**
+             * Await ingress publication connected.
+             */
+            AWAIT_PUBLICATION_CONNECTED(1),
+            /**
+             * Send message to Cluster.
+             */
+            SEND_MESSAGE(2),
+            /**
+             * Poll for Cluster response.
+             */
+            POLL_RESPONSE(3),
+            /**
+             * Initialize internal state.
+             */
+            CONCLUDE_CONNECT(4),
+            /**
+             * Connection established.
+             */
+            DONE(5);
+
+            private static final State[] STATES = values();
+
+            final int step;
+
+            State(final int step)
+            {
+                this.step = step;
+            }
+
+            static State fromStep(final int step)
+            {
+                if (step < CREATE_EGRESS_SUBSCRIPTION.step || step > DONE.step)
+                {
+                    return null;
+                }
+                return STATES[step + 1];
+            }
+        }
+
         private Image egressImage;
         private final long deadlineNs;
         private long correlationId = NULL_VALUE;
         private long clusterSessionId;
         private long leadershipTermId;
         private int leaderMemberId;
-        private int step = -1;
+        private State state = State.CREATE_EGRESS_SUBSCRIPTION;
         private int messageLength = 0;
 
         private final Context ctx;
@@ -1714,7 +1906,7 @@ public final class AeronCluster implements AutoCloseable
         {
             this.ctx = ctx;
 
-            memberByIdMap = parseIngressEndpoints(ctx.ingressEndpoints());
+            memberByIdMap = parseIngressEndpoints(ctx, ctx.ingressEndpoints());
             nanoClock = ctx.aeron().context().nanoClock();
             this.deadlineNs = deadlineNs;
         }
@@ -1724,13 +1916,28 @@ public final class AeronCluster implements AutoCloseable
          */
         public void close()
         {
-            if (5 != step)
+            if (State.DONE != state)
             {
                 final ErrorHandler errorHandler = ctx.errorHandler();
-                CloseHelper.close(errorHandler, ingressPublication);
-                CloseHelper.close(errorHandler, egressSubscription);
-                CloseHelper.closeAll(errorHandler, memberByIdMap.values());
+                if (null != ingressPublication)
+                {
+                    CloseHelper.close(errorHandler, ingressPublication);
+                }
+                else if (NULL_VALUE != ingressRegistrationId)
+                {
+                    ctx.aeron().asyncRemovePublication(ingressRegistrationId);
+                }
 
+                if (null != egressSubscription)
+                {
+                    CloseHelper.close(errorHandler, egressSubscription);
+                }
+                else if (NULL_VALUE != egressRegistrationId)
+                {
+                    ctx.aeron().asyncRemoveSubscription(egressRegistrationId);
+                }
+
+                CloseHelper.closeAll(errorHandler, memberByIdMap.values());
                 ctx.close();
             }
         }
@@ -1742,13 +1949,37 @@ public final class AeronCluster implements AutoCloseable
          */
         public int step()
         {
-            return step;
+            return state.step;
         }
 
-        private void step(final int newStep)
+
+        /**
+         * Get the current connection state.
+         *
+         * @return current state.
+         */
+        public State state()
         {
-            //System.out.println("AeronCluster.AsyncConnect " + step + " -> " + newStep);
-            step = newStep;
+            return state;
+        }
+
+        private void state(final State newState)
+        {
+//            System.out.println("AeronCluster.AsyncConnect " + state + " -> " + stepName(newState));
+            state = newState;
+        }
+
+        /**
+         * Get the String representation of a step in the connect process.
+         *
+         * @param step to get the string representation for.
+         * @return the String representation of a step in the connect process.
+         * @see #step()
+         */
+        public static String stepName(final int step)
+        {
+            final State state = State.fromStep(step);
+            return null != state ? state.name() : "<unknown>";
         }
 
         /**
@@ -1758,43 +1989,38 @@ public final class AeronCluster implements AutoCloseable
          */
         public AeronCluster poll()
         {
-            AeronCluster aeronCluster = null;
             checkDeadline();
 
-            switch (step)
+            switch (state)
             {
-                case -1:
-                    createSubscription();
+                case CREATE_EGRESS_SUBSCRIPTION:
+                    createEgressSubscription();
                     break;
 
-                case 0:
+                case CREATE_INGRESS_PUBLICATIONS:
                     createIngressPublications();
                     break;
 
-                case 1:
+                case AWAIT_PUBLICATION_CONNECTED:
                     awaitPublicationConnected();
                     break;
 
-                case 2:
+                case SEND_MESSAGE:
                     sendMessage();
                     break;
 
-                case 3:
+                case POLL_RESPONSE:
                     pollResponse();
+                    break;
+
+                case CONCLUDE_CONNECT:
+                    return concludeConnect();
+
+                default:
                     break;
             }
 
-            if (4 == step)
-            {
-                aeronCluster = newInstance();
-                ingressPublication = null;
-                memberByIdMap.remove(leaderMemberId);
-                CloseHelper.closeAll(memberByIdMap.values());
-
-                step(5);
-            }
-
-            return aeronCluster;
+            return null;
         }
 
         private void checkDeadline()
@@ -1802,10 +2028,10 @@ public final class AeronCluster implements AutoCloseable
             if (deadlineNs - nanoClock.nanoTime() < 0)
             {
                 final boolean isConnected = null != egressSubscription && egressSubscription.isConnected();
-                final String endpointPort =
-                    null != egressSubscription ? egressSubscription.tryResolveChannelEndpointPort() : "<unknown>";
+                final String endpointPort = null != egressSubscription ?
+                    egressSubscription.tryResolveChannelEndpointPort() : "<unknown>";
                 final TimeoutException ex = new TimeoutException(
-                    "cluster connect timeout: step=" + step +
+                    "cluster connect timeout: state=" + state +
                     " messageTimeout=" + ctx.messageTimeoutNs() + "ns" +
                     " ingressChannel=" + ctx.ingressChannel() +
                     " ingressEndpoints=" + ctx.ingressEndpoints() +
@@ -1830,7 +2056,7 @@ public final class AeronCluster implements AutoCloseable
             }
         }
 
-        private void createSubscription()
+        private void createEgressSubscription()
         {
             if (NULL_VALUE == egressRegistrationId)
             {
@@ -1841,7 +2067,8 @@ public final class AeronCluster implements AutoCloseable
             if (null != egressSubscription)
             {
                 egressPoller = new EgressPoller(egressSubscription, FRAGMENT_LIMIT);
-                step(0);
+                egressRegistrationId = NULL_VALUE;
+                state(State.CREATE_INGRESS_PUBLICATIONS);
             }
         }
 
@@ -1863,7 +2090,7 @@ public final class AeronCluster implements AutoCloseable
                 if (null != ingressPublication)
                 {
                     ingressRegistrationId = NULL_VALUE;
-                    step(1);
+                    state(State.AWAIT_PUBLICATION_CONNECTED);
                 }
             }
             else
@@ -1876,30 +2103,29 @@ public final class AeronCluster implements AutoCloseable
                 {
                     try
                     {
-                        if (channelUri.isUdp())
-                        {
-                            channelUri.put(CommonContext.ENDPOINT_PARAM_NAME, member.endpoint);
-                        }
-
                         if (null != member.publicationException)
                         {
                             failureCount++;
                             continue;
                         }
 
-                        if (NULL_VALUE == member.registrationId)
-                        {
-                            member.registrationId = asyncAddIngressPublication(
-                                ctx, channelUri.toString(), ctx.ingressStreamId());
-                        }
-
                         if (null == member.publication)
                         {
+                            if (NULL_VALUE == member.registrationId)
+                            {
+                                if (channelUri.isUdp())
+                                {
+                                    channelUri.put(CommonContext.ENDPOINT_PARAM_NAME, member.endpoint);
+                                }
+                                member.registrationId = asyncAddIngressPublication(
+                                    ctx, channelUri.toString(), ctx.ingressStreamId());
+                            }
                             member.publication = getIngressPublication(ctx, member.registrationId);
                         }
 
                         if (null != member.publication)
                         {
+                            member.registrationId = NULL_VALUE;
                             publicationCount++;
                         }
                     }
@@ -1916,7 +2142,7 @@ public final class AeronCluster implements AutoCloseable
                         throw memberByIdMap.values().iterator().next().publicationException;
                     }
 
-                    step(1);
+                    state(State.AWAIT_PUBLICATION_CONNECTED);
                 }
             }
         }
@@ -1959,17 +2185,17 @@ public final class AeronCluster implements AutoCloseable
                 .putEncodedCredentials(encodedCredentials, 0, encodedCredentials.length);
 
             messageLength = MessageHeaderEncoder.ENCODED_LENGTH + encoder.encodedLength();
-            step(2);
+            state(State.SEND_MESSAGE);
         }
 
         private void sendMessage()
         {
-            final long result = ingressPublication.offer(buffer, 0, messageLength);
-            if (result > 0)
+            final long position = ingressPublication.offer(buffer, 0, messageLength);
+            if (position > 0)
             {
-                step(3);
+                state(State.POLL_RESPONSE);
             }
-            else if (Publication.CLOSED == result || Publication.NOT_CONNECTED == result)
+            else if (Publication.CLOSED == position || Publication.NOT_CONNECTED == position)
             {
                 throw new ClusterException("unexpected loss of connection to cluster");
             }
@@ -1996,7 +2222,7 @@ public final class AeronCluster implements AutoCloseable
                         leaderMemberId = egressPoller.leaderMemberId();
                         clusterSessionId = egressPoller.clusterSessionId();
                         egressImage = egressPoller.egressImage();
-                        step(4);
+                        state(State.CONCLUDE_CONNECT);
                         break;
 
                     case ERROR:
@@ -2028,7 +2254,7 @@ public final class AeronCluster implements AutoCloseable
 
             messageLength = MessageHeaderEncoder.ENCODED_LENGTH + encoder.encodedLength();
 
-            step(2);
+            state(State.SEND_MESSAGE);
         }
 
         private void updateMembers()
@@ -2042,7 +2268,7 @@ public final class AeronCluster implements AutoCloseable
             }
 
             CloseHelper.closeAll(memberByIdMap.values());
-            memberByIdMap = parseIngressEndpoints(egressPoller.detail());
+            memberByIdMap = parseIngressEndpoints(ctx, egressPoller.detail());
 
             if (null == ingressPublication)
             {
@@ -2057,12 +2283,12 @@ public final class AeronCluster implements AutoCloseable
                 ingressPublication = addIngressPublication(ctx, channelUri.toString(), ctx.ingressStreamId());
             }
 
-            step(1);
+            state(State.AWAIT_PUBLICATION_CONNECTED);
         }
 
-        private AeronCluster newInstance()
+        private AeronCluster concludeConnect()
         {
-            return new AeronCluster(
+            final AeronCluster aeronCluster = new AeronCluster(
                 ctx,
                 messageHeaderEncoder,
                 ingressPublication,
@@ -2072,28 +2298,45 @@ public final class AeronCluster implements AutoCloseable
                 clusterSessionId,
                 leadershipTermId,
                 leaderMemberId);
+
+            ingressPublication = null;
+            memberByIdMap.remove(leaderMemberId);
+            CloseHelper.closeAll(memberByIdMap.values());
+
+            state(State.DONE);
+
+            return aeronCluster;
         }
     }
 
     static final class MemberIngress implements AutoCloseable
     {
+        private final Context ctx;
         final int memberId;
         final String endpoint;
         long registrationId = NULL_VALUE;
         Publication publication;
         RegistrationException publicationException;
 
-        MemberIngress(final int memberId, final String endpoint)
+        MemberIngress(final Context ctx, final int memberId, final String endpoint)
         {
+            this.ctx = ctx;
             this.memberId = memberId;
             this.endpoint = endpoint;
         }
 
         public void close()
         {
-            CloseHelper.close(publication);
-            publication = null;
+            if (null != publication)
+            {
+                CloseHelper.close(publication);
+            }
+            else if (NULL_VALUE != registrationId)
+            {
+                ctx.aeron().asyncRemovePublication(registrationId);
+            }
             registrationId = NULL_VALUE;
+            publication = null;
         }
 
         public String toString()

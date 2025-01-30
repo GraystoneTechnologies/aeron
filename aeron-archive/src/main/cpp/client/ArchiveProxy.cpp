@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@
 #include "concurrent/YieldingIdleStrategy.h"
 #include "aeron_archive_client/BoundedReplayRequest.h"
 #include "aeron_archive_client/AuthConnectRequest.h"
+#include "aeron_archive_client/ArchiveIdRequest.h"
 #include "aeron_archive_client/CloseSessionRequest.h"
 #include "aeron_archive_client/StartRecordingRequest.h"
 #include "aeron_archive_client/StartRecordingRequest2.h"
@@ -50,6 +51,8 @@
 #include "aeron_archive_client/KeepAliveRequest.h"
 #include "aeron_archive_client/ChallengeResponse.h"
 #include "aeron_archive_client/PurgeRecordingRequest.h"
+#include "aeron_archive_client/MaxRecordedPositionRequest.h"
+#include "aeron_archive_client/ReplayTokenRequest.h"
 
 using namespace aeron;
 using namespace aeron::concurrent;
@@ -92,6 +95,20 @@ util::index_t ArchiveProxy::closeSession(AtomicBuffer &buffer, std::int64_t cont
 
     wrapAndApplyHeader(request, buffer)
         .controlSessionId(controlSessionId);
+
+    return messageAndHeaderLength(request);
+}
+
+util::index_t ArchiveProxy::archiveId(
+    aeron::concurrent::AtomicBuffer &buffer,
+    std::int64_t correlationId,
+    std::int64_t controlSessionId)
+{
+    ArchiveIdRequest request;
+
+    wrapAndApplyHeader(request, buffer)
+        .controlSessionId(controlSessionId)
+        .correlationId(correlationId);
 
     return messageAndHeaderLength(request);
 }
@@ -242,6 +259,7 @@ index_t ArchiveProxy::replay(
     const std::string &replayChannel,
     std::int32_t replayStreamId,
     std::int32_t fileIoMaxLength,
+    std::int64_t replayToken,
     std::int64_t correlationId,
     std::int64_t controlSessionId)
 {
@@ -255,6 +273,7 @@ index_t ArchiveProxy::replay(
         .length(length)
         .replayStreamId(replayStreamId)
         .fileIoMaxLength(fileIoMaxLength)
+        .replayToken(replayToken)
         .putReplayChannel(replayChannel);
 
     return messageAndHeaderLength(request);
@@ -269,6 +288,7 @@ util::index_t ArchiveProxy::boundedReplay(
     const std::string &replayChannel,
     std::int32_t replayStreamId,
     std::int32_t fileIoMaxLength,
+    std::int64_t replayToken,
     std::int64_t correlationId,
     std::int64_t controlSessionId)
 {
@@ -283,6 +303,7 @@ util::index_t ArchiveProxy::boundedReplay(
         .limitCounterId(limitCounterId)
         .replayStreamId(replayStreamId)
         .fileIoMaxLength(fileIoMaxLength)
+        .replayToken(replayToken)
         .putReplayChannel(replayChannel);
 
     return messageAndHeaderLength(request);
@@ -416,6 +437,22 @@ util::index_t ArchiveProxy::getStopPosition(
     std::int64_t controlSessionId)
 {
     StopPositionRequest request;
+
+    wrapAndApplyHeader(request, buffer)
+        .controlSessionId(controlSessionId)
+        .correlationId(correlationId)
+        .recordingId(recordingId);
+
+    return messageAndHeaderLength(request);
+}
+
+util::index_t ArchiveProxy::getMaxRecordedPosition(
+    AtomicBuffer &buffer,
+    std::int64_t recordingId,
+    std::int64_t correlationId,
+    std::int64_t controlSessionId)
+{
+    MaxRecordedPositionRequest request;
 
     wrapAndApplyHeader(request, buffer)
         .controlSessionId(controlSessionId)
@@ -797,4 +834,20 @@ util::index_t ArchiveProxy::challengeResponse(
         .putEncodedCredentials(encodedCredentials.first, encodedCredentials.second);
 
     return messageAndHeaderLength(response);
+}
+
+util::index_t ArchiveProxy::replayTokenRequest(
+    AtomicBuffer &buffer,
+    std::int64_t correlationId,
+    std::int64_t controlSessionId,
+    std::int64_t recordingId)
+{
+    ReplayTokenRequest request;
+
+    wrapAndApplyHeader(request, buffer)
+        .controlSessionId(controlSessionId)
+        .correlationId(correlationId)
+        .recordingId(recordingId);
+
+    return messageAndHeaderLength(request);
 }

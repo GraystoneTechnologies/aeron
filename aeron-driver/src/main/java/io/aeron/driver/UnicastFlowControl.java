@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 package io.aeron.driver;
 
 import io.aeron.driver.media.UdpChannel;
+import io.aeron.protocol.ErrorFlyweight;
 import io.aeron.protocol.SetupFlyweight;
 import io.aeron.protocol.StatusMessageFlyweight;
 import org.agrona.concurrent.status.CountersManager;
@@ -36,6 +37,11 @@ public class UnicastFlowControl implements FlowControl
      * Singleton instance which can be used to avoid allocation.
      */
     public static final UnicastFlowControl INSTANCE = new UnicastFlowControl();
+
+    /**
+     * Multiple of receiver window to allow for a retransmit action.
+     */
+    private static final int RETRANSMIT_RECEIVER_WINDOW_MULTIPLE = 16;
 
     /**
      * {@inheritDoc}
@@ -60,6 +66,16 @@ public class UnicastFlowControl implements FlowControl
     /**
      * {@inheritDoc}
      */
+    public void onTriggerSendSetup(
+        final StatusMessageFlyweight flyweight,
+        final InetSocketAddress receiverAddress,
+        final long timeNs)
+    {
+    }
+
+    /**
+     * {@inheritDoc}
+     */
     public long onSetup(
         final SetupFlyweight flyweight,
         final long senderLimit,
@@ -68,6 +84,13 @@ public class UnicastFlowControl implements FlowControl
         final long timeNs)
     {
         return senderLimit;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public void onError(final ErrorFlyweight errorFlyweight, final InetSocketAddress receiverAddress, final long timeNs)
+    {
     }
 
     /**
@@ -106,5 +129,18 @@ public class UnicastFlowControl implements FlowControl
     public boolean hasRequiredReceivers()
     {
         return true;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public int maxRetransmissionLength(
+        final int termOffset,
+        final int resendLength,
+        final int termBufferLength,
+        final int mtuLength)
+    {
+        return FlowControl.calculateRetransmissionLength(
+            resendLength, termBufferLength, termOffset, RETRANSMIT_RECEIVER_WINDOW_MULTIPLE);
     }
 }

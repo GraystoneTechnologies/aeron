@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -48,7 +48,7 @@ import static io.aeron.protocol.DataHeaderFlyweight.HEADER_LENGTH;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.params.provider.Arguments.arguments;
 
-@ExtendWith(InterruptingTestCallback.class)
+@ExtendWith({ EventLogExtension.class, InterruptingTestCallback.class })
 class ArchiveSystemTest
 {
     private static Stream<Arguments> threadingModes()
@@ -199,7 +199,7 @@ class ArchiveSystemTest
         final String recordingChannel = archive.context().recordingEventsChannel();
         final int recordingStreamId = archive.context().recordingEventsStreamId();
 
-        final Publication controlPublication = client.addPublication(controlChannel, controlStreamId);
+        final ExclusivePublication controlPublication = client.addExclusivePublication(controlChannel, controlStreamId);
         final Subscription recordingEvents = client.addSubscription(recordingChannel, recordingStreamId);
         final ArchiveProxy archiveProxy = new ArchiveProxy(controlPublication);
 
@@ -237,7 +237,7 @@ class ArchiveSystemTest
         final String recordingChannel = archive.context().recordingEventsChannel();
         final int recordingStreamId = archive.context().recordingEventsStreamId();
 
-        final Publication controlPublication = client.addPublication(controlChannel, controlStreamId);
+        final ExclusivePublication controlPublication = client.addExclusivePublication(controlChannel, controlStreamId);
         final Subscription recordingEvents = client.addSubscription(recordingChannel, recordingStreamId);
         final ArchiveProxy archiveProxy = new ArchiveProxy(controlPublication);
 
@@ -273,7 +273,7 @@ class ArchiveSystemTest
     {
         before(threadingMode, archiveThreadingMode);
 
-        final Publication controlPublication = client.addPublication(
+        final ExclusivePublication controlPublication = client.addExclusivePublication(
             archive.context().localControlChannel(), archive.context().localControlStreamId());
         final ArchiveProxy archiveProxy = new ArchiveProxy(controlPublication);
 

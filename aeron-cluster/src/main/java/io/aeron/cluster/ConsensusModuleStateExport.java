@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -51,6 +51,20 @@ class ConsensusModuleStateExport
         this.timers = unmodifiableList(timers);
         this.sessions = unmodifiableList(sessions);
         this.pendingMessageTrackers = unmodifiableList(pendingMessageTrackers);
+    }
+
+    public String toString()
+    {
+        return "ConsensusModuleStateExport{" +
+            "logRecordingId=" + logRecordingId +
+            ", leadershipTermId=" + leadershipTermId +
+            ", expectedAckPosition=" + expectedAckPosition +
+            ", nextSessionId=" + nextSessionId +
+            ", serviceAckId=" + serviceAckId +
+            ", timers=" + timers +
+            ", sessions=" + sessions +
+            ", pendingMessageTrackers=" + pendingMessageTrackers +
+            '}';
     }
 
     static class TimerStateExport

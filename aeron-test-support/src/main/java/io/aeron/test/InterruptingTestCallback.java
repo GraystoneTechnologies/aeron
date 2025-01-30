@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 package io.aeron.test;
 
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.AfterEachCallback;
 import org.junit.jupiter.api.extension.BeforeEachCallback;
 import org.junit.jupiter.api.extension.ExtensionContext;
@@ -28,6 +29,9 @@ import java.util.concurrent.TimeUnit;
 
 public class InterruptingTestCallback implements BeforeEachCallback, AfterEachCallback
 {
+    private static final boolean TIMEOUT_DISABLED_ON_DEBUG =
+        !"enabled".equals(System.getProperty(Timeout.TIMEOUT_MODE_PROPERTY_NAME));
+
     private static final ScheduledExecutorService SCHEDULER = Executors.newSingleThreadScheduledExecutor(
         (runnable) ->
         {
@@ -65,7 +69,7 @@ public class InterruptingTestCallback implements BeforeEachCallback, AfterEachCa
         timer = null;
         final InterruptAfter annotation = context.getRequiredTestMethod().getAnnotation(InterruptAfter.class);
 
-        if (null != annotation && !RuntimeUtils.isDebugMode())
+        if (null != annotation && !(RuntimeUtils.isDebugMode() && TIMEOUT_DISABLED_ON_DEBUG))
         {
             final Thread testThread = Thread.currentThread();
 

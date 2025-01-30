@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,7 +37,7 @@ namespace aeron { namespace util
 namespace BitUtil
 {
 /** Length of the data blocks used by the CPU cache sub-system in bytes. */
-static const std::size_t CACHE_LINE_LENGTH = 64;
+static constexpr std::size_t CACHE_LINE_LENGTH = 64;
 
 template<typename value_t>
 inline bool isPowerOfTwo(value_t value) noexcept

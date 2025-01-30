@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package io.aeron.driver;
 import io.aeron.Aeron;
 import io.aeron.CncFileDescriptor;
 import io.aeron.CommonContext;
+import io.aeron.config.Config;
 import io.aeron.driver.buffer.FileStoreLogFactory;
 import io.aeron.driver.buffer.LogFactory;
 import io.aeron.driver.exceptions.ActiveDriverException;
@@ -27,8 +28,10 @@ import io.aeron.driver.status.DutyCycleStallTracker;
 import io.aeron.driver.status.SystemCounters;
 import io.aeron.exceptions.AeronException;
 import io.aeron.exceptions.ConcurrentConcludeException;
+import io.aeron.exceptions.ConfigurationException;
 import io.aeron.logbuffer.BufferClaim;
 import io.aeron.logbuffer.LogBufferDescriptor;
+import io.aeron.version.Versioned;
 import org.agrona.*;
 import org.agrona.concurrent.*;
 import org.agrona.concurrent.broadcast.BroadcastTransmitter;
@@ -41,6 +44,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.net.StandardSocketOptions;
 import java.nio.ByteOrder;
 import java.nio.MappedByteBuffer;
@@ -48,9 +53,8 @@ import java.nio.channels.DatagramChannel;
 import java.text.SimpleDateFormat;
 import java.util.Arrays;
 import java.util.Date;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 import static io.aeron.CncFileDescriptor.*;
@@ -60,14 +64,13 @@ import static io.aeron.driver.status.SystemCounterDescriptor.CONTROLLABLE_IDLE_S
 import static io.aeron.driver.status.SystemCounterDescriptor.*;
 import static io.aeron.logbuffer.LogBufferDescriptor.TERM_MAX_LENGTH;
 import static java.nio.charset.StandardCharsets.US_ASCII;
-import static java.util.concurrent.atomic.AtomicIntegerFieldUpdater.newUpdater;
 import static org.agrona.BitUtil.SIZE_OF_LONG;
 import static org.agrona.IoUtil.mapNewFile;
 import static org.agrona.SystemUtil.loadPropertiesFiles;
 import static org.agrona.concurrent.status.CountersReader.METADATA_LENGTH;
 
 /**
- * Main class for JVM-based media driver
+ * Main class for JVM-based media driver.
  * <p>
  * Usage:
  * <code>
@@ -77,6 +80,7 @@ import static org.agrona.concurrent.status.CountersReader.METADATA_LENGTH;
  *
  * @see Configuration
  */
+@Versioned
 public final class MediaDriver implements AutoCloseable
 {
     private boolean wasHighResTimerEnabled;
@@ -140,7 +144,9 @@ public final class MediaDriver implements AutoCloseable
             {
                 case INVOKER:
                     sharedInvoker = new AgentInvoker(
-                        errorHandler, errorCounter, new CompositeAgent(sender, receiver, conductor));
+                        errorHandler,
+                        errorCounter,
+                        new NamedCompositeAgent(ctx.aeronDirectoryName(), sender, receiver, conductor));
                     sharedRunner = null;
                     sharedNetworkRunner = null;
                     conductorRunner = null;
@@ -153,7 +159,7 @@ public final class MediaDriver implements AutoCloseable
                         ctx.sharedIdleStrategy(),
                         errorHandler,
                         errorCounter,
-                        new CompositeAgent(sender, receiver, conductor));
+                        new NamedCompositeAgent(ctx.aeronDirectoryName(), sender, receiver, conductor));
                     sharedNetworkRunner = null;
                     conductorRunner = null;
                     receiverRunner = null;
@@ -166,7 +172,7 @@ public final class MediaDriver implements AutoCloseable
                         ctx.sharedNetworkIdleStrategy(),
                         errorHandler,
                         errorCounter,
-                        new CompositeAgent(sender, receiver));
+                        new NamedCompositeAgent(ctx.aeronDirectoryName(), sender, receiver));
                     conductorRunner = new AgentRunner(
                         ctx.conductorIdleStrategy(), errorHandler, errorCounter, conductor);
                     sharedRunner = null;
@@ -175,8 +181,8 @@ public final class MediaDriver implements AutoCloseable
                     sharedInvoker = null;
                     break;
 
-                default:
                 case DEDICATED:
+                default:
                     senderRunner = new AgentRunner(ctx.senderIdleStrategy(), errorHandler, errorCounter, sender);
                     receiverRunner = new AgentRunner(ctx.receiverIdleStrategy(), errorHandler, errorCounter, receiver);
                     conductorRunner = new AgentRunner(
@@ -408,6 +414,14 @@ public final class MediaDriver implements AutoCloseable
     }
 
     /**
+     * {@inheritDoc}
+     */
+    public String toString()
+    {
+        return "MediaDriver{" + ctx.aeronDirectoryName() + '}';
+    }
+
+    /**
      * Context for the {@link MediaDriver} that can be used to provide overrides for {@link Configuration}.
      * <p>
      * <b>Note:</b> Do not reuse instances of this {@link Context} across different {@link MediaDriver}s.
@@ -417,11 +431,21 @@ public final class MediaDriver implements AutoCloseable
      */
     public static final class Context extends CommonContext
     {
-        private static final AtomicIntegerFieldUpdater<MediaDriver.Context> IS_CLOSED_UPDATER = newUpdater(
-            MediaDriver.Context.class, "isClosed");
+        private static final VarHandle IS_CLOSED_VH;
+        static
+        {
+            try
+            {
+                IS_CLOSED_VH = MethodHandles.lookup().findVarHandle(Context.class, "isClosed", boolean.class);
+            }
+            catch (final ReflectiveOperationException ex)
+            {
+                throw new ExceptionInInitializerError(ex);
+            }
+        }
 
-        private volatile int isClosed;
-        private boolean printConfigurationOnStart = Configuration.printConfigurationOnStart();
+        private volatile boolean isClosed;
+        private boolean printConfigurationOnStart = CommonContext.shouldPrintConfigurationOnStart();
         private boolean useWindowsHighResTimer = Configuration.useWindowsHighResTimer();
         private boolean warnIfDirectoryExists = Configuration.warnIfDirExists();
         private boolean dirDeleteOnStart = Configuration.dirDeleteOnStart();
@@ -432,7 +456,6 @@ public final class MediaDriver implements AutoCloseable
         private boolean reliableStream = Configuration.reliableStream();
         private boolean tetherSubscriptions = Configuration.tetherSubscriptions();
         private boolean rejoinStream = Configuration.rejoinStream();
-
         private long lowStorageWarningThreshold = Configuration.lowStorageWarningThreshold();
         private long timerIntervalNs = Configuration.timerIntervalNs();
         private long clientLivenessTimeoutNs = Configuration.clientLivenessTimeoutNs();
@@ -447,6 +470,7 @@ public final class MediaDriver implements AutoCloseable
         private long retransmitUnicastDelayNs = Configuration.retransmitUnicastDelayNs();
         private long retransmitUnicastLingerNs = Configuration.retransmitUnicastLingerNs();
         private long nakUnicastDelayNs = Configuration.nakUnicastDelayNs();
+        private long nakUnicastRetryDelayRatio = Configuration.nakUnicastRetryDelayRatio();
         private long nakMulticastMaxBackoffNs = Configuration.nakMulticastMaxBackoffNs();
         private long flowControlReceiverTimeoutNs = Configuration.flowControlReceiverTimeoutNs();
         private long reResolutionCheckIntervalNs = Configuration.reResolutionCheckIntervalNs();
@@ -476,6 +500,8 @@ public final class MediaDriver implements AutoCloseable
         private int lossReportBufferLength = Configuration.lossReportBufferLength();
         private int sendToStatusMessagePollRatio = Configuration.sendToStatusMessagePollRatio();
         private int resourceFreeLimit = Configuration.resourceFreeLimit();
+        private int asyncTaskExecutorThreads = Configuration.asyncTaskExecutorThreads();
+        private int maxResend = Configuration.maxResend();
 
         private Long receiverGroupTag = Configuration.groupTag();
         private long flowControlGroupTag = Configuration.flowControlGroupTag();
@@ -484,6 +510,8 @@ public final class MediaDriver implements AutoCloseable
         private String resolverName = Configuration.resolverName();
         private String resolverInterface = Configuration.resolverInterface();
         private String resolverBootstrapNeighbor = Configuration.resolverBootstrapNeighbor();
+        private String senderWildcardPortRange = Configuration.senderWildcardPortRange();
+        private String receiverWildcardPortRange = Configuration.receiverWildcardPortRange();
 
         private EpochClock epochClock;
         private NanoClock nanoClock;
@@ -497,6 +525,7 @@ public final class MediaDriver implements AutoCloseable
         private ThreadFactory receiverThreadFactory;
         private ThreadFactory sharedThreadFactory;
         private ThreadFactory sharedNetworkThreadFactory;
+        private Executor asyncTaskExecutor;
         private IdleStrategy conductorIdleStrategy;
         private IdleStrategy senderIdleStrategy;
         private IdleStrategy receiverIdleStrategy;
@@ -520,6 +549,7 @@ public final class MediaDriver implements AutoCloseable
 
         private DistinctErrorLog errorLog;
         private ErrorHandler errorHandler;
+        private CountedErrorHandler countedErrorHandler;
         private boolean useConcurrentCountersManager;
         private CountersManager countersManager;
         private SystemCounters systemCounters;
@@ -528,7 +558,7 @@ public final class MediaDriver implements AutoCloseable
         private LogFactory logFactory;
         private DataTransportPoller dataTransportPoller;
         private ControlTransportPoller controlTransportPoller;
-        private ManyToOneConcurrentArrayQueue<Runnable> driverCommandQueue;
+        private ManyToOneConcurrentLinkedQueue<Runnable> driverCommandQueue;
         private OneToOneConcurrentArrayQueue<Runnable> receiverCommandQueue;
         private OneToOneConcurrentArrayQueue<Runnable> senderCommandQueue;
         private ReceiverProxy receiverProxy;
@@ -552,6 +582,9 @@ public final class MediaDriver implements AutoCloseable
         private DutyCycleTracker senderDutyCycleTracker;
         private DutyCycleTracker receiverDutyCycleTracker;
         private DutyCycleTracker nameResolverTimeTracker;
+        private PortManager senderPortManager;
+        private PortManager receiverPortManager;
+        private int streamSessionLimit = Configuration.streamSessionLimit();
 
         /**
          * Perform a shallow copy of the object.
@@ -569,9 +602,10 @@ public final class MediaDriver implements AutoCloseable
          */
         public void close()
         {
-            if (IS_CLOSED_UPDATER.compareAndSet(this, 0, 1))
+            if (IS_CLOSED_VH.compareAndSet(this, false, true))
             {
                 CloseHelper.close(errorHandler, logFactory);
+                CloseHelper.close(errorHandler, countedErrorHandler);
 
                 if (null != systemCounters)
                 {
@@ -639,7 +673,7 @@ public final class MediaDriver implements AutoCloseable
                 LogBufferDescriptor.checkTermLength(publicationTermBufferLength);
                 LogBufferDescriptor.checkTermLength(ipcTermBufferLength);
                 validateInitialWindowLength(initialWindowLength, mtuLength);
-                validateUnblockTimeout(publicationUnblockTimeoutNs, clientLivenessTimeoutNs, timerIntervalNs);
+                validateUnblockTimeout(publicationUnblockTimeoutNs(), clientLivenessTimeoutNs(), timerIntervalNs);
                 validateUntetheredTimeouts(untetheredWindowLimitTimeoutNs, untetheredRestingTimeoutNs, timerIntervalNs);
 
                 final long cncFileLength = BitUtil.align(
@@ -669,9 +703,12 @@ public final class MediaDriver implements AutoCloseable
                 concludeDependantProperties();
                 concludeIdleStrategies();
 
+                systemCounters.get(BYTES_CURRENTLY_MAPPED).setOrdered(cncFileLength + lossReportBufferLength);
+
                 toDriverCommands.nextCorrelationId();
                 toDriverCommands.consumerHeartbeatTime(epochClock.time());
                 CncFileDescriptor.signalCncReady(cncMetaDataBuffer);
+                cncByteBuffer.force();
             }
             catch (final Exception ex)
             {
@@ -738,7 +775,7 @@ public final class MediaDriver implements AutoCloseable
          * Should the driver print its configuration on start to {@link System#out} at the end of {@link #conclude()}.
          *
          * @return true if the configuration should be printed on start.
-         * @see Configuration#PRINT_CONFIGURATION_ON_START_PROP_NAME
+         * @see CommonContext#PRINT_CONFIGURATION_ON_START_PROP_NAME
          */
         public boolean printConfigurationOnStart()
         {
@@ -750,7 +787,7 @@ public final class MediaDriver implements AutoCloseable
          *
          * @param printConfigurationOnStart if the configuration should be printed on start.
          * @return this for a fluent API.
-         * @see Configuration#PRINT_CONFIGURATION_ON_START_PROP_NAME
+         * @see CommonContext#PRINT_CONFIGURATION_ON_START_PROP_NAME
          */
         public Context printConfigurationOnStart(final boolean printConfigurationOnStart)
         {
@@ -777,6 +814,7 @@ public final class MediaDriver implements AutoCloseable
          * @return true if an attempt be made to use the high resolution timers for waiting on Windows.
          * @see Configuration#USE_WINDOWS_HIGH_RES_TIMER_PROP_NAME
          */
+        @Config
         public boolean useWindowsHighResTimer()
         {
             return useWindowsHighResTimer;
@@ -788,6 +826,7 @@ public final class MediaDriver implements AutoCloseable
          * @return should a warning be issued if the {@link #aeronDirectoryName()} exists?
          * @see Configuration#DIR_WARN_IF_EXISTS_PROP_NAME
          */
+        @Config(id = "DIR_WARN_IF_EXISTS")
         public boolean warnIfDirectoryExists()
         {
             return warnIfDirectoryExists;
@@ -808,10 +847,13 @@ public final class MediaDriver implements AutoCloseable
 
         /**
          * Will the driver attempt to immediately delete {@link #aeronDirectoryName()} on startup.
+         * WARNING: {@link #aeronDirectoryName()} will be recreated regardless, unless set to false
+         * and an active Media Driver is detected.
          *
-         * @return true when directory will be deleted, otherwise false.
+         * @return true when directory will be recreated without checks, otherwise false.
          * @see Configuration#DIR_DELETE_ON_START_PROP_NAME
          */
+        @Config
         public boolean dirDeleteOnStart()
         {
             return dirDeleteOnStart;
@@ -819,8 +861,10 @@ public final class MediaDriver implements AutoCloseable
 
         /**
          * Should the driver attempt to immediately delete {@link #aeronDirectoryName()} on startup.
+         * WARNING: {@link #aeronDirectoryName()} will be recreated regardless, unless set to false
+         * and an active Media Driver is detected.
          *
-         * @param dirDeleteOnStart Attempt deletion.
+         * @param dirDeleteOnStart Attempt deletion without checks.
          * @return this for a fluent API.
          * @see Configuration#DIR_DELETE_ON_START_PROP_NAME
          */
@@ -836,6 +880,7 @@ public final class MediaDriver implements AutoCloseable
          * @return true when directory will be deleted, otherwise false.
          * @see Configuration#DIR_DELETE_ON_SHUTDOWN_PROP_NAME
          */
+        @Config
         public boolean dirDeleteOnShutdown()
         {
             return dirDeleteOnShutdown;
@@ -860,6 +905,7 @@ public final class MediaDriver implements AutoCloseable
          * @return should the term buffers be created with sparse files?
          * @see Configuration#TERM_BUFFER_SPARSE_FILE_PROP_NAME
          */
+        @Config
         public boolean termBufferSparseFile()
         {
             return termBufferSparseFile;
@@ -884,6 +930,7 @@ public final class MediaDriver implements AutoCloseable
          * @return length of the {@link RingBuffer} for sending commands to the driver conductor from clients.
          * @see Configuration#CONDUCTOR_BUFFER_LENGTH_PROP_NAME
          */
+        @Config
         public int conductorBufferLength()
         {
             return conductorBufferLength;
@@ -908,6 +955,7 @@ public final class MediaDriver implements AutoCloseable
          * @return length of the {@link BroadcastTransmitter} buffer for sending events to the clients.
          * @see Configuration#TO_CLIENTS_BUFFER_LENGTH_PROP_NAME
          */
+        @Config
         public int toClientsBufferLength()
         {
             return toClientsBufferLength;
@@ -932,6 +980,7 @@ public final class MediaDriver implements AutoCloseable
          * @return length of the buffer for storing values by the {@link CountersManager}.
          * @see Configuration#COUNTERS_VALUES_BUFFER_LENGTH_PROP_NAME
          */
+        @Config(id = "COUNTERS_VALUES_BUFFER_LENGTH")
         public int counterValuesBufferLength()
         {
             return counterValuesBufferLength;
@@ -956,6 +1005,7 @@ public final class MediaDriver implements AutoCloseable
          * @return length of the {@link DistinctErrorLog} buffer for recording exceptions.
          * @see Configuration#ERROR_BUFFER_LENGTH_PROP_NAME
          */
+        @Config
         public int errorBufferLength()
         {
             return errorBufferLength;
@@ -980,6 +1030,7 @@ public final class MediaDriver implements AutoCloseable
          * @return true if the driver should perform storage checks when allocating files.
          * @see Configuration#PERFORM_STORAGE_CHECKS_PROP_NAME
          */
+        @Config
         public boolean performStorageChecks()
         {
             return performStorageChecks;
@@ -1004,6 +1055,7 @@ public final class MediaDriver implements AutoCloseable
          * @return the threshold below which storage warnings are issued.
          * @see Configuration#LOW_FILE_STORE_WARNING_THRESHOLD_PROP_NAME
          */
+        @Config(id = "LOW_FILE_STORE_WARNING_THRESHOLD")
         public long lowStorageWarningThreshold()
         {
             return lowStorageWarningThreshold;
@@ -1028,6 +1080,7 @@ public final class MediaDriver implements AutoCloseable
          * @return the length in bytes of the loss report buffer.
          * @see Configuration#LOSS_REPORT_BUFFER_LENGTH_PROP_NAME
          */
+        @Config
         public int lossReportBufferLength()
         {
             return lossReportBufferLength;
@@ -1052,6 +1105,7 @@ public final class MediaDriver implements AutoCloseable
          * @return page size for alignment of all files.
          * @see Configuration#FILE_PAGE_SIZE_PROP_NAME
          */
+        @Config
         public int filePageSize()
         {
             return filePageSize;
@@ -1076,6 +1130,7 @@ public final class MediaDriver implements AutoCloseable
          * @return nanoseconds between checks for timers and timeouts.
          * @see Configuration#TIMER_INTERVAL_PROP_NAME
          */
+        @Config
         public long timerIntervalNs()
         {
             return timerIntervalNs;
@@ -1100,6 +1155,7 @@ public final class MediaDriver implements AutoCloseable
          * @return nanoseconds that an Image will be kept alive for its subscribers to consume it.
          * @see Configuration#IMAGE_LIVENESS_TIMEOUT_PROP_NAME
          */
+        @Config
         public long imageLivenessTimeoutNs()
         {
             return imageLivenessTimeoutNs;
@@ -1124,6 +1180,7 @@ public final class MediaDriver implements AutoCloseable
          * @return nanoseconds that a publication will linger once it is drained.
          * @see Configuration#PUBLICATION_LINGER_PROP_NAME
          */
+        @Config(id = "PUBLICATION_LINGER")
         public long publicationLingerTimeoutNs()
         {
             return publicationLingerTimeoutNs;
@@ -1149,6 +1206,7 @@ public final class MediaDriver implements AutoCloseable
          * @return timeout that an untethered subscription outside the window limit will participate in flow control.
          * @see Configuration#UNTETHERED_WINDOW_LIMIT_TIMEOUT_PROP_NAME
          */
+        @Config
         public long untetheredWindowLimitTimeoutNs()
         {
             return untetheredWindowLimitTimeoutNs;
@@ -1175,6 +1233,7 @@ public final class MediaDriver implements AutoCloseable
          * @return timeout that an untethered subscription is resting before being allowed to rejoin a stream.
          * @see Configuration#UNTETHERED_RESTING_TIMEOUT_PROP_NAME
          */
+        @Config
         public long untetheredRestingTimeoutNs()
         {
             return untetheredRestingTimeoutNs;
@@ -1224,6 +1283,7 @@ public final class MediaDriver implements AutoCloseable
          * @return how long to linger after delay on a NAK before responding to another NAK.
          * @see Configuration#RETRANSMIT_UNICAST_LINGER_PROP_NAME
          */
+        @Config
         public long retransmitUnicastLingerNs()
         {
             return retransmitUnicastLingerNs;
@@ -1248,6 +1308,7 @@ public final class MediaDriver implements AutoCloseable
          * @return delay before retransmitting after a NAK.
          * @see Configuration#NAK_UNICAST_DELAY_PROP_NAME
          */
+        @Config
         public long nakUnicastDelayNs()
         {
             return nakUnicastDelayNs;
@@ -1259,10 +1320,39 @@ public final class MediaDriver implements AutoCloseable
          * @param nakUnicastDelayNs delay before retransmission after an NAK on unicast.
          * @return this for a fluent API.
          * @see Configuration#NAK_UNICAST_DELAY_PROP_NAME
+         * @see Configuration#NAK_UNICAST_DELAY_DEFAULT_NS
          */
         public Context nakUnicastDelayNs(final long nakUnicastDelayNs)
         {
             this.nakUnicastDelayNs = nakUnicastDelayNs;
+            return this;
+        }
+
+        /**
+         * The ratio to apply to the retry delay for unicast.
+         *
+         * @return ratio to apply to the retry delay for unicast
+         * @see #nakUnicastRetryDelayRatio(long)
+         */
+        @Config
+        public long nakUnicastRetryDelayRatio()
+        {
+            return nakUnicastRetryDelayRatio;
+        }
+
+        /**
+         * The ratio to apply to the retry delay for unicast. This will be a multiplier applied to the
+         * {@link #nakUnicastDelayNs} when constructing the {@link StaticDelayGenerator} used for handling delays on
+         * unicast NAKs.
+         *
+         * @param nakUnicastRetryDelayRatio to multiply the {@link #nakUnicastDelayNs} by to calculate the retry delay.
+         * @return this for a fluent API.
+         * @see Configuration#NAK_UNICAST_RETRY_DELAY_RATIO_PROP_NAME
+         * @see Configuration#NAK_UNICAST_RETRY_DELAY_RATIO_DEFAULT
+         */
+        public Context nakUnicastRetryDelayRatio(final long nakUnicastRetryDelayRatio)
+        {
+            this.nakUnicastRetryDelayRatio = nakUnicastRetryDelayRatio;
             return this;
         }
 
@@ -1272,6 +1362,7 @@ public final class MediaDriver implements AutoCloseable
          * @return maximum time to backoff before sending a NAK on multicast.
          * @see Configuration#NAK_MULTICAST_MAX_BACKOFF_PROP_NAME
          */
+        @Config
         public long nakMulticastMaxBackoffNs()
         {
             return nakMulticastMaxBackoffNs;
@@ -1296,6 +1387,7 @@ public final class MediaDriver implements AutoCloseable
          * @return estimate of the multicast receiver group size on a stream.
          * @see Configuration#NAK_MULTICAST_GROUP_SIZE_PROP_NAME
          */
+        @Config
         public int nakMulticastGroupSize()
         {
             return nakMulticastGroupSize;
@@ -1320,6 +1412,7 @@ public final class MediaDriver implements AutoCloseable
          * @return time in nanoseconds after which a client is considered dead if a keep alive is not received.
          * @see Configuration#CLIENT_LIVENESS_TIMEOUT_PROP_NAME
          */
+        @Config
         public long clientLivenessTimeoutNs()
         {
             return CommonContext.checkDebugTimeout(clientLivenessTimeoutNs, TimeUnit.NANOSECONDS);
@@ -1344,6 +1437,7 @@ public final class MediaDriver implements AutoCloseable
          * @return time in nanoseconds after which a status message will be sent if data is flowing slowly.
          * @see Configuration#STATUS_MESSAGE_TIMEOUT_PROP_NAME
          */
+        @Config
         public long statusMessageTimeoutNs()
         {
             return statusMessageTimeoutNs;
@@ -1368,6 +1462,7 @@ public final class MediaDriver implements AutoCloseable
          * @return time in nanoseconds after which a freed counter may be reused.
          * @see Configuration#COUNTER_FREE_TO_REUSE_TIMEOUT_PROP_NAME
          */
+        @Config
         public long counterFreeToReuseTimeoutNs()
         {
             return counterFreeToReuseTimeoutNs;
@@ -1397,9 +1492,10 @@ public final class MediaDriver implements AutoCloseable
          * @return timeout in nanoseconds after which a publication will be unblocked.
          * @see Configuration#PUBLICATION_UNBLOCK_TIMEOUT_PROP_NAME
          */
+        @Config
         public long publicationUnblockTimeoutNs()
         {
-            return publicationUnblockTimeoutNs;
+            return CommonContext.checkDebugTimeout(publicationUnblockTimeoutNs, TimeUnit.NANOSECONDS, 1.5);
         }
 
         /**
@@ -1427,6 +1523,7 @@ public final class MediaDriver implements AutoCloseable
          * @return timeout in nanoseconds after which a publication is considered not connected.
          * @see Configuration#PUBLICATION_CONNECTION_TIMEOUT_PROP_NAME
          */
+        @Config
         public long publicationConnectionTimeoutNs()
         {
             return publicationConnectionTimeoutNs;
@@ -1454,6 +1551,7 @@ public final class MediaDriver implements AutoCloseable
          * @return true if a spy subscription should simulate a connection to a network publication.
          * @see Configuration#SPIES_SIMULATE_CONNECTION_PROP_NAME
          */
+        @Config
         public boolean spiesSimulateConnection()
         {
             return spiesSimulateConnection;
@@ -1483,6 +1581,7 @@ public final class MediaDriver implements AutoCloseable
          * @see Configuration#RELIABLE_STREAM_PROP_NAME
          * @see CommonContext#RELIABLE_STREAM_PARAM_NAME
          */
+        @Config
         public boolean reliableStream()
         {
             return reliableStream;
@@ -1513,6 +1612,7 @@ public final class MediaDriver implements AutoCloseable
          * @see Configuration#TETHER_SUBSCRIPTIONS_PROP_NAME
          * @see CommonContext#TETHER_PARAM_NAME
          */
+        @Config
         public boolean tetherSubscriptions()
         {
             return tetherSubscriptions;
@@ -1579,6 +1679,7 @@ public final class MediaDriver implements AutoCloseable
          * @see Configuration#REJOIN_STREAM_PROP_NAME
          * @see CommonContext#REJOIN_PARAM_NAME
          */
+        @Config
         public boolean rejoinStream()
         {
             return rejoinStream;
@@ -1606,6 +1707,7 @@ public final class MediaDriver implements AutoCloseable
          * @return default length for a term buffer on a network publication.
          * @see Configuration#TERM_BUFFER_LENGTH_PROP_NAME
          */
+        @Config(id = "TERM_BUFFER_LENGTH")
         public int publicationTermBufferLength()
         {
             return publicationTermBufferLength;
@@ -1632,6 +1734,7 @@ public final class MediaDriver implements AutoCloseable
          * @return default length for a term buffer on an IPC publication.
          * @see Configuration#IPC_TERM_BUFFER_LENGTH_PROP_NAME
          */
+        @Config
         public int ipcTermBufferLength()
         {
             return ipcTermBufferLength;
@@ -1658,6 +1761,7 @@ public final class MediaDriver implements AutoCloseable
          * @return default length for a term buffer window on a network publication.
          * @see Configuration#PUBLICATION_TERM_WINDOW_LENGTH_PROP_NAME
          */
+        @Config
         public int publicationTermWindowLength()
         {
             return publicationTermWindowLength;
@@ -1682,6 +1786,7 @@ public final class MediaDriver implements AutoCloseable
          * @return default length for a term buffer window on an IPC publication.
          * @see Configuration#IPC_PUBLICATION_TERM_WINDOW_LENGTH_PROP_NAME
          */
+        @Config
         public int ipcPublicationTermWindowLength()
         {
             return ipcPublicationTermWindowLength;
@@ -1708,6 +1813,7 @@ public final class MediaDriver implements AutoCloseable
          * @return The initial window for in flight data on a connection
          * @see Configuration#INITIAL_WINDOW_LENGTH_PROP_NAME
          */
+        @Config
         public int initialWindowLength()
         {
             return initialWindowLength;
@@ -1734,6 +1840,7 @@ public final class MediaDriver implements AutoCloseable
          * @return the socket send buffer length.
          * @see Configuration#SOCKET_SNDBUF_LENGTH_PROP_NAME
          */
+        @Config
         public int socketSndbufLength()
         {
             return socketSndbufLength;
@@ -1758,6 +1865,7 @@ public final class MediaDriver implements AutoCloseable
          * @return the socket send buffer length.
          * @see Configuration#SOCKET_RCVBUF_LENGTH_PROP_NAME
          */
+        @Config
         public int socketRcvbufLength()
         {
             return socketRcvbufLength;
@@ -1782,6 +1890,7 @@ public final class MediaDriver implements AutoCloseable
          * @return TTL value to be used for multicast sockets.
          * @see Configuration#SOCKET_MULTICAST_TTL_PROP_NAME
          */
+        @Config
         public int socketMulticastTtl()
         {
             return socketMulticastTtl;
@@ -1810,6 +1919,7 @@ public final class MediaDriver implements AutoCloseable
          * @return MTU in bytes for datagrams sent to the network.
          * @see Configuration#MTU_LENGTH_PROP_NAME
          */
+        @Config
         public int mtuLength()
         {
             return mtuLength;
@@ -1841,6 +1951,7 @@ public final class MediaDriver implements AutoCloseable
          * @return MTU in bytes for message fragments.
          * @see Configuration#IPC_MTU_LENGTH_PROP_NAME
          */
+        @Config
         public int ipcMtuLength()
         {
             return ipcMtuLength;
@@ -2006,6 +2117,7 @@ public final class MediaDriver implements AutoCloseable
          * @return {@link ThreadingMode} that should be used for the driver.
          * @see Configuration#THREADING_MODE_PROP_NAME
          */
+        @Config
         public ThreadingMode threadingMode()
         {
             return threadingMode;
@@ -2155,11 +2267,89 @@ public final class MediaDriver implements AutoCloseable
         }
 
         /**
+         * Returns the number of threads for async task executor.
+         *
+         * @return number of threads.
+         * @see Configuration#ASYNC_TASK_EXECUTOR_THREADS_PROP_NAME
+         * @since 1.44.0
+         */
+        @Config
+        public int asyncTaskExecutorThreads()
+        {
+            return asyncTaskExecutorThreads;
+        }
+
+        /**
+         * Sets the number of threads for async task executor.
+         *
+         * @param asyncTaskExecutorThreads number of async worker threads.
+         * @return this for a fluent API.
+         * @since 1.44.0
+         */
+        public Context asyncTaskExecutorThreads(final int asyncTaskExecutorThreads)
+        {
+            this.asyncTaskExecutorThreads = asyncTaskExecutorThreads;
+            return this;
+        }
+
+        /**
+         * {@link Executor} to be used for asynchronous task execution in the {@link DriverConductor}.
+         *
+         * @return executor service for asynchronous tasks. If not explicitly assigned uses
+         * {@link #asyncTaskExecutorThreads()} to size the thread pool.
+         * @since 1.44.0
+         */
+        public Executor asyncTaskExecutor()
+        {
+            return asyncTaskExecutor;
+        }
+
+        /**
+         * {@link Executor} to be used for asynchronous task execution in the {@link DriverConductor}.
+         *
+         * @param asyncTaskExecutor to be used for asynchronous task execution in the {@link DriverConductor}.
+         * @return this for a fluent API.
+         * @since 1.44.0
+         */
+        public Context asyncTaskExecutor(final Executor asyncTaskExecutor)
+        {
+            this.asyncTaskExecutor = asyncTaskExecutor;
+            return this;
+        }
+
+        /**
+         * Returns the number of outstanding retransmits.
+         *
+         * @return number of outstanding retransmits.
+         * @see Configuration#MAX_RESEND_PROP_NAME
+         * @since 1.45.0
+         */
+        @Config
+        public int maxResend()
+        {
+            return maxResend;
+        }
+
+        /**
+         * Sets the number of outstanding retransmits.
+         *
+         * @param maxResend number of outstanding retransmits allowed.
+         * @return this for a fluent API.
+         * @since 1.45.0
+         */
+        public Context maxResend(final int maxResend)
+        {
+            this.maxResend = maxResend;
+            return this;
+        }
+
+        /**
          * {@link IdleStrategy} to be used by the {@link Sender} when in {@link ThreadingMode#DEDICATED}.
          *
          * @return {@link IdleStrategy} to be used by the {@link Sender} when in {@link ThreadingMode#DEDICATED}.
          * @see Configuration#SENDER_IDLE_STRATEGY_PROP_NAME
          */
+        @Config
         public IdleStrategy senderIdleStrategy()
         {
             return senderIdleStrategy;
@@ -2184,6 +2374,7 @@ public final class MediaDriver implements AutoCloseable
          * @return {@link IdleStrategy} used by the {@link Receiver} when in {@link ThreadingMode#DEDICATED}.
          * @see Configuration#RECEIVER_IDLE_STRATEGY_PROP_NAME
          */
+        @Config
         public IdleStrategy receiverIdleStrategy()
         {
             return receiverIdleStrategy;
@@ -2209,6 +2400,7 @@ public final class MediaDriver implements AutoCloseable
          * @return {@link IdleStrategy} used by the {@link DriverConductor}
          * @see Configuration#CONDUCTOR_IDLE_STRATEGY_PROP_NAME
          */
+        @Config
         public IdleStrategy conductorIdleStrategy()
         {
             return conductorIdleStrategy;
@@ -2235,6 +2427,7 @@ public final class MediaDriver implements AutoCloseable
          * @return {@link IdleStrategy} used by the {@link Sender} and {@link Receiver}.
          * @see Configuration#SHARED_NETWORK_IDLE_STRATEGY_PROP_NAME
          */
+        @Config
         public IdleStrategy sharedNetworkIdleStrategy()
         {
             return sharedNetworkIdleStrategy;
@@ -2261,6 +2454,7 @@ public final class MediaDriver implements AutoCloseable
          * @return {@link IdleStrategy} used by the {@link Sender}, {@link Receiver} and {@link DriverConductor}.
          * @see Configuration#SHARED_IDLE_STRATEGY_PROP_NAME
          */
+        @Config
         public IdleStrategy sharedIdleStrategy()
         {
             return sharedIdleStrategy;
@@ -2287,6 +2481,7 @@ public final class MediaDriver implements AutoCloseable
          * @return the supplier of dynamically created {@link SendChannelEndpoint} subclasses.
          * @see Configuration#SEND_CHANNEL_ENDPOINT_SUPPLIER_PROP_NAME
          */
+        @Config
         public SendChannelEndpointSupplier sendChannelEndpointSupplier()
         {
             return sendChannelEndpointSupplier;
@@ -2313,6 +2508,7 @@ public final class MediaDriver implements AutoCloseable
          * @return the supplier of dynamically created {@link ReceiveChannelEndpoint} subclasses.
          * @see Configuration#RECEIVE_CHANNEL_ENDPOINT_SUPPLIER_PROP_NAME
          */
+        @Config
         public ReceiveChannelEndpointSupplier receiveChannelEndpointSupplier()
         {
             return receiveChannelEndpointSupplier;
@@ -2382,6 +2578,7 @@ public final class MediaDriver implements AutoCloseable
          * @return supplier of dynamically created {@link FlowControl} strategies for unicast connections.
          * @see Configuration#UNICAST_FLOW_CONTROL_STRATEGY_SUPPLIER_PROP_NAME
          */
+        @Config(id = "UNICAST_FLOW_CONTROL_STRATEGY_SUPPLIER")
         public FlowControlSupplier unicastFlowControlSupplier()
         {
             return unicastFlowControlSupplier;
@@ -2406,6 +2603,7 @@ public final class MediaDriver implements AutoCloseable
          * @return supplier of dynamically created {@link FlowControl} strategies for multicast connections.
          * @see Configuration#MULTICAST_FLOW_CONTROL_STRATEGY_SUPPLIER_PROP_NAME
          */
+        @Config(id = "MULTICAST_FLOW_CONTROL_STRATEGY_SUPPLIER")
         public FlowControlSupplier multicastFlowControlSupplier()
         {
             return multicastFlowControlSupplier;
@@ -2430,6 +2628,7 @@ public final class MediaDriver implements AutoCloseable
          * @return timeout in ns.
          * @see Configuration#FLOW_CONTROL_RECEIVER_TIMEOUT_PROP_NAME
          */
+        @Config
         public long flowControlReceiverTimeoutNs()
         {
             return flowControlReceiverTimeoutNs;
@@ -2458,6 +2657,7 @@ public final class MediaDriver implements AutoCloseable
          * @see Configuration#SM_APPLICATION_SPECIFIC_FEEDBACK_PROP_NAME
          */
         @Deprecated
+        @Config(id = "SM_APPLICATION_SPECIFIC_FEEDBACK")
         public byte[] applicationSpecificFeedback()
         {
             return applicationSpecificFeedback;
@@ -2486,6 +2686,7 @@ public final class MediaDriver implements AutoCloseable
          * @return supplier of dynamically created {@link CongestionControl} strategies for individual connections.
          * @see Configuration#CONGESTION_CONTROL_STRATEGY_SUPPLIER_PROP_NAME
          */
+        @Config(id = "CONGESTION_CONTROL_STRATEGY_SUPPLIER")
         public CongestionControlSupplier congestionControlSupplier()
         {
             return congestionControlSupplier;
@@ -2654,6 +2855,7 @@ public final class MediaDriver implements AutoCloseable
          * @see #publicationReservedSessionIdHigh()
          * @see Configuration#PUBLICATION_RESERVED_SESSION_ID_LOW_PROP_NAME
          */
+        @Config
         public int publicationReservedSessionIdLow()
         {
             return publicationReservedSessionIdLow;
@@ -2681,6 +2883,7 @@ public final class MediaDriver implements AutoCloseable
          * @see #publicationReservedSessionIdLow()
          * @see Configuration#PUBLICATION_RESERVED_SESSION_ID_HIGH_PROP_NAME
          */
+        @Config
         public int publicationReservedSessionIdHigh()
         {
             return publicationReservedSessionIdHigh;
@@ -2707,6 +2910,7 @@ public final class MediaDriver implements AutoCloseable
          * @return {@link FeedbackDelayGenerator} for controlling the delay before sending a retransmit frame.
          * @see Configuration#RETRANSMIT_UNICAST_DELAY_PROP_NAME
          */
+        @Config(id = "RETRANSMIT_UNICAST_DELAY")
         public FeedbackDelayGenerator retransmitUnicastDelayGenerator()
         {
             return retransmitUnicastDelayGenerator;
@@ -2840,6 +3044,7 @@ public final class MediaDriver implements AutoCloseable
          *
          * @return {@link TerminationValidator} to validate termination requests.
          */
+        @Config
         public TerminationValidator terminationValidator()
         {
             return terminationValidator;
@@ -2850,6 +3055,7 @@ public final class MediaDriver implements AutoCloseable
          *
          * @return ratio for sending data to polling status messages in the Sender.
          */
+        @Config(id = "SEND_TO_STATUS_POLL_RATIO")
         public int sendToStatusMessagePollRatio()
         {
             return sendToStatusMessagePollRatio;
@@ -2873,6 +3079,7 @@ public final class MediaDriver implements AutoCloseable
          * @return group tag value or null if not set.
          * @see Configuration#RECEIVER_GROUP_TAG_PROP_NAME
          */
+        @Config
         public Long receiverGroupTag()
         {
             return receiverGroupTag;
@@ -2897,6 +3104,7 @@ public final class MediaDriver implements AutoCloseable
          * @return group tag value or null if not set.
          * @see Configuration#FLOW_CONTROL_GROUP_TAG_PROP_NAME
          */
+        @Config
         public long flowControlGroupTag()
         {
             return flowControlGroupTag;
@@ -2921,6 +3129,7 @@ public final class MediaDriver implements AutoCloseable
          * @return required group size.
          * @see Configuration#FLOW_CONTROL_GROUP_MIN_SIZE_PROP_NAME
          */
+        @Config
         public int flowControlGroupMinSize()
         {
             return flowControlGroupMinSize;
@@ -2967,6 +3176,7 @@ public final class MediaDriver implements AutoCloseable
          * @return name of the {@link MediaDriver}.
          * @see Configuration#RESOLVER_NAME_PROP_NAME
          */
+        @Config
         public String resolverName()
         {
             return resolverName;
@@ -2995,6 +3205,7 @@ public final class MediaDriver implements AutoCloseable
          * @see Configuration#RESOLVER_INTERFACE_PROP_NAME
          * @see CommonContext#INTERFACE_PARAM_NAME
          */
+        @Config
         public String resolverInterface()
         {
             return resolverInterface;
@@ -3027,6 +3238,7 @@ public final class MediaDriver implements AutoCloseable
          * @see Configuration#RESOLVER_BOOTSTRAP_NEIGHBOR_PROP_NAME
          * @see CommonContext#ENDPOINT_PARAM_NAME
          */
+        @Config
         public String resolverBootstrapNeighbor()
         {
             return resolverBootstrapNeighbor;
@@ -3057,6 +3269,7 @@ public final class MediaDriver implements AutoCloseable
          * @see Configuration#RE_RESOLUTION_CHECK_INTERVAL_PROP_NAME
          * @see Configuration#RE_RESOLUTION_CHECK_INTERVAL_DEFAULT_NS
          */
+        @Config
         public long reResolutionCheckIntervalNs()
         {
             return reResolutionCheckIntervalNs;
@@ -3099,6 +3312,7 @@ public final class MediaDriver implements AutoCloseable
          *
          * @return threshold to track for the conductor work cycle time.
          */
+        @Config
         public long conductorCycleThresholdNs()
         {
             return conductorCycleThresholdNs;
@@ -3137,6 +3351,7 @@ public final class MediaDriver implements AutoCloseable
          *
          * @return threshold to track for the sender work cycle time.
          */
+        @Config
         public long senderCycleThresholdNs()
         {
             return senderCycleThresholdNs;
@@ -3163,6 +3378,7 @@ public final class MediaDriver implements AutoCloseable
          *
          * @return threshold to track for the receiver work cycle time.
          */
+        @Config
         public long receiverCycleThresholdNs()
         {
             return receiverCycleThresholdNs;
@@ -3189,6 +3405,7 @@ public final class MediaDriver implements AutoCloseable
          *
          * @return threshold to track for the name resolution.
          */
+        @Config
         public long nameResolverThresholdNs()
         {
             return nameResolverThresholdNs;
@@ -3216,6 +3433,7 @@ public final class MediaDriver implements AutoCloseable
          * @return limit on the number of resources that can be freed.
          * @since 1.41.0
          */
+        @Config
         public int resourceFreeLimit()
         {
             return resourceFreeLimit;
@@ -3332,6 +3550,131 @@ public final class MediaDriver implements AutoCloseable
         }
 
         /**
+         * Wildcard port range used for the Sender.
+         *
+         * @return port range as a string in the format "low high".
+         */
+        @Config
+        public String senderWildcardPortRange()
+        {
+            return senderWildcardPortRange;
+        }
+
+
+        /**
+         * Set the wildcard port range to be used for the Sender.
+         * <p>
+         * Format is a string in "low high". With low being the low port value and high being the high port value. For
+         * example, "100 200". A null value or a value of "0 0" will use OS wildcard functionality.
+         *
+         * @param portRange as a string in the format "low high".
+         * @return this for fluent API.
+         * @see Configuration#SENDER_WILDCARD_PORT_RANGE_PROP_NAME
+         */
+        public Context senderWildcardPortRange(final String portRange)
+        {
+            this.senderWildcardPortRange = portRange;
+            return this;
+        }
+
+        /**
+         * Wildcard port range used for the Receiver.
+         *
+         * @return port range as a string in the format "low high".
+         */
+        @Config
+        public String receiverWildcardPortRange()
+        {
+            return receiverWildcardPortRange;
+        }
+
+        /**
+         * Set the wildcard port range to be used for the Receiver.
+         * <p>
+         * Format is a string in "low high". With low being the low port value and high being the high port value. For
+         * example, "100 200". A null value or a value of "0 0" will use OS wildcard functionality.
+         *
+         * @param portRange as a string in the format "low high".
+         * @return this for fluent API.
+         * @see Configuration#RECEIVER_WILDCARD_PORT_RANGE_PROP_NAME
+         */
+        public Context receiverWildcardPortRange(final String portRange)
+        {
+            this.receiverWildcardPortRange = portRange;
+            return this;
+        }
+
+        /**
+         * Port manager used for the {@link Sender}.
+         *
+         * @return Sender {@link PortManager}.
+         */
+        public PortManager senderPortManager()
+        {
+            return senderPortManager;
+        }
+
+        /**
+         * Set the {@link PortManager} used for the {@link Sender}.
+         *
+         * @param portManager for the {@link Sender}
+         * @return this for a fluent API.
+         */
+        public Context senderPortManager(final PortManager portManager)
+        {
+            this.senderPortManager = portManager;
+            return this;
+        }
+
+        /**
+         * Port manager used for the {@link Receiver}.
+         *
+         * @return Receiver {@link PortManager}.
+         */
+        public PortManager receiverPortManager()
+        {
+            return receiverPortManager;
+        }
+
+        /**
+         * Set the {@link PortManager} used for the {@link Receiver}.
+         *
+         * @param portManager for the {@link Receiver}
+         * @return this for a fluent API.
+         */
+        public Context receiverPortManager(final PortManager portManager)
+        {
+            this.receiverPortManager = portManager;
+            return this;
+        }
+
+        /**
+         * Set the limit on the number of sessions allow per stream for subscriptions.
+         *
+         * @param sessionLimit the limit of sessions per stream
+         * @return this for a fluent API.
+         * @see Configuration#STREAM_SESSION_LIMIT_PROP_NAME
+         * @see Configuration#STREAM_SESSION_LIMIT_DEFAULT
+         * @see Configuration#streamSessionLimit()
+         */
+        public Context streamSessionLimit(final int sessionLimit)
+        {
+            this.streamSessionLimit = sessionLimit;
+            return this;
+        }
+
+        /**
+         * Get the limit on the number of sessions allow per stream for subscriptions.
+         *
+         * @return the limit of sessions per stream
+         * @see Context#streamSessionLimit(int)
+         */
+        public int streamSessionLimit()
+        {
+            return this.streamSessionLimit;
+        }
+
+        /**
          * Clock used record channel send timestamps.
          *
          * @return a clock instance.
@@ -3339,6 +3682,26 @@ public final class MediaDriver implements AutoCloseable
         public EpochNanoClock channelSendTimestampClock()
         {
             return channelSendTimestampClock;
+        }
+
+        /**
+         * {@inheritDoc}
+         */
+        public Context enableExperimentalFeatures(final boolean enableExperimentalFeatures)
+        {
+            super.enableExperimentalFeatures(enableExperimentalFeatures);
+            return this;
+        }
+
+        /**
+         * Counted error handler that wraps {@link #errorHandler()} and
+         * {@link io.aeron.driver.status.SystemCounterDescriptor#ERRORS} counter.
+         *
+         * @return counted error handler.
+         */
+        public CountedErrorHandler countedErrorHandler()
+        {
+            return countedErrorHandler;
         }
 
         OneToOneConcurrentArrayQueue<Runnable> receiverCommandQueue()
@@ -3363,12 +3726,12 @@ public final class MediaDriver implements AutoCloseable
             return this;
         }
 
-        ManyToOneConcurrentArrayQueue<Runnable> driverCommandQueue()
+        ManyToOneConcurrentLinkedQueue<Runnable> driverCommandQueue()
         {
             return driverCommandQueue;
         }
 
-        Context driverCommandQueue(final ManyToOneConcurrentArrayQueue<Runnable> queue)
+        Context driverCommandQueue(final ManyToOneConcurrentLinkedQueue<Runnable> queue)
         {
             this.driverCommandQueue = queue;
             return this;
@@ -3394,6 +3757,17 @@ public final class MediaDriver implements AutoCloseable
         {
             this.toDriverCommands = toDriverCommands;
             return this;
+        }
+
+        Context cncByteBuffer(final MappedByteBuffer cncByteBuffer)
+        {
+            this.cncByteBuffer = cncByteBuffer;
+            return this;
+        }
+
+        MappedByteBuffer cncByteBuffer()
+        {
+            return cncByteBuffer;
         }
 
         LogFactory logFactory()
@@ -3459,6 +3833,12 @@ public final class MediaDriver implements AutoCloseable
         Context driverConductorProxy(final DriverConductorProxy driverConductorProxy)
         {
             this.driverConductorProxy = driverConductorProxy;
+            return this;
+        }
+
+        Context countedErrorHandler(final CountedErrorHandler countedErrorHandler)
+        {
+            this.countedErrorHandler = countedErrorHandler;
             return this;
         }
 
@@ -3569,16 +3949,6 @@ public final class MediaDriver implements AutoCloseable
                 receiveChannelEndpointSupplier = Configuration.receiveChannelEndpointSupplier();
             }
 
-            if (null == dataTransportPoller)
-            {
-                dataTransportPoller = new DataTransportPoller(errorHandler);
-            }
-
-            if (null == controlTransportPoller)
-            {
-                controlTransportPoller = new ControlTransportPoller(errorHandler);
-            }
-
             if (null == applicationSpecificFeedback)
             {
                 applicationSpecificFeedback = Configuration.applicationSpecificFeedback();
@@ -3610,9 +3980,14 @@ public final class MediaDriver implements AutoCloseable
                 congestionControlSupplier = Configuration.congestionControlSupplier();
             }
 
+            if (null == threadingMode)
+            {
+                threadingMode = Configuration.threadingMode();
+            }
+
             if (null == driverCommandQueue)
             {
-                driverCommandQueue = new ManyToOneConcurrentArrayQueue<>(CMD_QUEUE_CAPACITY);
+                driverCommandQueue = new ManyToOneConcurrentLinkedQueue<>();
             }
 
             if (null == receiverCommandQueue)
@@ -3627,28 +4002,24 @@ public final class MediaDriver implements AutoCloseable
 
             if (null == retransmitUnicastDelayGenerator)
             {
-                retransmitUnicastDelayGenerator = new StaticDelayGenerator(retransmitUnicastDelayNs, false);
+                retransmitUnicastDelayGenerator = new StaticDelayGenerator(retransmitUnicastDelayNs);
             }
 
             if (null == retransmitUnicastLingerGenerator)
             {
-                retransmitUnicastLingerGenerator = new StaticDelayGenerator(retransmitUnicastLingerNs, false);
+                retransmitUnicastLingerGenerator = new StaticDelayGenerator(retransmitUnicastLingerNs);
             }
 
             if (null == unicastFeedbackDelayGenerator)
             {
-                unicastFeedbackDelayGenerator = new StaticDelayGenerator(nakUnicastDelayNs, true);
+                unicastFeedbackDelayGenerator = new StaticDelayGenerator(
+                    nakUnicastDelayNs, nakUnicastDelayNs * nakUnicastRetryDelayRatio);
             }
 
             if (null == multicastFeedbackDelayGenerator)
             {
                 multicastFeedbackDelayGenerator = new OptimalMulticastDelayGenerator(
                     nakMulticastMaxBackoffNs, nakMulticastGroupSize);
-            }
-
-            if (null == threadingMode)
-            {
-                threadingMode = Configuration.threadingMode();
             }
 
             if (null == terminationValidator)
@@ -3670,8 +4041,81 @@ public final class MediaDriver implements AutoCloseable
             {
                 channelSendTimestampClock = new SystemEpochNanoClock();
             }
+
+            if (null == asyncTaskExecutor)
+            {
+                if (asyncTaskExecutorThreads <= 0)
+                {
+                    asyncTaskExecutor = CALLER_RUNS_TASK_EXECUTOR;
+                }
+                else
+                {
+                    asyncTaskExecutor = newDefaultAsyncTaskExecutor(asyncTaskExecutorThreads, aeronDirectoryName());
+                }
+            }
+
+            if (null != resolverInterface && Strings.isEmpty(resolverName))
+            {
+                throw new ConfigurationException("`resolverName` is required when `resolverInterface` is set");
+            }
         }
 
+        private static ThreadPoolExecutor newDefaultAsyncTaskExecutor(final int threadCount, final String dirName)
+        {
+            final AtomicInteger id = new AtomicInteger();
+            final ThreadPoolExecutor executor = new ThreadPoolExecutor(
+                threadCount,
+                threadCount,
+                0L,
+                TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<>(),
+                (r) ->
+                {
+                    final Thread thread = new Thread(
+                        r,
+                        "async-task-executor-" + id.getAndIncrement() + " " + dirName);
+                    thread.setDaemon(true);
+                    return thread;
+                });
+            executor.prestartAllCoreThreads();
+            return executor;
+        }
+
+        private void concludeCounters()
+        {
+            if (null == countersManager)
+            {
+                if (countersMetaDataBuffer() == null)
+                {
+                    countersMetaDataBuffer(createCountersMetaDataBuffer(cncByteBuffer, cncMetaDataBuffer));
+                }
+
+                if (countersValuesBuffer() == null)
+                {
+                    countersValuesBuffer(createCountersValuesBuffer(cncByteBuffer, cncMetaDataBuffer));
+                }
+
+                final long reuseTimeoutMs = counterFreeToReuseTimeoutNs > 0 ?
+                    Math.max(TimeUnit.NANOSECONDS.toMillis(counterFreeToReuseTimeoutNs), 1) : 0;
+
+                countersManager = useConcurrentCountersManager ?
+                    new ConcurrentCountersManager(
+                        countersMetaDataBuffer(), countersValuesBuffer(), US_ASCII, cachedEpochClock, reuseTimeoutMs) :
+                    new CountersManager(
+                        countersMetaDataBuffer(), countersValuesBuffer(), US_ASCII, cachedEpochClock, reuseTimeoutMs);
+            }
+
+            if (null == systemCounters)
+            {
+                systemCounters = new SystemCounters(countersManager);
+            }
+
+            final int aeronVersion = SemanticVersion.compose(
+                MediaDriverVersion.MAJOR_VERSION, MediaDriverVersion.MINOR_VERSION, MediaDriverVersion.PATCH_VERSION);
+            systemCounters.get(AERON_VERSION).set(aeronVersion);
+        }
+
+        @SuppressWarnings("MethodLength")
         private void concludeDependantProperties()
         {
             clientProxy = new ClientProxy(new BroadcastTransmitter(
@@ -3685,7 +4129,12 @@ public final class MediaDriver implements AutoCloseable
                     createErrorLogBuffer(cncByteBuffer, cncMetaDataBuffer), epochClock, US_ASCII);
             }
 
-            errorHandler = CommonContext.setupErrorHandler(this.errorHandler, errorLog);
+            errorHandler = CommonContext.setupErrorHandler(errorHandler, errorLog);
+
+            if (null == countedErrorHandler)
+            {
+                countedErrorHandler = new CountedErrorHandler(errorHandler, systemCounters.get(ERRORS));
+            }
 
             receiverProxy = new ReceiverProxy(
                 threadingMode, receiverCommandQueue, systemCounters.get(RECEIVER_PROXY_FAILS));
@@ -3694,10 +4143,25 @@ public final class MediaDriver implements AutoCloseable
             driverConductorProxy = new DriverConductorProxy(
                 threadingMode, driverCommandQueue, systemCounters.get(CONDUCTOR_PROXY_FAILS));
 
+            if (null == controlTransportPoller)
+            {
+                controlTransportPoller = new ControlTransportPoller(countedErrorHandler, driverConductorProxy);
+            }
+
+            if (null == dataTransportPoller)
+            {
+                dataTransportPoller = new DataTransportPoller(countedErrorHandler);
+            }
+
             if (null == logFactory)
             {
                 logFactory = new FileStoreLogFactory(
-                    aeronDirectoryName(), filePageSize, performStorageChecks, lowStorageWarningThreshold, errorHandler);
+                    aeronDirectoryName(),
+                    filePageSize,
+                    performStorageChecks,
+                    lowStorageWarningThreshold,
+                    errorHandler,
+                    systemCounters.get(BYTES_CURRENTLY_MAPPED));
             }
 
             if (null == lossReport)
@@ -3746,37 +4210,19 @@ public final class MediaDriver implements AutoCloseable
                     nameResolverThresholdNs);
             }
 
+            if (null == senderPortManager)
+            {
+                senderPortManager = new WildcardPortManager(
+                    WildcardPortManager.parsePortRange(senderWildcardPortRange), true);
+            }
+
+            if (null == receiverPortManager)
+            {
+                receiverPortManager = new WildcardPortManager(
+                    WildcardPortManager.parsePortRange(receiverWildcardPortRange), false);
+            }
+
             nameResolver.init(countersManager, countersManager::newCounter);
-        }
-
-        private void concludeCounters()
-        {
-            if (null == countersManager)
-            {
-                if (countersMetaDataBuffer() == null)
-                {
-                    countersMetaDataBuffer(createCountersMetaDataBuffer(cncByteBuffer, cncMetaDataBuffer));
-                }
-
-                if (countersValuesBuffer() == null)
-                {
-                    countersValuesBuffer(createCountersValuesBuffer(cncByteBuffer, cncMetaDataBuffer));
-                }
-
-                final long reuseTimeoutMs = counterFreeToReuseTimeoutNs > 0 ?
-                    Math.max(TimeUnit.NANOSECONDS.toMillis(counterFreeToReuseTimeoutNs), 1) : 0;
-
-                countersManager = useConcurrentCountersManager ?
-                    new ConcurrentCountersManager(
-                        countersMetaDataBuffer(), countersValuesBuffer(), US_ASCII, cachedEpochClock, reuseTimeoutMs) :
-                    new CountersManager(
-                        countersMetaDataBuffer(), countersValuesBuffer(), US_ASCII, cachedEpochClock, reuseTimeoutMs);
-            }
-
-            if (null == systemCounters)
-            {
-                systemCounters = new SystemCounters(countersManager);
-            }
         }
 
         private void concludeIdleStrategies()
@@ -3857,9 +4303,10 @@ public final class MediaDriver implements AutoCloseable
             return "MediaDriver.Context" +
                 "\n{" +
                 "\n    isConcluded=" + isConcluded() +
-                "\n    isClosed=" + (1 == isClosed) +
+                "\n    isClosed=" + isClosed +
                 "\n    cncVersion=" + SemanticVersion.toString(CNC_VERSION) +
                 "\n    aeronDirectory=" + aeronDirectory() +
+                "\n    enabledExperimentalFeatures=" + enableExperimentalFeatures() +
                 "\n    aeronDirectoryName='" + aeronDirectoryName() + '\'' +
                 "\n    cncFile=" + cncFile() +
                 "\n    countersMetaDataBuffer=" + countersMetaDataBuffer() +
@@ -3980,7 +4427,14 @@ public final class MediaDriver implements AutoCloseable
                 "\n    conductorDutyCycleTracker=" + conductorDutyCycleTracker +
                 "\n    senderDutyCycleTracker=" + senderDutyCycleTracker +
                 "\n    receiverDutyCycleTracker=" + receiverDutyCycleTracker +
+                "\n    senderWildcardPortRange=" + senderWildcardPortRange +
+                "\n    receiverWildcardPortRange=" + receiverWildcardPortRange +
+                "\n    senderPortManager=" + senderPortManager +
+                "\n    receiverPortManager=" + receiverPortManager +
                 "\n    resourceFreeLimit=" + resourceFreeLimit +
+                "\n    asyncTaskExecutorThreads=" + asyncTaskExecutorThreads +
+                "\n    asyncTaskExecutor=" + asyncTaskExecutor +
+                "\n    maxResend=" + maxResend +
                 "\n}";
         }
     }

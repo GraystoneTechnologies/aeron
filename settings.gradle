@@ -1,4 +1,5 @@
 include (
+    'aeron-annotations',
     'aeron-client',
     'aeron-driver',
     'aeron-archive',

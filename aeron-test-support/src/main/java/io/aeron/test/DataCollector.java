@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,25 +16,21 @@
 package io.aeron.test;
 
 import io.aeron.CncFileDescriptor;
-import io.aeron.archive.ArchiveMarkFile;
-import io.aeron.cluster.service.ClusterMarkFile;
 import org.agrona.LangUtil;
 import org.agrona.SystemUtil;
 
 import java.io.File;
+import java.io.FileFilter;
 import java.io.IOException;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.BiPredicate;
 import java.util.function.Predicate;
-import java.util.stream.Stream;
 
-import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
 import static java.nio.file.StandardCopyOption.COPY_ATTRIBUTES;
 import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
-import static java.util.Collections.singleton;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
 import static org.agrona.Strings.isEmpty;
@@ -76,7 +72,7 @@ public final class DataCollector
      * Add a file/directory to be preserved.
      *
      * @param location file or directory to preserve.
-     * @see #dumpData(String)
+     * @see #dumpData(String, byte[])
      */
     public void add(final Path location)
     {
@@ -84,10 +80,10 @@ public final class DataCollector
     }
 
     /**
-     * Add a file/directory to be preserved.  Converting from a File to a Path if not null.
+     * Add a file/directory to be preserved. Converting from a File to a Path if not null.
      *
      * @param location file or directory to preserve.
-     * @see #dumpData(String)
+     * @see #dumpData(String, byte[])
      */
     public void add(final File location)
     {
@@ -136,64 +132,40 @@ public final class DataCollector
      * </p>
      *
      * @param destinationDir destination directory where the data should be copied into.
+     * @param threadDump     bytes representing stacktraces of all running threads in the system, i.e.
+     *                       {@link SystemUtil#threadDump()}.
      * @return {@code null} if no data was copied or an actual destination directory used.
      */
-    Path dumpData(final String destinationDir)
+    Path dumpData(final String destinationDir, final byte[] threadDump)
     {
         if (isEmpty(destinationDir))
         {
             throw new IllegalArgumentException("destination dir is required");
         }
+        Objects.requireNonNull(threadDump);
 
-        return copyData(destinationDir);
+        return copyData(destinationDir, threadDump);
     }
 
     /**
-     * Find all the driver cnc files
+     * Find all the driver cnc files.
      *
      * @return list of paths to collected driver cnc files.
      */
     public List<Path> cncFiles()
     {
-        return locations.stream()
-            .flatMap((path) -> DataCollector.find(path, CncFileDescriptor::isCncFile))
-            .collect(toList());
+        return findMatchingFiles(file -> CncFileDescriptor.CNC_FILE.equals(file.getName()));
     }
 
     /**
-     * Find all the clustered service mark files.
+     * Find all mark files for specific dissector.
      *
-     * @return list of paths to the clustered service mark files.
+     * @param dissector to use as a filter.
+     * @return list of paths to the associated mark files.
      */
-    public List<Path> clusterServiceMarkFiles()
+    public List<Path> markFiles(final SystemTestWatcher.MarkFileDissector dissector)
     {
-        return locations.stream()
-            .flatMap((path) -> DataCollector.find(path, ClusterMarkFile::isServiceMarkFile))
-            .collect(toList());
-    }
-
-    /**
-     * Find all the consensus module mark files.
-     *
-     * @return list of paths to the consensus module mark files
-     */
-    public List<Path> consensusModuleMarkFiles()
-    {
-        return locations.stream()
-            .flatMap((path) -> DataCollector.find(path, ClusterMarkFile::isConsensusModuleMarkFile))
-            .collect(toList());
-    }
-
-    /**
-     * Find all the archive mark files.
-     *
-     * @return list of paths to the archive mark files
-     */
-    public List<Path> archiveMarkFiles()
-    {
-        return locations.stream()
-            .flatMap((path) -> DataCollector.find(path, ArchiveMarkFile::isArchiveMarkFile))
-            .collect(toList());
+        return findMatchingFiles(dissector::isRelevantFile);
     }
 
     /**
@@ -220,20 +192,52 @@ public final class DataCollector
         return Collections.unmodifiableList(cleanupLocations);
     }
 
-    private static Stream<Path> find(final Path p, final BiPredicate<Path, BasicFileAttributes> matcher)
+    private List<Path> findMatchingFiles(final FileFilter filter)
+    {
+        final List<Path> found = new ArrayList<>();
+        for (final Path location : locations)
+        {
+            find(found, location.toFile(), filter);
+        }
+        return found;
+    }
+
+    private static void find(final List<Path> found, final File file, final FileFilter filter)
+    {
+        if (existsAndIsNotSymbolicLink(file))
+        {
+            if (file.isFile())
+            {
+                if (filter.accept(file))
+                {
+                    found.add(file.toPath());
+                }
+            }
+            else if (file.isDirectory())
+            {
+                final File[] files = file.listFiles();
+                if (null != files)
+                {
+                    for (final File f : files)
+                    {
+                        find(found, f, filter);
+                    }
+                }
+            }
+        }
+    }
+
+    private static boolean existsAndIsNotSymbolicLink(final File file)
     {
         try
         {
-            return Files.find(p, 1, matcher);
-        }
-        catch (final NoSuchFileException ignore)
-        {
-            return Stream.empty();
-            // File may have already been removed...
+            final BasicFileAttributes basicFileAttributes = Files.readAttributes(
+                file.toPath(), BasicFileAttributes.class, NOFOLLOW_LINKS);
+            return !basicFileAttributes.isSymbolicLink() && file.exists();
         }
         catch (final IOException ex)
         {
-            throw new RuntimeException(ex);
+            return false;
         }
     }
 
@@ -256,15 +260,14 @@ public final class DataCollector
     /**
      * Add a specific exclusion for a file to be captured.
      *
-     * @param fileExclusion predicate that returns true of a specific file should
-     *                      not be captured.
+     * @param fileExclusion predicate that returns true of a specific file should not be captured.
      */
     public void addFileExclusion(final Predicate<Path> fileExclusion)
     {
         fileFilter = fileFilter.and(fileExclusion.negate());
     }
 
-    private Path copyData(final String destinationDir)
+    private Path copyData(final String destinationDir, final byte[] threadDump)
     {
         final boolean isInterrupted = Thread.interrupted();
         final List<Path> locations = this.locations.stream().filter(Files::exists).collect(toList());
@@ -288,8 +291,7 @@ public final class DataCollector
                 }
             }
 
-            final Path threadDump = destination.resolve(THREAD_DUMP_FILE_NAME);
-            Files.write(threadDump, SystemUtil.threadDump().getBytes(UTF_8));
+            Files.write(destination.resolve(THREAD_DUMP_FILE_NAME), threadDump);
             Tests.dumpCollectedLogs(destination.resolve("events.log").toString());
 
             return destination;
@@ -310,7 +312,16 @@ public final class DataCollector
 
     private Path createUniqueDirectory(final String name) throws IOException
     {
-        Path path = rootDir.resolve(name);
+        Path path;
+        try
+        {
+            path = rootDir.resolve(name);
+        }
+        catch (final InvalidPathException ex)
+        {
+            throw new IOException("Unable to resolve path for name=" + name);
+        }
+
         while (Files.exists(path))
         {
             path = rootDir.resolve(name + "-" + UNIQUE_ID.incrementAndGet());
@@ -324,7 +335,7 @@ public final class DataCollector
         final LinkedHashMap<Path, Set<Path>> map = new LinkedHashMap<>();
         for (final Path p : locations)
         {
-            map.put(p, singleton(p));
+            map.put(p, Set.of(p));
         }
 
         removeNestedPaths(locations, map);
@@ -432,7 +443,7 @@ public final class DataCollector
         {
             Files.walkFileTree(
                 src,
-                new SimpleFileVisitor<Path>()
+                new SimpleFileVisitor<>()
                 {
                     public FileVisitResult preVisitDirectory(final Path dir, final BasicFileAttributes attrs)
                         throws IOException

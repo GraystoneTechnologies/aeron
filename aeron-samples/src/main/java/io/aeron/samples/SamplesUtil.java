@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,7 +15,10 @@
  */
 package io.aeron.samples;
 
-import io.aeron.*;
+import io.aeron.CommonContext;
+import io.aeron.FragmentAssembler;
+import io.aeron.Image;
+import io.aeron.Subscription;
 import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.protocol.HeaderFlyweight;
 import org.agrona.DirectBuffer;
@@ -34,6 +37,7 @@ import java.util.function.Consumer;
 
 import static io.aeron.CncFileDescriptor.*;
 import static java.nio.channels.FileChannel.MapMode.READ_ONLY;
+import static java.nio.charset.StandardCharsets.US_ASCII;
 
 /**
  * Utility functions for the samples.
@@ -222,7 +226,8 @@ public class SamplesUtil
 
         return new CountersReader(
             createCountersMetaDataBuffer(cncByteBuffer, cncMetaData),
-            createCountersValuesBuffer(cncByteBuffer, cncMetaData));
+            createCountersValuesBuffer(cncByteBuffer, cncMetaData),
+            US_ASCII);
     }
 
     /**
@@ -245,6 +250,7 @@ public class SamplesUtil
 
         return new CountersReader(
             createCountersMetaDataBuffer(cncByteBuffer, cncMetaData),
-            createCountersValuesBuffer(cncByteBuffer, cncMetaData));
+            createCountersValuesBuffer(cncByteBuffer, cncMetaData),
+            US_ASCII);
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,8 +19,7 @@ import io.aeron.driver.media.ReceiveChannelEndpoint;
 import io.aeron.driver.media.ReceiveDestinationTransport;
 import io.aeron.driver.media.SendChannelEndpoint;
 import io.aeron.driver.media.UdpChannel;
-import org.agrona.concurrent.AgentTerminationException;
-import org.agrona.concurrent.QueuedPipe;
+import org.agrona.concurrent.ManyToOneConcurrentLinkedQueue;
 import org.agrona.concurrent.status.AtomicCounter;
 
 import java.net.InetSocketAddress;
@@ -33,18 +32,52 @@ import static io.aeron.driver.ThreadingMode.SHARED;
  */
 public final class DriverConductorProxy
 {
-    private final ThreadingMode threadingMode;
-    private final QueuedPipe<Runnable> commandQueue;
-    private final AtomicCounter failCount;
-
     private DriverConductor driverConductor;
+    private final ThreadingMode threadingMode;
+    private final ManyToOneConcurrentLinkedQueue<Runnable> commandQueue;
+    private final AtomicCounter failCount;
+    private final boolean notConcurrent;
 
     DriverConductorProxy(
-        final ThreadingMode threadingMode, final QueuedPipe<Runnable> commandQueue, final AtomicCounter failCount)
+        final ThreadingMode threadingMode,
+        final ManyToOneConcurrentLinkedQueue<Runnable> commandQueue,
+        final AtomicCounter failCount)
     {
         this.threadingMode = threadingMode;
         this.commandQueue = commandQueue;
         this.failCount = failCount;
+        notConcurrent = SHARED == threadingMode || INVOKER == threadingMode;
+    }
+
+    /**
+     * Is the driver conductor not concurrent with the sender and receiver threads.
+     *
+     * @return true if the {@link DriverConductor} is on the same thread as the sender and receiver.
+     */
+    public boolean notConcurrent()
+    {
+        return notConcurrent;
+    }
+
+    /**
+     * Get the threading mode of the driver.
+     *
+     * @return ThreadingMode of the driver.
+     */
+    public ThreadingMode threadingMode()
+    {
+        return threadingMode;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public String toString()
+    {
+        return getClass().getSimpleName() + "{" +
+            "threadingMode=" + threadingMode +
+            ", failCount=" + failCount +
+            '}';
     }
 
     /**
@@ -127,33 +160,38 @@ public final class DriverConductorProxy
     }
 
     /**
-     * Is the driver conductor not concurrent with the sender and receiver threads.
+     * Handle a response setup message from the remote "server".
      *
-     * @return true if the {@link DriverConductor} is on the same thread as the sender and receiver.
+     * @param responseCorrelationId correlationId of the subscription that will handle responses.
+     * @param responseSessionId     sessionId that will be associated with the incoming messages.
      */
-    public boolean notConcurrent()
+    public void responseSetup(final long responseCorrelationId, final int responseSessionId)
     {
-        return threadingMode == SHARED || threadingMode == INVOKER;
+        if (notConcurrent())
+        {
+            driverConductor.responseSetup(responseCorrelationId, responseSessionId);
+        }
+        else
+        {
+            offer(() -> driverConductor.responseSetup(responseCorrelationId, responseSessionId));
+        }
     }
 
     /**
-     * Get the threading mode of the driver.
-     * @return ThreadingMode of the driver.
+     * Handle notify that a response channel has connected.
+     *
+     * @param responseCorrelationId correlationId of the subscription that will handle responses.
      */
-    public ThreadingMode threadingMode()
+    public void responseConnected(final long responseCorrelationId)
     {
-        return threadingMode;
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    public String toString()
-    {
-        return "DriverConductorProxy{" +
-            "threadingMode=" + threadingMode +
-            ", failCount=" + failCount +
-            '}';
+        if (notConcurrent())
+        {
+            driverConductor.responseConnected(responseCorrelationId);
+        }
+        else
+        {
+            offer(() -> driverConductor.responseConnected(responseCorrelationId));
+        }
     }
 
     void driverConductor(final DriverConductor driverConductor)
@@ -170,6 +208,7 @@ public final class DriverConductorProxy
         final int termLength,
         final int mtuLength,
         final int transportIndex,
+        final short flags,
         final InetSocketAddress controlAddress,
         final InetSocketAddress srcAddress,
         final ReceiveChannelEndpoint channelEndpoint)
@@ -185,6 +224,7 @@ public final class DriverConductorProxy
                 termLength,
                 mtuLength,
                 transportIndex,
+                flags,
                 controlAddress,
                 srcAddress,
                 channelEndpoint);
@@ -200,26 +240,57 @@ public final class DriverConductorProxy
                 termLength,
                 mtuLength,
                 transportIndex,
+                flags,
                 controlAddress,
                 srcAddress,
                 channelEndpoint));
         }
     }
 
+    void onPublicationError(
+        final long registrationId,
+        final long destinationRegistrationId,
+        final int sessionId,
+        final int streamId,
+        final long receiverId,
+        final long groupId,
+        final InetSocketAddress srcAddress,
+        final int errorCode,
+        final String errorMessage)
+    {
+        if (notConcurrent())
+        {
+            driverConductor.onPublicationError(
+                registrationId,
+                destinationRegistrationId,
+                sessionId,
+                streamId,
+                receiverId,
+                groupId,
+                srcAddress,
+                errorCode,
+                errorMessage);
+        }
+        else
+        {
+            offer(() -> driverConductor.onPublicationError(
+                registrationId,
+                destinationRegistrationId,
+                sessionId,
+                streamId,
+                receiverId,
+                groupId,
+                srcAddress,
+                errorCode,
+                errorMessage));
+        }
+    }
+
     private void offer(final Runnable cmd)
     {
-        while (!commandQueue.offer(cmd))
+        if (!commandQueue.offer(cmd))
         {
-            if (!failCount.isClosed())
-            {
-                failCount.increment();
-            }
-
-            Thread.yield();
-            if (Thread.currentThread().isInterrupted())
-            {
-                throw new AgentTerminationException("interrupted");
-            }
+            throw new IllegalStateException("offer failed");
         }
     }
 }

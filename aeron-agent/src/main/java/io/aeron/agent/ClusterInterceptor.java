@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,7 +39,8 @@ class ClusterInterceptor
             final long logPosition,
             final long logLeadershipTermId,
             final long appendPosition,
-            final long catchupPosition)
+            final long catchupPosition,
+            final String reason)
         {
             LOGGER.logElectionStateChange(
                 memberId,
@@ -51,7 +52,8 @@ class ClusterInterceptor
                 logPosition,
                 logLeadershipTermId,
                 appendPosition,
-                catchupPosition);
+                catchupPosition,
+                reason);
         }
     }
 
@@ -278,15 +280,6 @@ class ClusterInterceptor
         }
     }
 
-    static class DynamicJoinStateChange
-    {
-        @Advice.OnMethodEnter
-        static <E extends Enum<E>> void logStateChange(final E oldState, final E newState, final int memberId)
-        {
-            LOGGER.logStateChange(DYNAMIC_JOIN_STATE_CHANGE, memberId, oldState, newState);
-        }
-    }
-
     static class ClusterBackupStateChange
     {
         @Advice.OnMethodEnter
@@ -347,4 +340,44 @@ class ClusterInterceptor
         }
     }
 
+    static class StandbySnapshotNotification
+    {
+        @Advice.OnMethodEnter
+        static void logStandbySnapshotNotification(
+            final int memberId,
+            final long recordingId,
+            final long leadershipTermId,
+            final long termBaseLogPosition,
+            final long logPosition,
+            final long timestamp,
+            final TimeUnit timeUnit,
+            final int serviceId,
+            final String archiveEndpoint)
+        {
+            LOGGER.logStandbySnapshotNotification(
+                memberId,
+                recordingId,
+                leadershipTermId,
+                termBaseLogPosition,
+                logPosition,
+                timestamp,
+                timeUnit,
+                serviceId,
+                archiveEndpoint);
+        }
+    }
+
+    static class NewElection
+    {
+        @Advice.OnMethodEnter
+        static void logNewElection(
+            final int memberId,
+            final long leadershipTermId,
+            final long logPosition,
+            final long appendPosition,
+            final String reason)
+        {
+            LOGGER.logNewElection(memberId, leadershipTermId, logPosition, appendPosition, reason);
+        }
+    }
 }

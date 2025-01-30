@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -115,7 +115,7 @@ public:
         m_subscriberPosition(subscriberPosition),
         m_header(
             LogBufferDescriptor::initialTermId(m_logBuffers->atomicBuffer(LogBufferDescriptor::LOG_META_DATA_SECTION_INDEX)),
-            m_logBuffers->atomicBuffer(0).capacity(),
+            LogBufferDescriptor::positionBitsToShift(m_logBuffers->atomicBuffer(0).capacity()),
             this),
         m_sessionId(sessionId),
         m_subscriptionRegistrationId(subscriptionRegistrationId),
@@ -358,6 +358,23 @@ public:
         return m_subscriberPosition.get() >=
             LogBufferDescriptor::endOfStreamPosition(m_logBuffers->atomicBuffer(
                 LogBufferDescriptor::LOG_META_DATA_SECTION_INDEX));
+    }
+
+    /**
+     * The position the stream reached when EOS was received from the publisher. The position will be
+     * INT64_MAX until the stream ends and EOS is set.
+     *
+     * @return position the stream reached when EOS was received from the publisher.
+     */
+    inline std::int64_t endOfStreamPosition() const
+    {
+        if (isClosed())
+        {
+            return m_eosPosition;
+        }
+
+        return LogBufferDescriptor::endOfStreamPosition(m_logBuffers->atomicBuffer(
+            LogBufferDescriptor::LOG_META_DATA_SECTION_INDEX));
     }
 
     /**
@@ -850,8 +867,9 @@ public:
         if (!isClosed())
         {
             m_finalPosition = m_subscriberPosition.getVolatile();
-            m_isEos = m_finalPosition >= LogBufferDescriptor::endOfStreamPosition(
+            m_eosPosition = LogBufferDescriptor::endOfStreamPosition(
                 m_logBuffers->atomicBuffer(LogBufferDescriptor::LOG_META_DATA_SECTION_INDEX));
+            m_isEos = m_finalPosition >= m_eosPosition;
             m_isClosed.store(true, std::memory_order_release);
         }
     }
@@ -874,6 +892,7 @@ private:
     std::int64_t m_finalPosition;
     std::int64_t m_subscriptionRegistrationId;
     std::int64_t m_correlationId;
+    std::int64_t m_eosPosition = INT64_MAX;
 
     void validatePosition(std::int64_t newPosition)
     {

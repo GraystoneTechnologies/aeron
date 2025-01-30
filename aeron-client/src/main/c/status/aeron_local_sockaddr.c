@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -58,7 +58,7 @@ static void aeron_local_sockaddr_find_address_counter_metadata_func(
 
     int64_t *status_indicator_addr = aeron_counters_reader_addr(find_addr->reader, status_indicator_id);
     int64_t status;
-    AERON_GET_VOLATILE(status, *status_indicator_addr);
+    AERON_GET_ACQUIRE(status, *status_indicator_addr);
 
     if (AERON_COUNTER_CHANNEL_ENDPOINT_STATUS_ACTIVE != status)
     {
@@ -99,8 +99,14 @@ int aeron_local_sockaddr_find_addrs(
     size_t address_vec_len)
 {
     volatile int64_t *status_indicator_addr = aeron_counters_reader_addr(reader, channel_status_indicator_id);
+
+    if (NULL == status_indicator_addr)
+    {
+        return 0;
+    }
+
     int64_t status;
-    AERON_GET_VOLATILE(status, *status_indicator_addr);
+    AERON_GET_ACQUIRE(status, *status_indicator_addr);
 
     if (AERON_COUNTER_CHANNEL_ENDPOINT_STATUS_ACTIVE != status)
     {

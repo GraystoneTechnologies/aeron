@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@
 
 extern "C"
 {
+#include "aeron_subscription.h"
 #include "aeron_image.h"
 }
 
@@ -43,10 +44,18 @@ using namespace aeron::test;
 class ImageTest : public testing::Test
 {
 public:
-    ImageTest() = default;
+    ImageTest() :
+        m_subscription(createSubscription())
+    {
+    }
 
     ~ImageTest() override
     {
+        if (nullptr != m_subscription)
+        {
+            aeron_subscription_delete(m_subscription);
+        }
+
         if (!m_filename.empty())
         {
             aeron_log_buffer_delete(m_image->log_buffer);
@@ -54,6 +63,29 @@ public:
 
             ::unlink(m_filename.c_str());
         }
+    }
+
+    static aeron_subscription_t *createSubscription()
+    {
+        aeron_subscription_t *subscription = nullptr;
+
+        if (aeron_subscription_create(
+            &subscription,
+            nullptr,
+            ::strdup(SUB_URI),
+            STREAM_ID,
+            26,
+            0,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr) < 0)
+        {
+            throw std::runtime_error("could not create subscription: " + std::string(aeron_errmsg()));
+        }
+
+        return subscription;
     }
 
     int64_t createImage()
@@ -71,7 +103,7 @@ public:
 
         if (aeron_image_create(
             &image,
-            nullptr,
+            m_subscription,
             nullptr,
             log_buffer,
             SUBSCRIBER_POSITION_ID,
@@ -131,7 +163,7 @@ public:
                 header->stream_id = STREAM_ID;
                 header->term_id = term_id;
 
-                AERON_PUT_ORDERED(header->frame_header.frame_length, padding_length);
+                AERON_SET_RELEASE(header->frame_header.frame_length, padding_length);
             }
         }
         else
@@ -146,7 +178,7 @@ public:
 
             memcpy(term_buffer->addr + tail_offset + AERON_DATA_HEADER_LENGTH, buffer, length);
 
-            AERON_PUT_ORDERED(header->frame_header.frame_length, (int32_t)frame_length);
+            AERON_SET_RELEASE(header->frame_header.frame_length, (int32_t)frame_length);
         }
     }
 
@@ -188,6 +220,13 @@ public:
     }
 
     template<typename F>
+    int imageControlledPeek(F &&handler, int64_t initial_position, int64_t limit_position)
+    {
+        m_controlled_handler = handler;
+        return aeron_image_controlled_peek(m_image, initial_position, controlled_fragment_handler, this, limit_position);
+    }
+
+    template<typename F>
     int imageBoundedPoll(F &&handler, int64_t max_position, size_t fragment_limit)
     {
         m_handler = handler;
@@ -220,6 +259,7 @@ protected:
     std::function<aeron_controlled_fragment_handler_action_t(const uint8_t *, size_t, aeron_header_t *)>
         m_controlled_handler = nullptr;
 
+    aeron_subscription_t *m_subscription = nullptr;
     aeron_image_t *m_image = nullptr;
     std::string m_filename;
 };
@@ -294,6 +334,30 @@ TEST_F(ImageTest, shouldReadMultipleMessages)
     EXPECT_EQ(imagePoll(handler, std::numeric_limits<size_t>::max()), 2);
     EXPECT_EQ(handlerCallCount, 2u);
     EXPECT_EQ(m_sub_pos, alignedMessageLength * 2);
+}
+
+TEST_F(ImageTest, shouldStopReadingIfImageIsClosed)
+{
+    const size_t messageLength = 100;
+    const int64_t alignedMessageLength =
+        AERON_ALIGN(messageLength + AERON_DATA_HEADER_LENGTH, AERON_LOGBUFFER_FRAME_ALIGNMENT);
+
+    createImage();
+
+    appendMessage(m_sub_pos, messageLength);
+    appendMessage(m_sub_pos + alignedMessageLength, messageLength);
+    size_t handlerCallCount = 0;
+
+    auto handler = [&](const uint8_t *, size_t length, aeron_header_t *header)
+    {
+        handlerCallCount++;
+        aeron_image_force_close(m_image);
+    };
+
+    EXPECT_EQ(imagePoll(handler, std::numeric_limits<size_t>::max()), 1);
+    EXPECT_EQ(true, aeron_image_is_closed(m_image));
+    EXPECT_EQ(handlerCallCount, 1u);
+    EXPECT_EQ(m_sub_pos, alignedMessageLength);
 }
 
 TEST_F(ImageTest, shouldReadLastMessage)
@@ -450,6 +514,23 @@ TEST_F(ImageTest, shouldPollNoFragmentsToControlledFragmentHandler)
     EXPECT_EQ(static_cast<size_t>(m_sub_pos), 0u);
 }
 
+TEST_F(ImageTest, shouldPeekNoFragmentsToControlledFragmentHandler)
+{
+    createImage();
+
+    bool called = false;
+    auto handler = [&](const uint8_t *, size_t length, aeron_header_t *header)
+        -> aeron_controlled_fragment_handler_action_t
+    {
+        called = true;
+        return AERON_ACTION_CONTINUE;
+    };
+
+    EXPECT_EQ(imageControlledPeek(handler, 0, INT64_MAX), 0);
+    EXPECT_FALSE(called);
+    EXPECT_EQ(m_sub_pos, 0);
+}
+
 TEST_F(ImageTest, shouldPollOneFragmentToControlledFragmentHandlerOnContinue)
 {
     createImage();
@@ -471,6 +552,60 @@ TEST_F(ImageTest, shouldPollOneFragmentToControlledFragmentHandlerOnContinue)
 
     EXPECT_EQ(imageControlledPoll(handler, std::numeric_limits<size_t>::max()), 1);
     EXPECT_EQ(m_sub_pos, alignedMessageLength);
+}
+
+TEST_F(ImageTest, shouldPeekOneFragmentToControlledFragmentHandlerOnContinue)
+{
+    createImage();
+
+    const size_t messageLength = 120;
+    const int64_t initialPosition = aeron_logbuffer_compute_position(
+        INITIAL_TERM_ID, 0, m_position_bits_to_shift, INITIAL_TERM_ID);
+    const int64_t alignedMessageLength =
+        AERON_ALIGN(messageLength + AERON_DATA_HEADER_LENGTH, AERON_LOGBUFFER_FRAME_ALIGNMENT);
+
+    m_sub_pos = initialPosition;
+
+    appendMessage(m_sub_pos, messageLength);
+
+    auto handler = [&](const uint8_t *buffer, size_t length, aeron_header_t *header)
+        -> aeron_controlled_fragment_handler_action_t
+    {
+        EXPECT_EQ(buffer, termBuffer(0) + m_sub_pos + AERON_DATA_HEADER_LENGTH);
+        EXPECT_EQ(length, messageLength);
+        EXPECT_EQ(header->frame->frame_header.type, AERON_HDR_TYPE_DATA);
+        return AERON_ACTION_CONTINUE;
+    };
+
+    EXPECT_EQ(imageControlledPeek(handler, initialPosition, INT64_MAX), initialPosition + alignedMessageLength);
+    EXPECT_EQ(m_sub_pos, initialPosition);
+}
+
+TEST_F(ImageTest, shouldStopPeekOneFragmentToControlledFragmentHandlerIfImageIsClosed)
+{
+    createImage();
+
+    const size_t messageLength = 120;
+    const int64_t initialPosition = aeron_logbuffer_compute_position(
+        INITIAL_TERM_ID, 0, m_position_bits_to_shift, INITIAL_TERM_ID);
+    const int64_t alignedMessageLength =
+        AERON_ALIGN(messageLength + AERON_DATA_HEADER_LENGTH, AERON_LOGBUFFER_FRAME_ALIGNMENT);
+
+    m_sub_pos = initialPosition;
+
+    appendMessage(initialPosition, messageLength);
+    appendMessage(initialPosition + alignedMessageLength, messageLength);
+
+    auto handler = [&](const uint8_t *buffer, size_t length, aeron_header_t *header)
+        -> aeron_controlled_fragment_handler_action_t
+    {
+        aeron_image_force_close(m_image);
+        return AERON_ACTION_CONTINUE;
+    };
+
+    EXPECT_EQ(imageControlledPeek(handler, initialPosition, INT64_MAX), initialPosition + alignedMessageLength);
+    EXPECT_EQ(true, aeron_image_is_closed(m_image));
+    EXPECT_EQ(m_sub_pos, initialPosition);
 }
 
 TEST_F(ImageTest, shouldNotPollOneFragmentToControlledFragmentHandlerOnAbort)
@@ -507,6 +642,8 @@ TEST_F(ImageTest, shouldPollOneFragmentToControlledFragmentHandlerOnBreak)
     appendMessage(m_sub_pos + alignedMessageLength, messageLength);
     aeron_image_constants_t image_constants;
     aeron_image_constants(m_image, &image_constants);
+
+    EXPECT_EQ(image_constants.subscriber_position_id, SUBSCRIBER_POSITION_ID);
 
     auto handler = [&](const uint8_t *buffer, size_t length, aeron_header_t *header)
         -> aeron_controlled_fragment_handler_action_t
@@ -666,6 +803,36 @@ TEST_F(ImageTest, shouldPollFragmentsToControlledFragmentHandlerOnContinue)
     EXPECT_EQ(m_sub_pos, initialPosition + (2 * alignedMessageLength));
 }
 
+TEST_F(ImageTest, shouldStopPollFragmentsToControlledFragmentHandlerIfImageIsClosed)
+{
+    createImage();
+
+    const size_t messageLength = 120;
+    const int64_t alignedMessageLength =
+        AERON_ALIGN(messageLength + AERON_DATA_HEADER_LENGTH, AERON_LOGBUFFER_FRAME_ALIGNMENT);
+    const int64_t initialPosition = aeron_logbuffer_compute_position(
+        INITIAL_TERM_ID, 0, m_position_bits_to_shift, INITIAL_TERM_ID);
+    size_t fragmentCount = 0;
+
+    m_sub_pos = initialPosition;
+
+    appendMessage(initialPosition, messageLength);
+    appendMessage(initialPosition + alignedMessageLength, messageLength);
+
+    auto handler = [&](const uint8_t *buffer, size_t length, aeron_header_t *header)
+        -> aeron_controlled_fragment_handler_action_t
+    {
+        fragmentCount++;
+        aeron_image_force_close(m_image);
+        return AERON_ACTION_CONTINUE;
+    };
+
+    EXPECT_EQ(imageControlledPoll(handler, std::numeric_limits<size_t>::max()), 1);
+    EXPECT_EQ(true, aeron_image_is_closed(m_image));
+    EXPECT_EQ(1, fragmentCount);
+    EXPECT_EQ(m_sub_pos, initialPosition + alignedMessageLength);
+}
+
 TEST_F(ImageTest, shouldPollNoFragmentsToBoundedControlledFragmentHandlerWithMaxPositionBeforeInitialPosition)
 {
     createImage();
@@ -747,6 +914,33 @@ TEST_F(ImageTest, shouldPollFragmentsToBoundedControlledFragmentHandlerWithMaxPo
     EXPECT_EQ(m_sub_pos, initialPosition + alignedMessageLength);
 }
 
+TEST_F(ImageTest, shouldStopPollFragmentsToBoundedControlledFragmentHandlerIfImageIsClosed)
+{
+    createImage();
+
+    const size_t messageLength = 120;
+    const int64_t alignedMessageLength =
+        AERON_ALIGN(messageLength + AERON_DATA_HEADER_LENGTH, AERON_LOGBUFFER_FRAME_ALIGNMENT);
+    const int64_t initialPosition = aeron_logbuffer_compute_position(
+        INITIAL_TERM_ID, alignedMessageLength, m_position_bits_to_shift, INITIAL_TERM_ID);
+
+    m_sub_pos = initialPosition;
+
+    appendMessage(initialPosition, messageLength);
+    appendMessage(initialPosition + alignedMessageLength, messageLength);
+
+    auto handler = [&](const uint8_t *, size_t length, aeron_header_t *header)
+        -> aeron_controlled_fragment_handler_action_t
+    {
+        aeron_image_force_close(m_image);
+        return AERON_ACTION_CONTINUE;
+    };
+
+    EXPECT_EQ(imageBoundedControlledPoll(handler, INT64_MAX, std::numeric_limits<size_t>::max()), 1);
+    EXPECT_EQ(true, aeron_image_is_closed(m_image));
+    EXPECT_EQ(m_sub_pos, initialPosition + alignedMessageLength);
+}
+
 TEST_F(ImageTest, shouldPollFragmentsToBoundedFragmentHandlerWithMaxPositionBeforeNextMessage)
 {
     createImage();
@@ -766,6 +960,31 @@ TEST_F(ImageTest, shouldPollFragmentsToBoundedFragmentHandlerWithMaxPositionBefo
     auto null_handler = [&](const uint8_t *, size_t length, aeron_header_t *header) {};
 
     EXPECT_EQ(imageBoundedPoll(null_handler, maxPosition, std::numeric_limits<size_t>::max()), 1);
+    EXPECT_EQ(m_sub_pos, initialPosition + alignedMessageLength);
+}
+
+TEST_F(ImageTest, shouldStopPollFragmentsToBoundedFragmentHandlerIfImageIsClosed)
+{
+    createImage();
+
+    const size_t messageLength = 120;
+    const int64_t alignedMessageLength =
+        AERON_ALIGN(messageLength + AERON_DATA_HEADER_LENGTH, AERON_LOGBUFFER_FRAME_ALIGNMENT);
+    const int64_t initialPosition = aeron_logbuffer_compute_position(
+        INITIAL_TERM_ID, 0, m_position_bits_to_shift, INITIAL_TERM_ID);
+
+    m_sub_pos = initialPosition;
+
+    appendMessage(initialPosition, messageLength);
+    appendMessage(initialPosition + alignedMessageLength, messageLength);
+
+    auto null_handler = [&](const uint8_t *, size_t length, aeron_header_t *header)
+        {
+            aeron_image_force_close(m_image);
+        };
+
+    EXPECT_EQ(imageBoundedPoll(null_handler, INT64_MAX, std::numeric_limits<size_t>::max()), 1);
+    EXPECT_EQ(true, aeron_image_is_closed(m_image));
     EXPECT_EQ(m_sub_pos, initialPosition + alignedMessageLength);
 }
 
@@ -852,4 +1071,17 @@ TEST_F(ImageTest, shouldPollFragmentsToBoundedFragmentHandlerWithMaxPositionAbov
 
     EXPECT_EQ(imageBoundedPoll(handler, maxPosition, std::numeric_limits<size_t>::max()), 1);
     EXPECT_EQ(m_sub_pos, m_term_length);
+}
+
+TEST_F(ImageTest, shouldCorrectlyCountReferences)
+{
+    createImage();
+
+    EXPECT_EQ(1, aeron_image_refcnt_volatile(m_image));
+    EXPECT_EQ(1, aeron_image_incr_refcnt(m_image));
+    EXPECT_EQ(2, aeron_image_refcnt_volatile(m_image));
+    EXPECT_EQ(2, aeron_image_decr_refcnt(m_image));
+    EXPECT_EQ(1, aeron_image_refcnt_volatile(m_image));
+    EXPECT_EQ(1, aeron_image_decr_refcnt(m_image));
+    EXPECT_EQ(0, aeron_image_refcnt_volatile(m_image));
 }

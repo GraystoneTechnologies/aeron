@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,10 +26,10 @@
 
 namespace aeron { namespace concurrent {
 
-static const std::uint8_t BACKOFF_STATE_NOT_IDLE = 0;
-static const std::uint8_t BACKOFF_STATE_SPINNING = 1;
-static const std::uint8_t BACKOFF_STATE_YIELDING = 2;
-static const std::uint8_t BACKOFF_STATE_PARKING = 3;
+static constexpr std::uint8_t BACKOFF_STATE_NOT_IDLE = 0;
+static constexpr std::uint8_t BACKOFF_STATE_SPINNING = 1;
+static constexpr std::uint8_t BACKOFF_STATE_YIELDING = 2;
+static constexpr std::uint8_t BACKOFF_STATE_PARKING = 3;
 
 class BackoffIdleStrategy
 {

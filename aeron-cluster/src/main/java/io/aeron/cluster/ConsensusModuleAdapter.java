@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,7 +37,6 @@ final class ConsensusModuleAdapter implements AutoCloseable
     private final ServiceAckDecoder serviceAckDecoder = new ServiceAckDecoder();
     private final CloseSessionDecoder closeSessionDecoder = new CloseSessionDecoder();
     private final ClusterMembersQueryDecoder clusterMembersQueryDecoder = new ClusterMembersQueryDecoder();
-    private final RemoveMemberDecoder removeMemberDecoder = new RemoveMemberDecoder();
     private final ControlledFragmentAssembler fragmentAssembler = new ControlledFragmentAssembler(this::onFragment);
 
     ConsensusModuleAdapter(final Subscription subscription, final ConsensusModuleAgent consensusModuleAgent)
@@ -145,18 +144,6 @@ final class ConsensusModuleAdapter implements AutoCloseable
                 consensusModuleAgent.onClusterMembersQuery(
                     clusterMembersQueryDecoder.correlationId(),
                     BooleanType.TRUE == clusterMembersQueryDecoder.extended());
-                break;
-
-            case RemoveMemberDecoder.TEMPLATE_ID:
-                removeMemberDecoder.wrap(
-                    buffer,
-                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
-                    messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
-
-                consensusModuleAgent.onRemoveMember(
-                    removeMemberDecoder.memberId(),
-                    BooleanType.TRUE == removeMemberDecoder.isPassive());
                 break;
         }
 

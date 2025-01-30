@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,6 +27,10 @@
 
 #define AERON_MIN_FLOW_CONTROL_RECEIVERS_COUNTER_NAME ("fc-receivers")
 
+#define AERON_MAX_FLOW_CONTROL_RETRANSMIT_RECEIVER_WINDOW_MULTIPLE (4)
+#define AERON_UNICAST_FLOW_CONTROL_RETRANSMIT_RECEIVER_WINDOW_MULTIPLE (16)
+#define AERON_MIN_FLOW_CONTROL_RETRANSMIT_RECEIVER_WINDOW_MULTIPLE (16)
+
 typedef int64_t (*aeron_flow_control_strategy_on_idle_func_t)(
     void *state,
     int64_t now_ns,
@@ -53,6 +57,27 @@ typedef int64_t (*aeron_flow_control_strategy_on_setup_func_t)(
     size_t position_bits_to_shift,
     int64_t snd_pos);
 
+typedef void (*aeron_flow_control_strategy_on_error_func_t)(
+    void *state,
+    const uint8_t *error,
+    size_t length,
+    struct sockaddr_storage *recv_addr,
+    int64_t now_ns);
+
+typedef void (*aeron_flow_control_strategy_on_trigger_send_setup_func_t)(
+    void *state,
+    const uint8_t *sm,
+    size_t length,
+    struct sockaddr_storage *recv_addr,
+    int64_t now_ns);
+
+typedef size_t (*aeron_flow_control_strategy_max_retransmission_length_func_t)(
+    void *state,
+    size_t term_offset,
+    size_t resend_length,
+    size_t term_buffer_length,
+    size_t mtu_length);
+
 typedef int (*aeron_flow_control_strategy_fini_func_t)(aeron_flow_control_strategy_t *strategy);
 
 typedef bool (*aeron_flow_control_strategy_has_required_receivers_func_t)(aeron_flow_control_strategy_t *strategy);
@@ -62,8 +87,11 @@ typedef struct aeron_flow_control_strategy_stct
     aeron_flow_control_strategy_on_sm_func_t on_status_message;
     aeron_flow_control_strategy_on_idle_func_t on_idle;
     aeron_flow_control_strategy_on_setup_func_t on_setup;
+    aeron_flow_control_strategy_on_error_func_t on_error;
     aeron_flow_control_strategy_fini_func_t fini;
     aeron_flow_control_strategy_has_required_receivers_func_t has_required_receivers;
+    aeron_flow_control_strategy_on_trigger_send_setup_func_t on_trigger_send_setup;
+    aeron_flow_control_strategy_max_retransmission_length_func_t max_retransmission_length;
     void *state;
 }
 aeron_flow_control_strategy_t;
@@ -164,5 +192,11 @@ aeron_flow_control_strategy_supplier_func_table_entry_t;
 
 int aeron_flow_control_parse_tagged_options(
     size_t options_length, const char *options, aeron_flow_control_tagged_options_t *flow_control_options);
+
+size_t aeron_flow_control_calculate_retransmission_length(
+    size_t resend_length,
+    size_t term_buffer_length,
+    size_t term_offset,
+    size_t retransmit_receiver_window_multiple);
 
 #endif //AERON_FLOW_CONTROL_H

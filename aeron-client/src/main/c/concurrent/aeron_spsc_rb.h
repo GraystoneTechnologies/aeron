@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -67,14 +67,14 @@ void aeron_spsc_rb_consumer_heartbeat_time(aeron_spsc_rb_t *ring_buffer, int64_t
 inline int64_t aeron_spsc_rb_consumer_position(aeron_spsc_rb_t *ring_buffer)
 {
     int64_t position;
-    AERON_GET_VOLATILE(position, ring_buffer->descriptor->head_position);
+    AERON_GET_ACQUIRE(position, ring_buffer->descriptor->head_position);
     return position;
 }
 
 inline int64_t aeron_spsc_rb_producer_position(aeron_spsc_rb_t *ring_buffer)
 {
     int64_t position;
-    AERON_GET_VOLATILE(position, ring_buffer->descriptor->tail_position);
+    AERON_GET_ACQUIRE(position, ring_buffer->descriptor->tail_position);
     return position;
 }
 

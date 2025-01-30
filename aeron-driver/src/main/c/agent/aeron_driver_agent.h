@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,6 +33,7 @@
 
 typedef enum aeron_driver_agent_event_enum
 {
+    AERON_DRIVER_EVENT_UNKNOWN_EVENT = -1,
     AERON_DRIVER_EVENT_FRAME_IN = 1,
     AERON_DRIVER_EVENT_FRAME_OUT = 2,
     AERON_DRIVER_EVENT_CMD_IN_ADD_PUBLICATION = 3,
@@ -74,13 +75,16 @@ typedef enum aeron_driver_agent_event_enum
     AERON_DRIVER_EVENT_NAME_RESOLUTION_RESOLVE = 50,
     AERON_DRIVER_EVENT_NAME_TEXT_DATA = 51,
     AERON_DRIVER_EVENT_NAME_RESOLUTION_LOOKUP = 52,
+    AERON_DRIVER_EVENT_NAME_RESOLUTION_HOST_NAME = 53,
+    AERON_DRIVER_EVENT_NAK_SENT = 54,
+    AERON_DRIVER_EVENT_RESEND = 55,
+    AERON_DRIVER_EVENT_CMD_IN_REMOVE_DESTINATION_BY_ID = 56,
+    AERON_DRIVER_EVENT_CMD_IN_REJECT_IMAGE = 57,
+    AERON_DRIVER_EVENT_NAK_RECEIVED = 58,
 
     // C-specific events. Note: event IDs are dynamic to avoid gaps in the sparse arrays.
-    AERON_DRIVER_EVENT_ADD_DYNAMIC_DISSECTOR,
-    AERON_DRIVER_EVENT_DYNAMIC_DISSECTOR_EVENT,
-
-    AERON_DRIVER_EVENT_NUM_ELEMENTS, // number of elements in this enum (including gaps)
-    AERON_DRIVER_EVENT_UNKNOWN_EVENT = -1
+    AERON_DRIVER_EVENT_ADD_DYNAMIC_DISSECTOR = 59,
+    AERON_DRIVER_EVENT_DYNAMIC_DISSECTOR_EVENT = 60,
 }
 aeron_driver_agent_event_t;
 
@@ -100,7 +104,6 @@ aeron_driver_agent_cmd_log_header_t;
 typedef struct aeron_driver_agent_frame_log_header_stct
 {
     int64_t time_ns;
-    int32_t result;
     int32_t sockaddr_len;
     int32_t message_len;
 }
@@ -165,6 +168,31 @@ typedef struct aeron_driver_agent_flow_control_receiver_change_log_header_stct
 }
 aeron_driver_agent_flow_control_receiver_change_log_header_t;
 
+typedef struct aeron_driver_agent_nak_message_header_stct
+{
+    int64_t time_ns;
+    struct sockaddr_storage address;
+    int32_t session_id;
+    int32_t stream_id;
+    int32_t term_id;
+    int32_t term_offset;
+    int32_t nak_length;
+    int32_t channel_length;
+}
+aeron_driver_agent_nak_message_header_t;
+
+typedef struct aeron_driver_agent_resend_header_stct
+{
+    int64_t time_ns;
+    int32_t session_id;
+    int32_t stream_id;
+    int32_t term_id;
+    int32_t term_offset;
+    int32_t resend_length;
+    int32_t channel_length;
+}
+aeron_driver_agent_resend_header_t;
+
 typedef struct aeron_driver_agent_name_resolver_resolve_log_header_stct
 {
     int64_t time_ns;
@@ -187,6 +215,14 @@ typedef struct aeron_driver_agent_name_resolver_lookup_log_header_stct
 }
 aeron_driver_agent_name_resolver_lookup_log_header_t;
 
+typedef struct aeron_driver_agent_name_resolver_host_name_log_header_stct
+{
+    int64_t time_ns;
+    int64_t duration_ns;
+    int32_t host_name_length;
+}
+aeron_driver_agent_name_resolver_host_name_log_header_t;
+
 typedef struct aeron_driver_agent_text_data_log_header_stct
 {
     int64_t time_ns;
@@ -199,6 +235,8 @@ aeron_mpsc_rb_t *aeron_driver_agent_mpsc_rb(void);
 typedef int (*aeron_driver_context_init_t)(aeron_driver_context_t **);
 
 int aeron_driver_agent_context_init(aeron_driver_context_t *context);
+
+size_t aeron_driver_agent_max_event_count(void);
 
 const char *aeron_driver_agent_dissect_log_header(
     int64_t time_ns,
@@ -224,7 +262,7 @@ bool aeron_driver_agent_is_event_enabled(aeron_driver_agent_event_t id);
 
 const char *aeron_driver_agent_event_name(aeron_driver_agent_event_t id);
 
-void aeron_driver_agent_untethered_subscription_state_change_interceptor(
+void aeron_driver_agent_untethered_subscription_state_change(
     aeron_tetherable_position_t *tetherable_position,
     int64_t now_ns,
     aeron_subscription_tether_state_t new_state,
@@ -250,8 +288,7 @@ void aeron_driver_agent_conductor_to_driver_interceptor(
 void aeron_driver_agent_conductor_to_client_interceptor(
     aeron_driver_conductor_t *conductor, int32_t msg_type_id, const void *message, size_t length);
 
-void aeron_driver_agent_log_frame(
-    int32_t msg_type_id, const struct msghdr *msghdr, int result, int32_t message_len);
+void aeron_driver_agent_log_frame(int32_t msg_type_id, const struct msghdr *msghdr, int32_t message_len);
 
 void aeron_driver_agent_sender_proxy_on_add_endpoint(const void *channel);
 
@@ -280,5 +317,34 @@ void aeron_driver_agent_flow_control_on_receiver_removed(
     size_t channel_length,
     const char *channel,
     size_t receiver_count);
+
+void aeron_driver_agent_send_nak_message(
+    const struct sockaddr_storage *address,
+    int32_t session_id,
+    int32_t stream_id,
+    int32_t term_id,
+    int32_t term_offset,
+    int32_t nak_length,
+    size_t channel_length,
+    const char *channel);
+
+void aeron_driver_agent_on_nak_message(
+    const struct sockaddr_storage *address,
+    int32_t session_id,
+    int32_t stream_id,
+    int32_t term_id,
+    int32_t term_offset,
+    int32_t nak_length,
+    size_t channel_length,
+    const char *channel);
+
+void aeron_driver_agent_resend(
+    int32_t session_id,
+    int32_t stream_id,
+    int32_t term_id,
+    int32_t term_offset,
+    int32_t resend_length,
+    size_t channel_length,
+    const char *channel);
 
 #endif //AERON_DRIVER_AGENT_H

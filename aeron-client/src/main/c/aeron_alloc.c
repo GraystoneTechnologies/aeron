@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,29 +36,31 @@
 
 int aeron_alloc_no_err(void **ptr, size_t size)
 {
-    *ptr = malloc(size);
-
-    if (NULL == *ptr)
+    void *bytes = malloc(size);
+    if (NULL == bytes)
     {
+        *ptr = NULL;
         return -1;
     }
 
-    memset(*ptr, 0, size);
+    memset(bytes, 0, size);
+    *ptr = bytes;
 
     return 0;
 }
 
 int aeron_alloc(void **ptr, size_t size)
 {
-    *ptr = malloc(size);
-
-    if (NULL == *ptr)
+    void *bytes = malloc(size);
+    if (NULL == bytes)
     {
+        *ptr = NULL;
         AERON_SET_ERR(ENOMEM, "Failed to allocate %" PRIu64 " bytes", (uint64_t)size);
         return -1;
     }
 
-    memset(*ptr, 0, size);
+    memset(bytes, 0, size);
+    *ptr = bytes;
 
     return 0;
 }
@@ -97,11 +99,12 @@ int aeron_alloc_aligned(void **ptr, size_t *offset, size_t size, size_t alignmen
     return 0;
 }
 
+#if defined(__linux__) || defined(AERON_COMPILER_MSVC)
 int aeron_reallocf(void **ptr, size_t size)
 {
-#if defined(__linux__) || defined(AERON_COMPILER_MSVC)
+    void *new_ptr = NULL;
     /* mimic reallocf */
-    if ((*ptr = realloc(*ptr, size)) == NULL)
+    if ((new_ptr = realloc(*ptr, size)) == NULL)
     {
         if (0 == size)
         {
@@ -110,6 +113,7 @@ int aeron_reallocf(void **ptr, size_t size)
         else
         {
             free(*ptr);
+            *ptr = NULL;
             errno = ENOMEM;
 #if defined(AERON_COMPILER_MSVC)
             SetLastError(ERROR_OUTOFMEMORY);
@@ -117,16 +121,24 @@ int aeron_reallocf(void **ptr, size_t size)
             return -1;
         }
     }
+    else
+    {
+        *ptr = new_ptr;
+    }
+
+    return 0;
+}
 #else
+int aeron_reallocf(void **ptr, size_t size)
+{
     if ((*ptr = reallocf(*ptr, size)) == NULL)
     {
         errno = ENOMEM;
         return -1;
     }
-#endif
-
     return 0;
 }
+#endif
 
 void aeron_free(void *ptr)
 {

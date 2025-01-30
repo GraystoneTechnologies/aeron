@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import io.aeron.ExclusivePublication;
 import io.aeron.FragmentAssembler;
 import io.aeron.Image;
 import io.aeron.archive.Archive;
+import io.aeron.archive.ArchiveTool;
 import io.aeron.archive.client.AeronArchive;
 import io.aeron.archive.status.RecordingPos;
 import io.aeron.cluster.ClusterMembership;
@@ -33,6 +34,7 @@ import io.aeron.cluster.service.Cluster;
 import io.aeron.cluster.service.ClusterTerminationException;
 import io.aeron.cluster.service.ClusteredServiceContainer;
 import io.aeron.driver.MediaDriver;
+import io.aeron.exceptions.AeronException;
 import io.aeron.exceptions.TimeoutException;
 import io.aeron.logbuffer.BufferClaim;
 import io.aeron.logbuffer.FragmentHandler;
@@ -57,6 +59,7 @@ import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.IntPredicate;
 import java.util.zip.CRC32;
 
@@ -98,28 +101,28 @@ public final class TestNode implements AutoCloseable
                 .terminationHook(ClusterTests.terminationHook(
                 context.isTerminationExpected, context.hasMemberTerminated));
 
+            final AeronArchive.Context archiveContext = context.consensusModuleContext.archiveContext().clone();
+
             consensusModule = ConsensusModule.launch(context.consensusModuleContext);
             final File baseDir = context.consensusModuleContext.clusterDir().getParentFile();
             dataCollector.addForCleanup(baseDir);
 
             containers = new ClusteredServiceContainer[services.length];
-            final File servicesDir = new File(baseDir, "services");
             for (int i = 0; i < services.length; i++)
             {
                 final ClusteredServiceContainer.Context ctx = context.serviceContainerContext.clone();
                 ctx.aeronDirectoryName(aeronDirectoryName)
-                    .archiveContext(context.aeronArchiveContext.clone()
-                        .controlRequestChannel("aeron:ipc")
-                        .controlResponseChannel("aeron:ipc"))
+                    .archiveContext(archiveContext.clone())
                     .terminationHook(ClusterTests.terminationHook(
                         context.isTerminationExpected, context.hasServiceTerminated[i]))
-                    .clusterDir(servicesDir)
+                    .clusterDir(context.consensusModuleContext.clusterDir())
+                    .markFileDir(context.consensusModuleContext.markFileDir())
                     .clusteredService(services[i])
+                    .snapshotDurationThresholdNs(TimeUnit.MILLISECONDS.toNanos(100))
                     .serviceId(i);
                 containers[i] = ClusteredServiceContainer.launch(ctx);
             }
 
-            dataCollector.add(servicesDir.toPath());
             dataCollector.add(consensusModule.context().clusterDir().toPath());
             dataCollector.add(archive.context().archiveDir().toPath());
             dataCollector.add(mediaDriver.context().aeronDirectory().toPath());
@@ -170,7 +173,12 @@ public final class TestNode implements AutoCloseable
             throw new IllegalStateException("container count expected=1 actual=" + containers.length);
         }
 
-        return containers[0];
+        return container(0);
+    }
+
+    public ClusteredServiceContainer container(final int index)
+    {
+        return containers[index];
     }
 
     public TestService service()
@@ -225,7 +233,7 @@ public final class TestNode implements AutoCloseable
         }
     }
 
-    ElectionState electionState()
+    public ElectionState electionState()
     {
         return ElectionState.get(consensusModule.context().electionStateCounter());
     }
@@ -255,9 +263,11 @@ public final class TestNode implements AutoCloseable
         }
 
         final CountersReader countersReader = countersReader();
-        final int counterId = RecordingPos.findCounterIdByRecording(countersReader, recordingId);
+        final int counterId =
+            RecordingPos.findCounterIdByRecording(countersReader, recordingId, archive.context().archiveId());
         if (NULL_VALUE == counterId)
         {
+            ArchiveTool.describeRecording(System.out, archive().context().archiveDir(), recordingId);
             fail("recording not active " + recordingId);
         }
 
@@ -317,16 +327,6 @@ public final class TestNode implements AutoCloseable
         return clusterMembership;
     }
 
-    public void removeMember(final int followerMemberId, final boolean isPassive)
-    {
-        final File clusterDir = consensusModule.context().clusterDir();
-
-        if (!ClusterTool.removeMember(clusterDir, followerMemberId, isPassive))
-        {
-            throw new IllegalStateException("could not remove member");
-        }
-    }
-
     public String hostname()
     {
         return TestCluster.hostname(index());
@@ -352,11 +352,13 @@ public final class TestNode implements AutoCloseable
 
         volatile boolean wasSnapshotTaken = false;
         volatile boolean wasSnapshotLoaded = false;
+        volatile boolean failNextSnapshot = false;
         private int index;
         private volatile boolean hasReceivedUnexpectedMessage = false;
         private volatile Cluster.Role roleChangedTo = null;
         private final AtomicInteger activeSessionCount = new AtomicInteger();
-        final AtomicInteger messageCount = new AtomicInteger();
+        protected final AtomicInteger messageCount = new AtomicInteger();
+
         final AtomicInteger liveMessageCount = new AtomicInteger();
         final AtomicInteger snapshotMessageCount = new AtomicInteger();
         final AtomicInteger timerCount = new AtomicInteger();
@@ -466,42 +468,65 @@ public final class TestNode implements AutoCloseable
             final Header header)
         {
             final String message = buffer.getStringWithoutLengthAscii(offset, length);
-            if (message.equals(ClusterTests.REGISTER_TIMER_MSG))
+            if (ClusterTests.REGISTER_TIMER_MSG.equals(message))
             {
+                idleStrategy.reset();
                 while (!cluster.scheduleTimer(1, cluster.time() + 1_000))
                 {
                     idleStrategy.idle();
                 }
             }
 
-            if (message.equals(ClusterTests.UNEXPECTED_MSG))
+            if (message.startsWith(ClusterTests.PAUSE))
             {
-                hasReceivedUnexpectedMessage = true;
-                throw new IllegalStateException("unexpected message received");
-            }
-
-            if (message.equals(ClusterTests.TERMINATE_MSG))
-            {
-                throw new ClusterTerminationException(false);
-            }
-
-            if (message.equals(ClusterTests.ECHO_SERVICE_IPC_INGRESS_MSG))
-            {
-                sendServiceIpcMessage(session, buffer, offset, length);
-            }
-            else if (message.equals(ClusterTests.ECHO_SERVICE_IPC_INGRESS_MSG_SKIP_FOLLOWER))
-            {
-                simulateBuggyApplicationCodeThatSkipsServiceMessageOnFollower(session, buffer, offset, length);
-            }
-            else
-            {
-                if (null != session)
+                try
                 {
-                    while (session.offer(buffer, offset, length) < 0)
+                    final String[] messageComponents = message.split("\\|");
+                    final int nodeIndex = Integer.parseInt(messageComponents[1]);
+
+                    if (nodeIndex == index)
                     {
-                        idleStrategy.idle();
+                        final long durationNs = Long.parseLong(messageComponents[2]);
+                        LockSupport.parkNanos(durationNs);
                     }
                 }
+                catch (final NumberFormatException ex)
+                {
+                    throw new AeronException("Invalid message components with message: " + message, ex);
+                }
+            }
+
+            switch (message)
+            {
+                case ClusterTests.UNEXPECTED_MSG:
+                    hasReceivedUnexpectedMessage = true;
+                    throw new IllegalStateException("unexpected message received");
+
+                case ClusterTests.TERMINATE_MSG:
+                    throw new ClusterTerminationException(false);
+
+                case ClusterTests.ECHO_SERVICE_IPC_INGRESS_MSG:
+                    sendServiceIpcMessage(session, buffer, offset, length);
+                    break;
+
+                case ClusterTests.ECHO_SERVICE_IPC_INGRESS_MSG_SKIP_FOLLOWER:
+                    simulateBuggyApplicationCodeThatSkipsServiceMessageOnFollower(session, buffer, offset, length);
+                    break;
+
+                default:
+                    if (ClusterTests.ERROR_MSG.equals(message))
+                    {
+                        cluster.context().errorHandler().onError(new Exception(message));
+                    }
+
+                    if (null != session)
+                    {
+                        while (session.offer(buffer, offset, length) < 0)
+                        {
+                            idleStrategy.idle();
+                        }
+                    }
+                    break;
             }
 
             messageCount.incrementAndGet();
@@ -528,6 +553,7 @@ public final class TestNode implements AutoCloseable
         {
             if (null != session)
             {
+                idleStrategy.reset();
                 while (cluster.offer(buffer, offset, length) < 0)
                 {
                     idleStrategy.idle();
@@ -537,10 +563,7 @@ public final class TestNode implements AutoCloseable
             {
                 for (final ClientSession clientSession : cluster.clientSessions())
                 {
-                    while (clientSession.offer(buffer, offset, length) < 0)
-                    {
-                        idleStrategy.idle();
-                    }
+                    echoMessage(clientSession, buffer, offset, length);
                 }
             }
         }
@@ -552,6 +575,12 @@ public final class TestNode implements AutoCloseable
 
         public void onTakeSnapshot(final ExclusivePublication snapshotPublication)
         {
+            if (failNextSnapshot)
+            {
+                failNextSnapshot = false;
+                throw new RuntimeException("This is a simulated failure for this snapshot");
+            }
+
             final UnsafeBuffer buffer = new UnsafeBuffer(new byte[SNAPSHOT_MSG_LENGTH]);
             buffer.putInt(0, messageCount.get());
             buffer.putInt(SNAPSHOT_MSG_LENGTH - SIZE_OF_INT, messageCount.get());
@@ -649,6 +678,49 @@ public final class TestNode implements AutoCloseable
                 keepAlive.run();
             }
         }
+
+        public void failNextSnapshot(final boolean failNextSnapshot)
+        {
+            this.failNextSnapshot = failNextSnapshot;
+        }
+
+        public String toString()
+        {
+            return "TestService{" +
+                "wasSnapshotTaken=" + wasSnapshotTaken +
+                ", wasSnapshotLoaded=" + wasSnapshotLoaded +
+                ", failNextSnapshot=" + failNextSnapshot +
+                ", index=" + index +
+                ", hasReceivedUnexpectedMessage=" + hasReceivedUnexpectedMessage +
+                ", roleChangedTo=" + roleChangedTo +
+                ", activeSessionCount=" + activeSessionCount +
+                ", messageCount=" + messageCount +
+                ", liveMessageCount=" + liveMessageCount +
+                ", snapshotMessageCount=" + snapshotMessageCount +
+                ", timerCount=" + timerCount +
+                '}';
+        }
+    }
+
+    public static class SleepOnSnapshotTestService extends TestNode.TestService
+    {
+        long snapshotDelayMs = 0;
+
+        public TestService snapshotDelayMs(final long snapshotDelayMs)
+        {
+            this.snapshotDelayMs = snapshotDelayMs;
+            return this;
+        }
+
+        public void onTakeSnapshot(final ExclusivePublication snapshotPublication)
+        {
+            super.onTakeSnapshot(snapshotPublication);
+
+            if (snapshotDelayMs > 0)
+            {
+                Tests.sleep(snapshotDelayMs);
+            }
+        }
     }
 
     public static class ChecksumService extends TestNode.TestService
@@ -728,6 +800,9 @@ public final class TestNode implements AutoCloseable
 
     public static class MessageTrackingService extends TestNode.TestService
     {
+        public static final int TIMER_MESSAGES_PER_INGRESS = 2;
+        public static final int SERVICE_MESSAGES_PER_INGRESS = 3;
+
         private static volatile boolean delaySessionMessageProcessing;
         private static final byte SNAPSHOT_COUNTERS = (byte)1;
         private static final byte SNAPSHOT_CLIENT_MESSAGES = (byte)2;
@@ -886,7 +961,7 @@ public final class TestNode implements AutoCloseable
                 clientMessages.addInt(messageId);
 
                 // Send 3 service messages
-                for (int i = 0; i < 3; i++)
+                for (int i = 0; i < SERVICE_MESSAGES_PER_INGRESS; i++)
                 {
                     messageBuffer.putInt(0, ++nextServiceMessageNumber, LITTLE_ENDIAN);
 
@@ -898,7 +973,7 @@ public final class TestNode implements AutoCloseable
                 }
 
                 // Schedule two timers
-                for (int i = 0; i < 2; i++)
+                for (int i = 0; i < TIMER_MESSAGES_PER_INGRESS; i++)
                 {
                     final long timerId = --nextTimerCorrelationId;
                     idleStrategy.reset();
@@ -919,6 +994,7 @@ public final class TestNode implements AutoCloseable
                 final int serviceMessageId = buffer.getInt(offset, LITTLE_ENDIAN);
                 serviceMessages.addInt(serviceMessageId);
             }
+
             messageCount.incrementAndGet(); // count all messages
         }
 
@@ -948,11 +1024,12 @@ public final class TestNode implements AutoCloseable
             messageBuffer.putInt(offset.get(), messages.size(), LITTLE_ENDIAN);
             offset.addAndGet(SIZE_OF_INT);
 
-            messages.forEachInt((messageId) ->
-            {
-                messageBuffer.putInt(offset.get(), messageId);
-                offset.addAndGet(SIZE_OF_INT);
-            });
+            messages.forEachInt(
+                (messageId) ->
+                {
+                    messageBuffer.putInt(offset.get(), messageId);
+                    offset.addAndGet(SIZE_OF_INT);
+                });
 
             idleStrategy.reset();
             while (snapshotPublication.offer(messageBuffer, 0, offset.get()) < 0)
@@ -969,11 +1046,12 @@ public final class TestNode implements AutoCloseable
             messageBuffer.putInt(offset.get(), timers.size(), LITTLE_ENDIAN);
             offset.addAndGet(SIZE_OF_INT);
 
-            timers.forEachLong((correlationId) ->
-            {
-                messageBuffer.putLong(offset.get(), correlationId);
-                offset.addAndGet(SIZE_OF_LONG);
-            });
+            timers.forEachLong(
+                (correlationId) ->
+                {
+                    messageBuffer.putLong(offset.get(), correlationId);
+                    offset.addAndGet(SIZE_OF_LONG);
+                });
 
             idleStrategy.reset();
             while (snapshotPublication.offer(messageBuffer, 0, offset.get()) < 0)
@@ -1034,7 +1112,6 @@ public final class TestNode implements AutoCloseable
         Context(final TestService[] services, final String nodeMappings)
         {
             mediaDriverContext.nameResolver(new RedirectingNameResolver(nodeMappings));
-            consensusModuleContext.nameResolver(new RedirectingNameResolver(nodeMappings));
 
             this.services = services;
             hasServiceTerminated = new AtomicBoolean[services.length];

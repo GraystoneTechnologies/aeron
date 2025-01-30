@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,11 +37,7 @@ int aeron_test_udp_channel_transport_init(
     struct sockaddr_storage *bind_addr,
     struct sockaddr_storage *multicast_if_addr,
     struct sockaddr_storage *connect_addr,
-    unsigned int multicast_if_index,
-    uint8_t ttl,
-    size_t socket_rcvbuf,
-    size_t socket_sndbuf,
-    bool is_media_timestamping,
+    aeron_udp_channel_transport_params_t *params,
     aeron_driver_context_t *context,
     aeron_udp_channel_transport_affinity_t affinity)
 {

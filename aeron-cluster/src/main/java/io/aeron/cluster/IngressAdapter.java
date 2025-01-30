@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,14 +18,13 @@ package io.aeron.cluster;
 import io.aeron.ControlledFragmentAssembler;
 import io.aeron.Subscription;
 import io.aeron.cluster.client.AeronCluster;
-import io.aeron.cluster.client.ClusterException;
 import io.aeron.cluster.codecs.*;
 import io.aeron.logbuffer.ControlledFragmentHandler;
 import io.aeron.logbuffer.Header;
 import org.agrona.DirectBuffer;
 import org.agrona.collections.ArrayUtil;
 
-class IngressAdapter implements ControlledFragmentHandler, AutoCloseable
+class IngressAdapter implements AutoCloseable
 {
     private final int fragmentPollLimit;
     private final MessageHeaderDecoder messageHeaderDecoder = new MessageHeaderDecoder();
@@ -35,9 +34,10 @@ class IngressAdapter implements ControlledFragmentHandler, AutoCloseable
     private final SessionKeepAliveDecoder sessionKeepAliveDecoder = new SessionKeepAliveDecoder();
     private final ChallengeResponseDecoder challengeResponseDecoder = new ChallengeResponseDecoder();
     private final AdminRequestDecoder adminRequestDecoder = new AdminRequestDecoder();
-    private final ControlledFragmentAssembler fragmentAssembler = new ControlledFragmentAssembler(this);
+    private final ControlledFragmentAssembler fragmentAssembler = new ControlledFragmentAssembler(this::onMessage);
     private final ConsensusModuleAgent consensusModuleAgent;
     private Subscription subscription;
+    private Subscription ipcSubscription;
 
     IngressAdapter(final int fragmentPollLimit, final ConsensusModuleAgent consensusModuleAgent)
     {
@@ -48,37 +48,47 @@ class IngressAdapter implements ControlledFragmentHandler, AutoCloseable
     public void close()
     {
         final Subscription subscription = this.subscription;
+        final Subscription ipcSubscription = this.ipcSubscription;
 
         this.subscription = null;
-        fragmentAssembler.clear();
+        this.ipcSubscription = null;
+
         if (null != subscription)
         {
-            final long subscriptionRegistrationId = subscription.registrationId();
-
             subscription.close();
-            consensusModuleAgent.awaitNoLocalSocketAddresses(subscriptionRegistrationId);
         }
+
+        if (null != ipcSubscription)
+        {
+            ipcSubscription.close();
+        }
+
+        fragmentAssembler.clear();
     }
 
     @SuppressWarnings("MethodLength")
-    public Action onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header)
+    public ControlledFragmentHandler.Action onMessage(
+        final DirectBuffer buffer, final int offset, final int length, final Header header)
     {
         messageHeaderDecoder.wrap(buffer, offset);
 
         final int schemaId = messageHeaderDecoder.schemaId();
+        final int templateId = messageHeaderDecoder.templateId();
+        final int actingVersion = messageHeaderDecoder.version();
+        final int actingBlockLength = messageHeaderDecoder.blockLength();
         if (schemaId != MessageHeaderDecoder.SCHEMA_ID)
         {
-            throw new ClusterException("expected schemaId=" + MessageHeaderDecoder.SCHEMA_ID + ", actual=" + schemaId);
+            return consensusModuleAgent.onExtensionMessage(
+                actingBlockLength, templateId, schemaId, actingVersion, buffer, offset, length, header);
         }
 
-        final int templateId = messageHeaderDecoder.templateId();
         if (templateId == SessionMessageHeaderDecoder.TEMPLATE_ID)
         {
             sessionMessageHeaderDecoder.wrap(
                 buffer,
                 offset + MessageHeaderDecoder.ENCODED_LENGTH,
                 messageHeaderDecoder.blockLength(),
-                messageHeaderDecoder.version());
+                actingVersion);
 
             return consensusModuleAgent.onIngressMessage(
                 sessionMessageHeaderDecoder.leadershipTermId(),
@@ -96,19 +106,15 @@ class IngressAdapter implements ControlledFragmentHandler, AutoCloseable
                     buffer,
                     offset + MessageHeaderDecoder.ENCODED_LENGTH,
                     messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
+                    actingVersion);
 
                 final String responseChannel = connectRequestDecoder.responseChannel();
                 final int credentialsLength = connectRequestDecoder.encodedCredentialsLength();
-                final byte[] credentials;
+                byte[] credentials = ArrayUtil.EMPTY_BYTE_ARRAY;
                 if (credentialsLength > 0)
                 {
                     credentials = new byte[credentialsLength];
                     connectRequestDecoder.getEncodedCredentials(credentials, 0, credentialsLength);
-                }
-                else
-                {
-                    credentials = ArrayUtil.EMPTY_BYTE_ARRAY;
                 }
 
                 consensusModuleAgent.onSessionConnect(
@@ -126,7 +132,7 @@ class IngressAdapter implements ControlledFragmentHandler, AutoCloseable
                     buffer,
                     offset + MessageHeaderDecoder.ENCODED_LENGTH,
                     messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
+                    actingVersion);
 
                 consensusModuleAgent.onSessionClose(
                     closeRequestDecoder.leadershipTermId(),
@@ -140,12 +146,11 @@ class IngressAdapter implements ControlledFragmentHandler, AutoCloseable
                     buffer,
                     offset + MessageHeaderDecoder.ENCODED_LENGTH,
                     messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
+                    actingVersion);
 
                 consensusModuleAgent.onSessionKeepAlive(
                     sessionKeepAliveDecoder.leadershipTermId(),
-                    sessionKeepAliveDecoder.clusterSessionId()
-                );
+                    sessionKeepAliveDecoder.clusterSessionId());
                 break;
             }
 
@@ -155,7 +160,7 @@ class IngressAdapter implements ControlledFragmentHandler, AutoCloseable
                     buffer,
                     offset + MessageHeaderDecoder.ENCODED_LENGTH,
                     messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
+                    actingVersion);
 
                 final byte[] credentials = new byte[challengeResponseDecoder.encodedCredentialsLength()];
                 challengeResponseDecoder.getEncodedCredentials(credentials, 0, credentials.length);
@@ -173,7 +178,7 @@ class IngressAdapter implements ControlledFragmentHandler, AutoCloseable
                     buffer,
                     offset + MessageHeaderDecoder.ENCODED_LENGTH,
                     messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
+                    actingVersion);
 
                 final int payloadOffset = adminRequestDecoder.offset() +
                     adminRequestDecoder.encodedLength() +
@@ -190,22 +195,30 @@ class IngressAdapter implements ControlledFragmentHandler, AutoCloseable
             }
         }
 
-        return Action.CONTINUE;
+        return ControlledFragmentHandler.Action.CONTINUE;
     }
 
-    void connect(final Subscription subscription)
+    void connect(final Subscription subscription, final Subscription ipcSubscription)
     {
         this.subscription = subscription;
+        this.ipcSubscription = ipcSubscription;
     }
 
     int poll()
     {
+        int fragmentsRead = 0;
+
         if (null != subscription)
         {
-            return subscription.controlledPoll(fragmentAssembler, fragmentPollLimit);
+            fragmentsRead += subscription.controlledPoll(fragmentAssembler, fragmentPollLimit);
         }
 
-        return 0;
+        if (null != ipcSubscription)
+        {
+            fragmentsRead += ipcSubscription.controlledPoll(fragmentAssembler, fragmentPollLimit);
+        }
+
+        return fragmentsRead;
     }
 
     void freeSessionBuffer(final int imageSessionId)

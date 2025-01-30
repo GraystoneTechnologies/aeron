@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 package io.aeron.driver;
 
 import io.aeron.driver.media.UdpChannel;
+import io.aeron.protocol.ErrorFlyweight;
 import io.aeron.protocol.SetupFlyweight;
 import io.aeron.protocol.StatusMessageFlyweight;
 import org.agrona.concurrent.status.CountersManager;
@@ -27,6 +28,31 @@ import java.net.InetSocketAddress;
  */
 public interface FlowControl extends AutoCloseable
 {
+    /**
+     * Calculates a retransmission length by clamping to a min of <code>resendLength</code>,
+     * <code>termBufferLength - termOffset</code> and <code>retransmitReceiverWindowMultiple *
+     * ${configured initial window length}</code>.
+     *
+     * @param resendLength                     requested length of a retransmit
+     * @param termBufferLength                 length of the current term.
+     * @param termOffset                       offset within the term.
+     * @param retransmitReceiverWindowMultiple multiplier to the receiver window length.
+     * @return the clamped retransmit length
+     */
+    static int calculateRetransmissionLength(
+        final int resendLength,
+        final int termBufferLength,
+        final int termOffset,
+        final int retransmitReceiverWindowMultiple)
+    {
+        final int lengthToEndOfTerm = termBufferLength - termOffset;
+        final int estimatedRetransmitLength = Configuration.receiverWindowLength(
+            termBufferLength, Configuration.INITIAL_WINDOW_LENGTH_DEFAULT) * retransmitReceiverWindowMultiple;
+
+        return (lengthToEndOfTerm < estimatedRetransmitLength) ?
+            Math.min(lengthToEndOfTerm, resendLength) : Math.min(estimatedRetransmitLength, resendLength);
+    }
+
     /**
      * Update the sender flow control strategy based on a status message from the receiver.
      *
@@ -47,13 +73,25 @@ public interface FlowControl extends AutoCloseable
         long timeNs);
 
     /**
+     * Update the sender flow control strategy based on a Status Message received triggering a setup to be sent.
+     *
+     * @param flyweight       over the Status Message received
+     * @param receiverAddress of the receiver.
+     * @param timeNs          current time (in nanoseconds).
+     */
+    void onTriggerSendSetup(
+        StatusMessageFlyweight flyweight,
+        InetSocketAddress receiverAddress,
+        long timeNs);
+
+    /**
      * Update the sender flow control strategy based on an elicited setup message being sent out.
      *
-     * @param flyweight             over the setup to be sent.
-     * @param senderLimit           for the current sender position.
-     * @param senderPosition        which has been sent.
-     * @param positionBitsToShift   in use for the length of each term buffer.
-     * @param timeNs                current time in nanoseconds.
+     * @param flyweight           over the setup to be sent.
+     * @param senderLimit         for the current sender position.
+     * @param senderPosition      which has been sent.
+     * @param positionBitsToShift in use for the length of each term buffer.
+     * @param timeNs              current time in nanoseconds.
      * @return the new position limit to be employed by the sender.
      */
     long onSetup(
@@ -62,6 +100,15 @@ public interface FlowControl extends AutoCloseable
         long senderPosition,
         int positionBitsToShift,
         long timeNs);
+
+    /**
+     * Update the sender flow control strategy if an error comes from one of the receivers.
+     *
+     * @param errorFlyweight    over the error received.
+     * @param receiverAddress   the address of the receiver.
+     * @param timeNs            current time in nanoseconds
+     */
+    void onError(ErrorFlyweight errorFlyweight, InetSocketAddress receiverAddress, long timeNs);
 
     /**
      * Initialize the flow control strategy for a stream.
@@ -103,6 +150,18 @@ public interface FlowControl extends AutoCloseable
      * @return true if the required group of receivers is connected, otherwise false.
      */
     boolean hasRequiredReceivers();
+
+    /**
+     * The maximum window length allowed to retransmit per NAK. Will limit it by an estimate of the window limit and to
+     * the end of the current term.
+     *
+     * @param termOffset       of the NAK.
+     * @param resendLength     of the NAK.
+     * @param termBufferLength of the publication.
+     * @param mtuLength        of the publication.
+     * @return the maximum window length allowed to retransmit per NAK.
+     */
+    int maxRetransmissionLength(int termOffset, int resendLength, int termBufferLength, int mtuLength);
 
     /**
      * {@inheritDoc}

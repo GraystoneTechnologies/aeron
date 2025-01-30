@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -76,6 +76,7 @@ public class RecordingDescriptorCollectorTest
     }
 
     @Test
+    @InterruptAfter(10)
     void shouldAllowUserToRetainDescriptorsToPreventReuse(@TempDir final Path tempDir)
     {
         try (MediaDriver mediaDriver = MediaDriver.launch(new MediaDriver.Context().dirDeleteOnStart(true));
@@ -117,6 +118,7 @@ public class RecordingDescriptorCollectorTest
     }
 
     @Test
+    @InterruptAfter(10)
     void shouldShouldNotReuseDescriptorIfPoolSizeIsZero(@TempDir final Path tempDir)
     {
         try (MediaDriver mediaDriver = MediaDriver.launch(new MediaDriver.Context().dirDeleteOnStart(true));

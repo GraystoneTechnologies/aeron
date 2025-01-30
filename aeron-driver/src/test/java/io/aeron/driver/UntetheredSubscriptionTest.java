@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 package io.aeron.driver;
 
+import io.aeron.ChannelUri;
 import io.aeron.CommonContext;
 import io.aeron.driver.buffer.RawLog;
 import io.aeron.driver.buffer.TestLogFactory;
@@ -35,18 +36,19 @@ class UntetheredSubscriptionTest
     private static final int TAG_ID = 0;
     private static final int SESSION_ID = 777;
     private static final int STREAM_ID = 1003;
-    private static final String CHANNEL = CommonContext.IPC_CHANNEL;
     private static final int TERM_BUFFER_LENGTH = LogBufferDescriptor.TERM_MIN_LENGTH;
     private static final int TERM_WINDOW_LENGTH = TERM_BUFFER_LENGTH / 2;
     private static final long TIME_NS = 1000;
     private static final long UNTETHERED_WINDOW_LIMIT_TIMEOUT_NS = Configuration.untetheredWindowLimitTimeoutNs();
     private static final long UNTETHERED_RESTING_TIMEOUT_NS = Configuration.untetheredRestingTimeoutNs();
+    private static final String CHANNEL = CommonContext.IPC_CHANNEL + "?term-length=" + TERM_BUFFER_LENGTH;
 
     private final RawLog rawLog = TestLogFactory.newLogBuffers(TERM_BUFFER_LENGTH);
     private final AtomicLongPosition publisherLimit = new AtomicLongPosition();
     private final MediaDriver.Context ctx = new MediaDriver.Context()
         .cachedNanoClock(new CachedNanoClock())
         .systemCounters(mock(SystemCounters.class));
+    private final DriverConductor conductor = mock(DriverConductor.class);
 
     private IpcPublication ipcPublication;
 
@@ -54,6 +56,8 @@ class UntetheredSubscriptionTest
     void before()
     {
         ctx.cachedNanoClock().update(TIME_NS);
+        final PublicationParams params = PublicationParams.getPublicationParams(
+            ChannelUri.parse(CHANNEL), ctx, conductor, STREAM_ID, "ipc");
 
         ipcPublication = new IpcPublication(
             REGISTRATION_ID,
@@ -65,9 +69,8 @@ class UntetheredSubscriptionTest
             mock(Position.class),
             publisherLimit,
             rawLog,
-            TERM_WINDOW_LENGTH,
             true,
-            new PublicationParams());
+            params);
     }
 
     @Test
@@ -83,8 +86,7 @@ class UntetheredSubscriptionTest
         ipcPublication.addSubscriber(tetheredLink, tetheredPosition, ctx.cachedNanoClock().nanoTime());
         ipcPublication.addSubscriber(untetheredLink, untetheredPosition, ctx.cachedNanoClock().nanoTime());
 
-        final DriverConductor conductor = mock(DriverConductor.class);
-        ipcPublication.updatePublisherLimit();
+        ipcPublication.updatePublisherPositionAndLimit();
 
         final long timeNs = TIME_NS + 1;
         ipcPublication.onTimeEvent(timeNs, 0, conductor);
@@ -94,12 +96,12 @@ class UntetheredSubscriptionTest
         ipcPublication.onTimeEvent(windowLimitTimeoutNs, 0, conductor);
         verify(conductor, times(1)).notifyUnavailableImageLink(REGISTRATION_ID, untetheredLink);
 
-        ipcPublication.updatePublisherLimit();
+        ipcPublication.updatePublisherPositionAndLimit();
         assertEquals(TERM_WINDOW_LENGTH, publisherLimit.get());
 
         final long afterLingerTimeoutNs = windowLimitTimeoutNs + UNTETHERED_WINDOW_LIMIT_TIMEOUT_NS;
         ipcPublication.onTimeEvent(afterLingerTimeoutNs, 0, conductor);
-        ipcPublication.updatePublisherLimit();
+        ipcPublication.updatePublisherPositionAndLimit();
         assertEquals(tetheredPosition.get() + TERM_WINDOW_LENGTH, publisherLimit.get());
 
         final long afterRestingTimeoutNs = afterLingerTimeoutNs + UNTETHERED_RESTING_TIMEOUT_NS;
@@ -110,7 +112,7 @@ class UntetheredSubscriptionTest
             eq(SESSION_ID),
             eq(untetheredLink),
             anyInt(),
-            eq(ipcPublication.joinPosition()),
+            eq(tetheredPosition.get()),
             eq(rawLog.fileName()),
             eq(CommonContext.IPC_CHANNEL));
     }

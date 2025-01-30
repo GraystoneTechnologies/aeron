@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,7 +43,6 @@ public final class ClusterMember
 
     private boolean isBallotSent;
     private boolean isLeader;
-    private boolean hasRequestedJoin;
     private boolean hasTerminated;
     private int id;
     private long leadershipTermId = Aeron.NULL_VALUE;
@@ -51,7 +50,6 @@ public final class ClusterMember
     private long catchupReplaySessionId = Aeron.NULL_VALUE;
     private long catchupReplayCorrelationId = Aeron.NULL_VALUE;
     private long changeCorrelationId = Aeron.NULL_VALUE;
-    private long removalPosition = NULL_POSITION;
     private long logPosition = NULL_POSITION;
     private long timeOfLastAppendPositionNs = Aeron.NULL_VALUE;
     private ExclusivePublication publication;
@@ -61,6 +59,8 @@ public final class ClusterMember
     private final String logEndpoint;
     private final String catchupEndpoint;
     private final String archiveEndpoint;
+    private final String archiveResponseEndpoint;
+    private final String egressResponseEndpoint;
     private final String endpoints;
     private Boolean vote = null;
 
@@ -84,12 +84,52 @@ public final class ClusterMember
         final String archiveEndpoint,
         final String endpoints)
     {
+        this(
+            id,
+            ingressEndpoint,
+            consensusEndpoint,
+            logEndpoint,
+            catchupEndpoint,
+            archiveEndpoint,
+            null,
+            null,
+            endpoints);
+    }
+
+    /**
+     * Construct a new member of the cluster.
+     *
+     * @param id                        unique id for the member.
+     * @param ingressEndpoint           address and port endpoint to which cluster clients send ingress.
+     * @param consensusEndpoint         address and port endpoint to which other cluster members connect.
+     * @param logEndpoint               address and port endpoint to which the log is replicated.
+     * @param catchupEndpoint           address and port endpoint to which a stream is replayed for catchup to the
+     *                                  leader.
+     * @param archiveEndpoint           address and port endpoint to which the archive control channel can be reached.
+     * @param archiveResponseEndpoint   address and port endpoint to which the archive control response channel can be
+     *                                  reached.
+     * @param egressResponseEndpoint    address and port endpoint to which the egress response channel can be reached.
+     * @param endpoints                 comma separated list of endpoints.
+     */
+    public ClusterMember(
+        final int id,
+        final String ingressEndpoint,
+        final String consensusEndpoint,
+        final String logEndpoint,
+        final String catchupEndpoint,
+        final String archiveEndpoint,
+        final String archiveResponseEndpoint,
+        final String egressResponseEndpoint,
+        final String endpoints)
+    {
         this.id = id;
         this.ingressEndpoint = ingressEndpoint;
         this.consensusEndpoint = consensusEndpoint;
         this.logEndpoint = logEndpoint;
         this.catchupEndpoint = catchupEndpoint;
         this.archiveEndpoint = archiveEndpoint;
+        this.archiveResponseEndpoint = archiveResponseEndpoint;
+        this.egressResponseEndpoint = egressResponseEndpoint;
         this.endpoints = endpoints;
     }
 
@@ -100,7 +140,6 @@ public final class ClusterMember
     {
         isBallotSent = false;
         isLeader = false;
-        hasRequestedJoin = false;
         hasTerminated = false;
         vote = null;
         candidateTermId = Aeron.NULL_VALUE;
@@ -153,28 +192,6 @@ public final class ClusterMember
     }
 
     /**
-     * Set if this member requested to join the cluster.
-     *
-     * @param hasRequestedJoin the cluster.
-     * @return this for a fluent API.
-     */
-    public ClusterMember hasRequestedJoin(final boolean hasRequestedJoin)
-    {
-        this.hasRequestedJoin = hasRequestedJoin;
-        return this;
-    }
-
-    /**
-     * Has this member requested to join the cluster?
-     *
-     * @return has this member requested to join the cluster?
-     */
-    public boolean hasRequestedJoin()
-    {
-        return hasRequestedJoin;
-    }
-
-    /**
      * Set if this member has terminated.
      *
      * @param hasTerminated in notification to the leader.
@@ -194,39 +211,6 @@ public final class ClusterMember
     public boolean hasTerminated()
     {
         return hasTerminated;
-    }
-
-    /**
-     * Set the log position as of appending the event to be removed from the cluster.
-     *
-     * @param removalPosition as of appending the event to be removed from the cluster.
-     * @return this for a fluent API.
-     */
-    public ClusterMember removalPosition(final long removalPosition)
-    {
-        this.removalPosition = removalPosition;
-        return this;
-    }
-
-    /**
-     * The log position as of appending the event to be removed from the cluster.
-     *
-     * @return the log position as of appending the event to be removed from the cluster,
-     * or {@link io.aeron.archive.client.AeronArchive#NULL_POSITION} if not requested remove.
-     */
-    public long removalPosition()
-    {
-        return removalPosition;
-    }
-
-    /**
-     * Has this member requested to be removed from the cluster.
-     *
-     * @return true if this member requested to be removed from the cluster, otherwise false.
-     */
-    public boolean hasRequestedRemove()
-    {
-        return removalPosition != NULL_POSITION;
     }
 
     /**
@@ -483,6 +467,29 @@ public final class ClusterMember
     }
 
     /**
+     * The address:port endpoint for this cluster member to use on the archive to set up a response channel for
+     * control, replay and replication.
+     *
+     * @return the address:port endpoint for the archive response channel to be used by archive clients within the
+     * cluster.
+     */
+    public String archiveResponseEndpoint()
+    {
+        return archiveResponseEndpoint;
+    }
+
+    /**
+     * The address:port endpoint for the cluster member that will serve as the control address for the egress response
+     * channel that client can connect to.
+     *
+     * @return the endpoint used for the egress response channel.
+     */
+    public String egressResponseEndpoint()
+    {
+        return egressResponseEndpoint;
+    }
+
+    /**
      * The string of endpoints for this member in a comma separated list in the same order they are parsed.
      *
      * @return list of endpoints for this member in a comma separated list.
@@ -536,7 +543,7 @@ public final class ClusterMember
      */
     public static ClusterMember[] parse(final String value)
     {
-        if (null == value || value.length() == 0)
+        if (null == value || value.isEmpty())
         {
             return ClusterMember.EMPTY_MEMBERS;
         }
@@ -549,13 +556,13 @@ public final class ClusterMember
         {
             final String idAndEndpoints = memberValues[i];
             final String[] memberAttributes = idAndEndpoints.split(",");
-            final int clusterMemberId;
 
-            if (memberAttributes.length != 6)
+            if (memberAttributes.length < 6 || 8 < memberAttributes.length)
             {
                 throw new ClusterException("invalid member value: " + idAndEndpoints + " within: " + value);
             }
 
+            final int clusterMemberId;
             try
             {
                 clusterMemberId = Integer.parseInt(memberAttributes[0]);
@@ -565,13 +572,26 @@ public final class ClusterMember
                 throw new ClusterException("invalid cluster member id, must be an integer value", ex);
             }
 
-            final String endpoints = String.join(
+            final String archiveResponseEndpoint = 6 < memberAttributes.length ? memberAttributes[6] : null;
+            final String egressResponseEndpoint = 7 < memberAttributes.length ? memberAttributes[7] : null;
+
+            String endpoints = String.join(
                 ",",
                 memberAttributes[1],
                 memberAttributes[2],
                 memberAttributes[3],
                 memberAttributes[4],
                 memberAttributes[5]);
+
+            if (null != archiveResponseEndpoint)
+            {
+                endpoints += "," + archiveResponseEndpoint;
+            }
+
+            if (null != egressResponseEndpoint)
+            {
+                endpoints += "," + egressResponseEndpoint;
+            }
 
             members[i] = new ClusterMember(
                 clusterMemberId,
@@ -580,6 +600,8 @@ public final class ClusterMember
                 memberAttributes[3],
                 memberAttributes[4],
                 memberAttributes[5],
+                archiveResponseEndpoint,
+                egressResponseEndpoint,
                 endpoints);
         }
 
@@ -653,7 +675,7 @@ public final class ClusterMember
      */
     public static String encodeAsString(final List<ClusterMember> clusterMembers)
     {
-        if (0 == clusterMembers.size())
+        if (clusterMembers.isEmpty())
         {
             return "";
         }
@@ -1282,38 +1304,6 @@ public final class ClusterMember
     }
 
     /**
-     * Add a new member to an array of {@link ClusterMember}s.
-     *
-     * @param oldMembers to add to.
-     * @param newMember  to add.
-     * @return a new array containing the old members plus the new member.
-     */
-    public static ClusterMember[] addMember(final ClusterMember[] oldMembers, final ClusterMember newMember)
-    {
-        return ArrayUtil.add(oldMembers, newMember);
-    }
-
-    /**
-     * Remove a member from an array if found, otherwise return the array unmodified.
-     *
-     * @param oldMembers to remove a member from.
-     * @param memberId   of the member to remove.
-     * @return a new array with the member removed or the existing array if not found.
-     */
-    public static ClusterMember[] removeMember(final ClusterMember[] oldMembers, final int memberId)
-    {
-        final int memberIndex = findMemberIndex(oldMembers, memberId);
-        if (ArrayUtil.UNKNOWN_INDEX != memberIndex && 1 == oldMembers.length)
-        {
-            return EMPTY_MEMBERS;
-        }
-        else
-        {
-            return ArrayUtil.remove(oldMembers, memberIndex);
-        }
-    }
-
-    /**
      * Find the highest member id in an array of members.
      *
      * @param clusterMembers to search for the highest id.
@@ -1378,13 +1368,11 @@ public final class ClusterMember
             "id=" + id +
             ", isBallotSent=" + isBallotSent +
             ", isLeader=" + isLeader +
-            ", hasRequestedJoin=" + hasRequestedJoin +
             ", leadershipTermId=" + leadershipTermId +
             ", logPosition=" + logPosition +
             ", candidateTermId=" + candidateTermId +
             ", catchupReplaySessionId=" + catchupReplaySessionId +
             ", correlationId=" + changeCorrelationId +
-            ", removalPosition=" + removalPosition +
             ", timeOfLastAppendPositionNs=" + timeOfLastAppendPositionNs +
             ", ingressEndpoint='" + ingressEndpoint + '\'' +
             ", consensusEndpoint='" + consensusEndpoint + '\'' +

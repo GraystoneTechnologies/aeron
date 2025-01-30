@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import org.agrona.ErrorHandler;
 import org.agrona.IoUtil;
 import org.agrona.SystemUtil;
 import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.concurrent.status.AtomicCounter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -52,6 +53,7 @@ class FileStoreLogFactoryTest
     private static final int PAGE_SIZE = 4 * 1024;
     private static final boolean PRE_ZERO_LOG = true;
     private static final boolean PERFORM_STORAGE_CHECKS = true;
+    private final AtomicCounter mockBytesMappedCounter = mock(AtomicCounter.class);
     private FileStoreLogFactory fileStoreLogFactory;
     private RawLog rawLog;
 
@@ -61,7 +63,12 @@ class FileStoreLogFactoryTest
         IoUtil.ensureDirectoryExists(DATA_DIR, "data");
         final String absolutePath = DATA_DIR.getAbsolutePath();
         fileStoreLogFactory = new FileStoreLogFactory(
-            absolutePath, PAGE_SIZE, PERFORM_STORAGE_CHECKS, LOW_STORAGE_THRESHOLD, mock(ErrorHandler.class));
+            absolutePath,
+            PAGE_SIZE,
+            PERFORM_STORAGE_CHECKS,
+            LOW_STORAGE_THRESHOLD,
+            mock(ErrorHandler.class),
+            mockBytesMappedCounter);
     }
 
     @AfterEach
@@ -125,7 +132,8 @@ class FileStoreLogFactoryTest
     void shouldThrowInsufficientUsableStorageExceptionIfNotEnoughSpaceOnDisc() throws IOException
     {
         final FileStore fileStore = mock(FileStore.class);
-        when(fileStore.getUsableSpace()).thenReturn(1L);
+        final long usableSpace = 117L;
+        when(fileStore.getUsableSpace()).thenReturn(usableSpace);
         when(fileStore.toString()).thenReturn("test-fs");
         final ErrorHandler errorHandler = mock(ErrorHandler.class);
 
@@ -134,18 +142,24 @@ class FileStoreLogFactoryTest
             files.when(() -> Files.getFileStore(any())).thenReturn(fileStore);
 
             try (FileStoreLogFactory logFactory = new FileStoreLogFactory(
-                DATA_DIR.getAbsolutePath(), PAGE_SIZE, true, LOW_STORAGE_THRESHOLD, errorHandler))
+                DATA_DIR.getAbsolutePath(),
+                PAGE_SIZE, true,
+                LOW_STORAGE_THRESHOLD,
+                errorHandler,
+                mockBytesMappedCounter))
             {
                 final int imageTermBufferLength = 64 * 1024;
                 assertThrowsStorageSpaceException(
                     fileStore,
                     imageTermBufferLength,
+                    usableSpace,
                     () -> logFactory.newImage(1, imageTermBufferLength, true));
 
                 final int publicationTermBufferLength = 1024 * 1024;
                 assertThrowsStorageSpaceException(
                     fileStore,
                     publicationTermBufferLength,
+                    usableSpace,
                     () -> logFactory.newPublication(2, publicationTermBufferLength, false));
 
             }
@@ -170,7 +184,12 @@ class FileStoreLogFactoryTest
             files.when(() -> Files.getFileStore(any())).thenReturn(fileStore);
 
             try (FileStoreLogFactory logFactory = new FileStoreLogFactory(
-                DATA_DIR.getAbsolutePath(), PAGE_SIZE, true, lowStorageWarningThreshold, errorHandler))
+                DATA_DIR.getAbsolutePath(),
+                PAGE_SIZE,
+                true,
+                lowStorageWarningThreshold,
+                errorHandler,
+                mockBytesMappedCounter))
             {
                 try (RawLog rawLog = logFactory.newPublication(11, termLength, true))
                 {
@@ -198,12 +217,12 @@ class FileStoreLogFactoryTest
     }
 
     private static void assertThrowsStorageSpaceException(
-        final FileStore fileStore, final int termBufferLength, final Executable executable)
+        final FileStore fileStore, final int termBufferLength, final long usableSpace, final Executable executable)
     {
         final StorageSpaceException exception = assertThrowsExactly(StorageSpaceException.class, executable);
         assertEquals(
             "ERROR - insufficient usable storage for new log of length=" +
-            computeLogLength(termBufferLength, PAGE_SIZE) + " in " + fileStore,
+            computeLogLength(termBufferLength, PAGE_SIZE) + " usable=" + usableSpace + " in " + fileStore,
             exception.getMessage());
     }
 }

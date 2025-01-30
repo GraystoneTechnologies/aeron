@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -41,7 +41,7 @@ struct DataHeaderDefn
     std::int32_t sessionId;
     std::int32_t streamId;
     std::int32_t termId;
-    std::uint8_t data[0];
+    std::int64_t reservedValue;
 };
 #pragma pack(pop)
 
@@ -99,9 +99,15 @@ public:
         return *this;
     }
 
-    inline std::uint8_t *data()
+    inline std::int64_t reservedValue()
     {
-        return m_struct.data;
+        return m_struct.reservedValue;
+    }
+
+    inline this_t &reservedValue(std::int64_t value)
+    {
+        m_struct.reservedValue = value;
+        return *this;
     }
 
     inline static constexpr std::int32_t headerLength()

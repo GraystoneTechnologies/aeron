@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 package io.aeron.driver;
 
+import io.aeron.protocol.ErrorFlyweight;
 import io.aeron.protocol.StatusMessageFlyweight;
 
 import java.net.InetSocketAddress;
@@ -47,5 +48,24 @@ public class MinMulticastFlowControl extends AbstractMinMulticastFlowControl
         final long timeNs)
     {
         return processStatusMessage(flyweight, senderLimit, initialTermId, positionBitsToShift, timeNs, true);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public void onTriggerSendSetup(
+        final StatusMessageFlyweight flyweight,
+        final InetSocketAddress receiverAddress,
+        final long timeNs)
+    {
+        processSendSetupTrigger(flyweight, receiverAddress, timeNs, true);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public void onError(final ErrorFlyweight errorFlyweight, final InetSocketAddress receiverAddress, final long timeNs)
+    {
+        processError(errorFlyweight, receiverAddress, timeNs, true);
     }
 }

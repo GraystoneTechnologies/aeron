@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,7 +25,6 @@ import org.junit.jupiter.api.Test;
 import java.util.concurrent.TimeUnit;
 
 import static io.aeron.archive.ControlSession.State.DONE;
-import static io.aeron.archive.ControlSession.State.INACTIVE;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -35,8 +34,9 @@ class ControlSessionTest
 {
     private static final long CONTROL_PUBLICATION_ID = 777;
     private static final long CONNECT_TIMEOUT_MS = TimeUnit.SECONDS.toMillis(5);
+    private static final long SESSION_LIVENESS_CHECK_INTERVAL_NS = TimeUnit.MILLISECONDS.toNanos(100);
 
-    private final ControlSessionDemuxer mockDemuxer = mock(ControlSessionDemuxer.class);
+    private final ControlSessionAdapter mockDemuxer = mock(ControlSessionAdapter.class);
     private final ArchiveConductor mockConductor = mock(ArchiveConductor.class);
     private final Aeron mockAeron = mock(Aeron.class);
     private final ExclusivePublication mockControlPublication = mock(ExclusivePublication.class);
@@ -53,6 +53,7 @@ class ControlSessionTest
             1,
             2,
             CONNECT_TIMEOUT_MS,
+            SESSION_LIVENESS_CHECK_INTERVAL_NS,
             CONTROL_PUBLICATION_ID,
             null,
             mockDemuxer,
@@ -76,8 +77,6 @@ class ControlSessionTest
 
         cachedEpochClock.update(CONNECT_TIMEOUT_MS + 1L);
         session.doWork();
-        assertEquals(INACTIVE, session.state());
-        session.doWork();
         assertEquals(DONE, session.state());
         assertTrue(session.isDone());
     }
@@ -89,12 +88,10 @@ class ControlSessionTest
         when(mockControlPublication.isConnected()).thenReturn(true);
 
         session.doWork();
-        session.sendOkResponse(1L, mockProxy);
+        session.sendOkResponse(1L);
         session.doWork();
 
         cachedEpochClock.update(CONNECT_TIMEOUT_MS + 1L);
-        session.doWork();
-        assertEquals(INACTIVE, session.state());
         session.doWork();
         assertEquals(DONE, session.state());
         assertTrue(session.isDone());

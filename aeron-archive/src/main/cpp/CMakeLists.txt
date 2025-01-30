@@ -1,5 +1,5 @@
 #
-# Copyright 2014-2023 Real Logic Limited.
+# Copyright 2014-2025 Real Logic Limited.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -40,6 +40,7 @@ set(GENERATED_CODECS
     ${ARCHIVE_CODEC_TARGET_DIR}/aeron_archive_client/StopRecordingSubscriptionRequest.h
     ${ARCHIVE_CODEC_TARGET_DIR}/aeron_archive_client/StartPositionRequest.h
     ${ARCHIVE_CODEC_TARGET_DIR}/aeron_archive_client/StopPositionRequest.h
+    ${ARCHIVE_CODEC_TARGET_DIR}/aeron_archive_client/MaxRecordedPositionRequest.h
     ${ARCHIVE_CODEC_TARGET_DIR}/aeron_archive_client/FindLastMatchingRecordingRequest.h
     ${ARCHIVE_CODEC_TARGET_DIR}/aeron_archive_client/ListRecordingSubscriptionsRequest.h
     ${ARCHIVE_CODEC_TARGET_DIR}/aeron_archive_client/ReplicateRequest2.h
@@ -67,6 +68,7 @@ add_custom_command(OUTPUT ${GENERATED_CODECS}
 add_custom_target(codecs DEPENDS ${GENERATED_CODECS})
 
 SET(SOURCE
+    client/AeronArchiveVersion.cpp
     client/ArchiveProxy.cpp
     client/ControlResponsePoller.cpp
     client/ControlResponseAdapter.cpp
@@ -79,6 +81,7 @@ SET(SOURCE
     client/ReplayMerge.cpp)
 
 SET(HEADERS
+    client/AeronArchiveVersion.h
     client/ArchiveException.h
     client/ArchiveConfiguration.h
     client/ArchiveProxy.h
@@ -95,18 +98,13 @@ SET(HEADERS
 
 # static library
 add_library(aeron_archive_client STATIC ${SOURCE} ${HEADERS})
-add_library(aeron_archive_client_wrapper STATIC ${SOURCE} ${HEADERS})
+add_library(aeron::aeron_archive_client ALIAS aeron_archive_client)
 
 add_dependencies(aeron_archive_client codecs)
-add_dependencies(aeron_archive_client_wrapper codecs)
 
 target_include_directories(aeron_archive_client
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
-    PRIVATE ${ARCHIVE_CODEC_TARGET_DIR})
-
-target_include_directories(aeron_archive_client_wrapper
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
-    PRIVATE ${ARCHIVE_CODEC_TARGET_DIR})
+    PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>" "$<INSTALL_INTERFACE:include>"
+    PRIVATE "$<BUILD_INTERFACE:${ARCHIVE_CODEC_TARGET_DIR}>")
 
 if (NOT WIN32)
     set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
@@ -117,11 +115,12 @@ target_link_libraries(aeron_archive_client
     PRIVATE aeron_client
     INTERFACE ${CMAKE_THREAD_LIBS_INIT})
 
-target_link_libraries(aeron_archive_client_wrapper
-    PRIVATE aeron_client_wrapper aeron
-    INTERFACE ${CMAKE_THREAD_LIBS_INIT})
-
 if (AERON_INSTALL_TARGETS)
-    install(TARGETS aeron_archive_client ARCHIVE DESTINATION lib)
-    install(DIRECTORY . DESTINATION include FILES_MATCHING PATTERN "*.h")
+    install(
+        TARGETS aeron_archive_client
+        EXPORT aeron-targets
+        RUNTIME DESTINATION lib
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib)
+    install(DIRECTORY ./ DESTINATION include FILES_MATCHING PATTERN "*.h")
 endif ()

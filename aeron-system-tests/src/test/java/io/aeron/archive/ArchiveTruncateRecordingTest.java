@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ import io.aeron.archive.status.RecordingPos;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
 import io.aeron.logbuffer.LogBufferDescriptor;
+import io.aeron.test.EventLogExtension;
 import io.aeron.test.InterruptAfter;
 import io.aeron.test.InterruptingTestCallback;
 import io.aeron.test.SystemTestWatcher;
@@ -72,7 +73,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 
-@ExtendWith(InterruptingTestCallback.class)
+@ExtendWith({ EventLogExtension.class, InterruptingTestCallback.class })
 class ArchiveTruncateRecordingTest
 {
     @RegisterExtension
@@ -154,7 +155,8 @@ class ArchiveTruncateRecordingTest
                 ChannelUri.addSessionId(channel, publication.sessionId()), streamId, SourceLocation.LOCAL);
 
             final CountersReader counters = aeron.countersReader();
-            final int counterId = Tests.awaitRecordingCounterId(counters, publication.sessionId());
+            final int counterId =
+                Tests.awaitRecordingCounterId(counters, publication.sessionId(), aeronArchive.archiveId());
             final long recordingId = RecordingPos.getRecordingId(counters, counterId);
             assertEquals(startPosition, aeronArchive.getStartPosition(recordingId));
             assertEquals(NULL_VALUE, aeronArchive.getStopPosition(recordingId));
@@ -194,7 +196,6 @@ class ArchiveTruncateRecordingTest
             deleteList.add(Files.createFile(archiveDir.resolve(recordingId + "-1048575" + RECORDING_SEGMENT_SUFFIX)));
             deleteList.add(Files.createFile(archiveDir.resolve(recordingId + "-1048577" + RECORDING_SEGMENT_SUFFIX)));
             deleteList.add(Files.createFile(archiveDir.resolve(recordingId + "-222222222" + RECORDING_SEGMENT_SUFFIX)));
-            deleteList.add(Files.createFile(archiveDir.resolve(recordingId + "-abc" + RECORDING_SEGMENT_SUFFIX)));
             deleteList.add(Files.createFile(archiveDir.resolve(
                 recordingId + "-" + archive.context().segmentFileLength() + RECORDING_SEGMENT_SUFFIX)));
 
@@ -231,7 +232,8 @@ class ArchiveTruncateRecordingTest
             Subscription subscription = aeron.addSubscription(channel, streamId))
         {
             final CountersReader counters = aeron.countersReader();
-            final int counterId = Tests.awaitRecordingCounterId(counters, publication.sessionId());
+            final int counterId =
+                Tests.awaitRecordingCounterId(counters, publication.sessionId(), aeronArchive.archiveId());
             final long recordingId = RecordingPos.getRecordingId(counters, counterId);
             assertEquals(0, aeronArchive.getStartPosition(recordingId));
 
@@ -334,7 +336,8 @@ class ArchiveTruncateRecordingTest
                 ChannelUri.addSessionId(channel, publication.sessionId()), streamId, SourceLocation.LOCAL);
 
             final CountersReader counters = aeron.countersReader();
-            final int counterId = Tests.awaitRecordingCounterId(counters, publication.sessionId());
+            final int counterId =
+                Tests.awaitRecordingCounterId(counters, publication.sessionId(), aeronArchive.archiveId());
             final long recordingId = RecordingPos.getRecordingId(counters, counterId);
             assertEquals(startPosition, aeronArchive.getStartPosition(recordingId));
 

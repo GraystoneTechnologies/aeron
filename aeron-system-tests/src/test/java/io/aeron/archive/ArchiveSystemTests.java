@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 package io.aeron.archive;
 
+import io.aeron.Aeron;
 import io.aeron.FragmentAssembler;
 import io.aeron.Publication;
 import io.aeron.Subscription;
@@ -25,8 +26,12 @@ import io.aeron.logbuffer.LogBufferDescriptor;
 import io.aeron.test.Tests;
 import org.agrona.ExpandableArrayBuffer;
 import org.agrona.collections.MutableInteger;
+import org.agrona.concurrent.UnsafeBuffer;
+
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 class ArchiveSystemTests
 {
@@ -127,11 +132,13 @@ class ArchiveSystemTests
         final long expectedRecordingId,
         final RecordingSignal expectedSignal)
     {
+        final Supplier<String> errorMessage =
+            () -> "Expected signal: " + expectedSignal + " vs " + signalConsumer.signal;
         while (expectedRecordingId != signalConsumer.recordingId || expectedSignal != signalConsumer.signal)
         {
             if (0 == aeronArchive.pollForRecordingSignals())
             {
-                Tests.yield();
+                Tests.yieldingIdle(errorMessage);
             }
         }
     }
@@ -144,5 +151,74 @@ class ArchiveSystemTests
     {
         signalConsumer.reset();
         awaitSignal(aeronArchive, signalConsumer, expectedRecordingId, expectedSignal);
+    }
+
+    static RecordingResult recordData(final AeronArchive aeronArchive)
+    {
+        final TestRecordingSignalConsumer testRecordingSignalConsumer = new TestRecordingSignalConsumer(
+            aeronArchive.controlSessionId());
+        aeronArchive.context().recordingSignalConsumer(testRecordingSignalConsumer);
+
+        final UnsafeBuffer message = new UnsafeBuffer(new byte[1024]);
+        message.setMemory(0, message.capacity(), (byte)'x');
+
+        long recordingId;
+        final long position;
+        long halfWayPosition = Aeron.NULL_VALUE;
+        try (Publication publication = aeronArchive.addRecordedPublication("aeron:ipc", 10000))
+        {
+            int messageCount = 1000;
+            while (messageCount > 0)
+            {
+                if (0 < publication.offer(message))
+                {
+                    --messageCount;
+                    if (Aeron.NULL_VALUE == halfWayPosition && messageCount == messageCount / 2)
+                    {
+                        halfWayPosition = publication.position();
+                    }
+                }
+                else
+                {
+                    Tests.yield();
+                }
+            }
+
+            position = publication.position();
+            assertNotEquals(0, position);
+
+            while (-1 == (recordingId = aeronArchive.findLastMatchingRecording(
+                0, "aeron:ipc", publication.streamId(), publication.sessionId())))
+            {
+                Tests.yield();
+            }
+
+            while (aeronArchive.getRecordingPosition(recordingId) < position)
+            {
+                Tests.yield();
+            }
+        }
+
+        while (testRecordingSignalConsumer.signal != RecordingSignal.STOP)
+        {
+            aeronArchive.pollForRecordingSignals();
+            Tests.yield();
+        }
+
+        return new RecordingResult(position, halfWayPosition, recordingId);
+    }
+
+    static class RecordingResult
+    {
+        public final long position;
+        public final long halfwayPosition;
+        public final long recordingId;
+
+        RecordingResult(final long position, final long halfwayPosition, final long recordingId)
+        {
+            this.position = position;
+            this.halfwayPosition = halfwayPosition;
+            this.recordingId = recordingId;
+        }
     }
 }

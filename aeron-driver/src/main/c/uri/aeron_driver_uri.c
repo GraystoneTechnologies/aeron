@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -48,6 +48,38 @@ int aeron_uri_get_term_length_param(aeron_uri_params_t *uri_params, aeron_driver
     return 0;
 }
 
+int aeron_uri_get_max_resend_param(aeron_uri_params_t *uri_params, aeron_driver_uri_publication_params_t *params)
+{
+    const char *value_str;
+
+    if ((value_str = aeron_uri_find_param_value(uri_params, AERON_URI_MAX_RESEND_KEY)) != NULL)
+    {
+        uint64_t value;
+
+        if (-1 == aeron_parse_size64(value_str, &value))
+        {
+            AERON_SET_ERR(EINVAL, "could not parse %s=%s in URI", AERON_URI_MAX_RESEND_KEY, value_str);
+            return -1;
+        }
+
+        if (value < 1 || value > AERON_RETRANSMIT_HANDLER_MAX_RESEND_MAX)
+        {
+            AERON_SET_ERR(
+                EINVAL,
+                "invalid %s=%" PRIu64 ", must be > 0 and <= %i",
+                AERON_URI_MAX_RESEND_KEY,
+                value,
+                AERON_RETRANSMIT_HANDLER_MAX_RESEND_MAX);
+            return -1;
+        }
+
+        params->max_resend = (uint32_t)value;
+        params->has_max_resend = true;
+    }
+
+    return 0;
+}
+
 int aeron_uri_get_mtu_length_param(aeron_uri_params_t *uri_params, aeron_driver_uri_publication_params_t *params)
 {
     const char *value_str;
@@ -64,6 +96,7 @@ int aeron_uri_get_mtu_length_param(aeron_uri_params_t *uri_params, aeron_driver_
 
         if (aeron_driver_context_validate_mtu_length(value) < 0)
         {
+            AERON_APPEND_ERR("%s", "");
             return -1;
         }
 
@@ -74,24 +107,54 @@ int aeron_uri_get_mtu_length_param(aeron_uri_params_t *uri_params, aeron_driver_
     return 0;
 }
 
-int aeron_uri_linger_timeout_param(aeron_uri_params_t *uri_params, aeron_driver_uri_publication_params_t *params)
+int aeron_uri_get_publication_window_length_param(aeron_uri_params_t *uri_params, aeron_driver_uri_publication_params_t *params)
 {
     const char *value_str;
 
-    if ((value_str = aeron_uri_find_param_value(uri_params, AERON_URI_LINGER_TIMEOUT_KEY)) != NULL)
+    if ((value_str = aeron_uri_find_param_value(uri_params, AERON_URI_PUBLICATION_WINDOW_KEY)) != NULL)
     {
         uint64_t value;
 
-        if (-1 == aeron_parse_duration_ns(value_str, &value))
+        if (-1 == aeron_parse_size64(value_str, &value))
         {
-            AERON_SET_ERR(EINVAL, "could not parse %s=%s in URI", AERON_URI_LINGER_TIMEOUT_KEY, value_str);
+            AERON_SET_ERR(EINVAL, "could not parse %s=%s in URI", AERON_URI_PUBLICATION_WINDOW_KEY, value_str);
             return -1;
         }
 
-        params->linger_timeout_ns = value;
+        if (value < params->mtu_length)
+        {
+            AERON_SET_ERR(
+                EINVAL,
+                "%s=%" PRIu64 " cannot be less than the %s=%" PRIu64,
+                AERON_URI_PUBLICATION_WINDOW_KEY,
+                value,
+                AERON_URI_MTU_LENGTH_KEY,
+                params->mtu_length);
+            return -1;
+        }
+
+        if (value > (params->term_length >> 1))
+        {
+            AERON_SET_ERR(
+                EINVAL,
+                "%s=%" PRIu64 " must not exceed half the %s=%" PRIu64,
+                AERON_URI_PUBLICATION_WINDOW_KEY,
+                value,
+                AERON_URI_TERM_LENGTH_KEY,
+                params->term_length);
+            return -1;
+        }
+
+        params->publication_window_length = (int32_t)value;
+        params->has_publication_window_length = true;
     }
 
     return 0;
+}
+
+int aeron_uri_linger_timeout_param(aeron_uri_params_t *uri_params, aeron_driver_uri_publication_params_t *params)
+{
+    return aeron_uri_get_timeout(uri_params, AERON_URI_LINGER_TIMEOUT_KEY, &params->linger_timeout_ns);
 }
 
 int aeron_uri_publication_session_id_param(
@@ -159,6 +222,8 @@ int aeron_diver_uri_publication_params(
     aeron_driver_context_t *context = conductor->context;
 
     params->linger_timeout_ns = context->publication_linger_timeout_ns;
+    params->untethered_window_limit_timeout_ns = context->untethered_window_limit_timeout_ns;
+    params->untethered_resting_timeout_ns = context->untethered_resting_timeout_ns;
     params->term_length = AERON_URI_IPC == uri->type ? context->ipc_term_buffer_length : context->term_buffer_length;
     params->has_term_length = false;
     params->mtu_length = AERON_URI_IPC == uri->type ? context->ipc_mtu_length : context->mtu_length;
@@ -173,6 +238,13 @@ int aeron_diver_uri_publication_params(
     params->has_session_id = false;
     params->session_id = 0;
     params->entity_tag = AERON_URI_INVALID_TAG;
+    params->response_correlation_id = AERON_NULL_VALUE;
+    params->has_max_resend = false;
+    params->max_resend = 0;
+    params->is_response =
+        (AERON_URI_UDP == uri->type &&
+        NULL != uri->params.udp.control_mode &&
+        strcmp(uri->params.udp.control_mode, AERON_UDP_CHANNEL_CONTROL_MODE_RESPONSE_VALUE) == 0);
 
     aeron_uri_params_t *uri_params = AERON_URI_IPC == uri->type ?
         &uri->params.ipc.additional_params : &uri->params.udp.additional_params;
@@ -207,7 +279,22 @@ int aeron_diver_uri_publication_params(
         return -1;
     }
 
+    if (aeron_uri_get_max_resend_param(uri_params, params) < 0)
+    {
+        return -1;
+    }
+
     if (aeron_uri_get_mtu_length_param(uri_params, params) < 0)
+    {
+        return -1;
+    }
+
+    params->publication_window_length = (int32_t)aeron_producer_window_length(
+        AERON_URI_IPC == uri->type ? context->ipc_publication_window_length : context->publication_window_length,
+        params->term_length);
+    params->has_publication_window_length = false;
+
+    if (aeron_uri_get_publication_window_length_param(uri_params, params) < 0)
     {
         return -1;
     }
@@ -319,6 +406,30 @@ int aeron_diver_uri_publication_params(
         return -1;
     }
 
+    if (aeron_uri_get_int64(
+        uri_params, AERON_URI_RESPONSE_CORRELATION_ID_KEY, AERON_NULL_VALUE, &params->response_correlation_id) < 0)
+    {
+        return -1;
+    }
+
+    if (aeron_uri_get_timeout(
+        uri_params,
+        AERON_URI_UNTETHERED_WINDOW_LIMIT_TIMEOUT_KEY,
+        &params->untethered_window_limit_timeout_ns) < 0)
+    {
+        AERON_APPEND_ERR("%s", "");
+        return -1;
+    }
+
+    if (aeron_uri_get_timeout(
+        uri_params,
+        AERON_URI_UNTETHERED_RESTING_TIMEOUT_KEY,
+        &params->untethered_resting_timeout_ns) < 0)
+    {
+        AERON_APPEND_ERR("%s", "");
+        return -1;
+    }
+
     return 0;
 }
 
@@ -369,6 +480,11 @@ int aeron_driver_uri_subscription_params(
         return -1;
     }
 
+    params->is_response =
+        (AERON_URI_UDP == uri->type &&
+        NULL != uri->params.udp.control_mode &&
+        strcmp(uri->params.udp.control_mode, AERON_UDP_CHANNEL_CONTROL_MODE_RESPONSE_VALUE) == 0);
+
     return 0;
 }
 
@@ -413,32 +529,6 @@ int aeron_publication_params_validate_mtu_for_sndbuf(
     if (0 != os_default_socket_sndbuf)
     {
         return aeron_publication_params_validate_mtu(os_default_socket_sndbuf, params->mtu_length, "os default");
-    }
-
-    return 0;
-}
-
-int aeron_subscription_params_validate_initial_window_for_rcvbuf(
-    aeron_driver_uri_subscription_params_t *params,
-    size_t endpoint_socket_rcvbuf,
-    size_t os_default_socket_rcvbuf)
-{
-    if (0 != endpoint_socket_rcvbuf && endpoint_socket_rcvbuf < params->initial_window_length)
-    {
-        AERON_SET_ERR(
-            EINVAL,
-            "Initial window greater than SO_SNDBUF for channel: rcv-wnd=%" PRIu64 " so-rcvbuf=%" PRIu64,
-            params->initial_window_length, endpoint_socket_rcvbuf);
-        return -1;
-    }
-
-    if (0 == endpoint_socket_rcvbuf && os_default_socket_rcvbuf < params->initial_window_length)
-    {
-        AERON_SET_ERR(
-            EINVAL,
-            "Initial window greater than SO_SNDBUF for channel: rcv-wnd=%" PRIu64 " so-rcvbuf=%" PRIu64 " (OS default)",
-            params->initial_window_length, endpoint_socket_rcvbuf);
-        return -1;
     }
 
     return 0;

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,9 +13,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package io.aeron.test;
 
 import io.aeron.Aeron;
+import io.aeron.Counter;
 import io.aeron.Publication;
 import io.aeron.Subscription;
 import io.aeron.archive.status.RecordingPos;
@@ -23,6 +25,8 @@ import io.aeron.driver.Configuration;
 import io.aeron.exceptions.AeronException;
 import io.aeron.exceptions.RegistrationException;
 import io.aeron.exceptions.TimeoutException;
+
+import org.agrona.DirectBuffer;
 import org.agrona.LangUtil;
 import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.SleepingMillisIdleStrategy;
@@ -33,6 +37,7 @@ import org.agrona.concurrent.status.CountersManager;
 import org.agrona.concurrent.status.CountersReader;
 import org.junit.jupiter.api.extension.ExtensionContext;
 import org.junit.jupiter.api.extension.TestWatcher;
+import org.mockito.stubbing.Answer;
 
 import javax.management.InstanceNotFoundException;
 import javax.management.MBeanServer;
@@ -48,10 +53,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.BooleanSupplier;
-import java.util.function.IntConsumer;
-import java.util.function.Supplier;
+import java.util.concurrent.locks.LockSupport;
+import java.util.function.*;
 
 import static io.aeron.Aeron.NULL_VALUE;
 import static org.mockito.Mockito.doAnswer;
@@ -221,14 +226,8 @@ public class Tests
      */
     public static void sleep(final long durationMs)
     {
-        try
-        {
-            Thread.sleep(durationMs);
-        }
-        catch (final InterruptedException ex)
-        {
-            throw new TimeoutException(ex, AeronException.Category.ERROR);
-        }
+        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(durationMs));
+        checkInterruptStatus();
     }
 
     /**
@@ -239,14 +238,8 @@ public class Tests
      */
     public static void sleep(final long durationMs, final Supplier<String> messageSupplier)
     {
-        try
-        {
-            Thread.sleep(durationMs);
-        }
-        catch (final InterruptedException ex)
-        {
-            throw new TimeoutException(messageSupplier.get());
-        }
+        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(durationMs));
+        checkInterruptStatus(messageSupplier);
     }
 
     /**
@@ -258,14 +251,8 @@ public class Tests
      */
     public static void sleep(final long durationMs, final String format, final Object... params)
     {
-        try
-        {
-            Thread.sleep(durationMs);
-        }
-        catch (final InterruptedException ex)
-        {
-            throw new TimeoutException(String.format(format, params));
-        }
+        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(durationMs));
+        checkInterruptStatus(format, params);
     }
 
     /**
@@ -399,15 +386,93 @@ public class Tests
      */
     public static void await(final BooleanSupplier conditionSupplier, final long timeoutNs)
     {
+        await(conditionSupplier, timeoutNs, () -> "");
+    }
+
+    /**
+     * Await a condition with a timeout and also check for thread interrupt.
+     *
+     * @param conditionSupplier     for the condition to be awaited.
+     * @param timeoutNs             to await.
+     * @param errorMessageSupplier  supplier of error message if timeout reached
+     */
+    public static void await(
+        final BooleanSupplier conditionSupplier,
+        final long timeoutNs,
+        final Supplier<String> errorMessageSupplier)
+    {
         final long deadlineNs = System.nanoTime() + timeoutNs;
         while (!conditionSupplier.getAsBoolean())
         {
             if ((deadlineNs - System.nanoTime()) <= 0)
             {
-                throw new TimeoutException();
+                throw new TimeoutException(errorMessageSupplier.get());
             }
 
             Tests.yield();
+        }
+    }
+
+    /**
+     * Await a condition with and check for thread interrupt.
+     *
+     * @param conditionSupplier     for the condition to be awaited.
+     * @param errorMessageSupplier  supplier of error message if interrupt signalled
+     */
+    public static void await(final BooleanSupplier conditionSupplier, final Supplier<String> errorMessageSupplier)
+    {
+        while (!conditionSupplier.getAsBoolean())
+        {
+            Tests.yieldingIdle(errorMessageSupplier);
+        }
+    }
+
+    /**
+     * Await a condition with a timeout and also check for thread interrupt.
+     *
+     * @param argSupplier             argument for the condition + message.
+     * @param conditionsPredicate     for the condition to be awaited.
+     * @param timeoutNs               to await.
+     * @param errorMessageCreator     supplier of error message if timeout reached
+     * @param <T>                     type of argument to condition + message
+     */
+    public static <T> void await(
+        final Supplier<T> argSupplier,
+        final Predicate<T> conditionsPredicate,
+        final long timeoutNs,
+        final Function<T, String> errorMessageCreator)
+    {
+        final long deadlineNs = System.nanoTime() + timeoutNs;
+        T arg = argSupplier.get();
+        while (!conditionsPredicate.test(arg))
+        {
+            if ((deadlineNs - System.nanoTime()) <= 0)
+            {
+                throw new TimeoutException(errorMessageCreator.apply(arg));
+            }
+
+            Tests.yield();
+            arg = argSupplier.get();
+        }
+    }
+
+    /**
+     * Await a condition with and check for thread interrupt.
+     *
+     * @param argSupplier             argument for the condition + message.
+     * @param conditionsPredicate     for the condition to be awaited.
+     * @param errorMessageCreator     supplier of error message if timeout reached
+     * @param <T>                     type of argument to condition + message
+     */
+    public static <T> void await(
+        final Supplier<T> argSupplier,
+        final Predicate<T> conditionsPredicate,
+        final Function<T, String> errorMessageCreator)
+    {
+        final Supplier<String> msg = () -> errorMessageCreator.apply(argSupplier.get());
+        while (!conditionsPredicate.test(argSupplier.get()))
+        {
+            Tests.yieldingIdle(msg);
         }
     }
 
@@ -546,6 +611,17 @@ public class Tests
         }
     }
 
+    public static void await(final String message, final BooleanSupplier... elements)
+    {
+        for (final BooleanSupplier element : elements)
+        {
+            while (!element.getAsBoolean())
+            {
+                Tests.yieldingIdle(message);
+            }
+        }
+    }
+
     /**
      * Await a Publication having an available windows for sending by yielding and checking for thread interrupt.
      *
@@ -623,7 +699,7 @@ public class Tests
             try
             {
                 mBeanServer.invoke(
-                    loggingName, "startCollecting", new Object[]{ displayName }, new String[]{ "java.lang.String" });
+                    loggingName, "startCollecting", new Object[] {displayName}, new String[] {"java.lang.String"});
             }
             catch (final InstanceNotFoundException ignore)
             {
@@ -676,7 +752,7 @@ public class Tests
             try
             {
                 mBeanServer.invoke(
-                    loggingName, "writeToFile", new Object[]{ filename }, new String[]{ "java.lang.String" });
+                    loggingName, "writeToFile", new Object[] {filename}, new String[] {"java.lang.String"});
             }
             catch (final InstanceNotFoundException ignore)
             {
@@ -700,10 +776,10 @@ public class Tests
         };
     }
 
-    public static int awaitRecordingCounterId(final CountersReader counters, final int sessionId)
+    public static int awaitRecordingCounterId(final CountersReader counters, final int sessionId, final long archiveId)
     {
         int counterId;
-        while (NULL_VALUE == (counterId = RecordingPos.findCounterIdBySession(counters, sessionId)))
+        while (NULL_VALUE == (counterId = RecordingPos.findCounterIdBySession(counters, sessionId, archiveId)))
         {
             Tests.yield();
         }
@@ -736,11 +812,47 @@ public class Tests
         Files.walkFileTree(path, new PrintingFileVisitor(out));
     }
 
-    public static CountersManager newCountersMananger(final int dataLength)
+    public static CountersManager newCountersManager(final int dataLength)
     {
         return new CountersManager(
             new UnsafeBuffer(ByteBuffer.allocateDirect(Configuration.countersMetadataBufferLength(dataLength))),
             new UnsafeBuffer(ByteBuffer.allocateDirect(dataLength)));
+    }
+
+    public static Answer<Counter> addCounterAnswer(
+        final CountersManager countersManager,
+        final LongSupplier registrationId)
+    {
+        return invocation ->
+        {
+            final int counterType = invocation.getArgument(0, Integer.class);
+            final DirectBuffer keyBuffer = invocation.getArgument(1, DirectBuffer.class);
+            final int keyOffset = invocation.getArgument(2, Integer.class);
+            final int keyLength = invocation.getArgument(3, Integer.class);
+            final DirectBuffer labelBuffer = invocation.getArgument(4, DirectBuffer.class);
+            final int labelOffset = invocation.getArgument(5, Integer.class);
+            final int labelLength = invocation.getArgument(6, Integer.class);
+
+            final int allocate = countersManager.allocate(
+                counterType, keyBuffer, keyOffset, keyLength, labelBuffer, labelOffset, labelLength);
+
+            return new Counter(countersManager, registrationId.getAsLong(), allocate);
+        };
+    }
+
+    public static Throwable setOrUpdateError(final Throwable existingError, final Throwable newError)
+    {
+        if (null == existingError)
+        {
+            return newError;
+        }
+
+        if (null != newError)
+        {
+            existingError.addSuppressed(newError);
+        }
+
+        return existingError;
     }
 
     private static void pad(final int indent, final PrintStream out)

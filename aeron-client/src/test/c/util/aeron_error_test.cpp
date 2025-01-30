@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2020 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,9 +17,9 @@
 #include <array>
 #include <atomic>
 #include <thread>
-#include <cstdint>
 
 #include <gtest/gtest.h>
+#include <gmock/gmock.h>
 
 extern "C"
 {
@@ -120,6 +120,19 @@ TEST_F(ErrorTest, shouldReportZeroAsErrorForBackwardCompatibility)
     index = assert_substring(err_msg, "] this is the root error", index);
 
     EXPECT_LT(index, err_msg.length());
+}
+
+TEST_F(ErrorTest, shouldAllowToAppendAfterClearing)
+{
+    AERON_APPEND_ERR("%s", "first error");
+    aeron_err_clear();
+    AERON_APPEND_ERR("%s", "second error");
+
+    std::string err_msg = std::string(aeron_errmsg());
+
+    EXPECT_THAT(err_msg, testing::Not(testing::HasSubstr("no error")));
+    EXPECT_THAT(err_msg, testing::Not(testing::HasSubstr("first error")));
+    EXPECT_THAT(err_msg, testing::HasSubstr("second error"));
 }
 
 #define CALLS_PER_THREAD (1000)

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -226,6 +226,12 @@ const char *aeron_error_code_str(int errcode)
         case AERON_ERROR_CODE_STORAGE_SPACE:
             return "insufficient storage space";
 
+        case AERON_ERROR_CODE_IMAGE_REJECTED:
+            return "image rejected";
+
+        case AERON_ERROR_CODE_PUBLICATION_REVOKED:
+            return "publication revoked";
+
         default:
             return "unknown error code";
     }
@@ -318,6 +324,7 @@ void aeron_err_clear(void)
 
     aeron_set_errno(0);
     error_state->errcode = 0;
+    error_state->offset = 0;
     strcpy(error_state->errmsg, "no error");
 }
 

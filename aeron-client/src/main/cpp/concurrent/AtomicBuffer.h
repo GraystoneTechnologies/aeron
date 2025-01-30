@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -474,6 +474,7 @@ private:
     // The internal length type used by the atomic buffer
     typedef std::uint32_t length_t;
 
+    static_assert(std::is_same<std::uint8_t, unsigned char>::value, "unit8_t is not aliasable");
     std::uint8_t *m_buffer = nullptr;
     length_t m_length = 0;
 };

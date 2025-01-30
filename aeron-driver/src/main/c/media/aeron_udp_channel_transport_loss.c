@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -50,7 +50,7 @@ int aeron_udp_channel_interceptor_loss_init_incoming(
     void **interceptor_state, aeron_driver_context_t *context, aeron_udp_channel_transport_affinity_t affinity);
 
 aeron_udp_channel_interceptor_bindings_t *aeron_udp_channel_interceptor_loss_load(
-    const aeron_udp_channel_interceptor_bindings_t *delegate_bindings)
+    aeron_udp_channel_interceptor_bindings_t *delegate_bindings)
 {
     aeron_udp_channel_interceptor_bindings_t *interceptor_bindings;
     if (aeron_alloc((void **)&interceptor_bindings, sizeof(aeron_udp_channel_interceptor_bindings_t)) < 0)

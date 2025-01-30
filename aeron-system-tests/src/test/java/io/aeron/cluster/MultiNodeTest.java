@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package io.aeron.cluster;
 
 import io.aeron.cluster.client.AeronCluster;
 import io.aeron.cluster.service.Cluster;
+import io.aeron.test.EventLogExtension;
 import io.aeron.test.InterruptAfter;
 import io.aeron.test.InterruptingTestCallback;
 import io.aeron.test.SlowTest;
@@ -31,8 +32,9 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import static io.aeron.test.cluster.TestCluster.aCluster;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
-@ExtendWith(InterruptingTestCallback.class)
+@ExtendWith({ EventLogExtension.class, InterruptingTestCallback.class })
 class MultiNodeTest
 {
     @RegisterExtension
@@ -125,7 +127,7 @@ class MultiNodeTest
         final TestNode leader = cluster.awaitLeader();
 
         final int numMessages = 10;
-        cluster.connectIpcClient(clientCtx, leader.mediaDriver().aeronDirectoryName());
+        assertNotNull(cluster.connectIpcClient(clientCtx, leader.mediaDriver().aeronDirectoryName()));
         cluster.sendMessages(numMessages);
         cluster.awaitResponseMessageCount(numMessages);
     }

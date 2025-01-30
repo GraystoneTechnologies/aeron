@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,7 +15,6 @@
  */
 package io.aeron.driver;
 
-import io.aeron.Aeron;
 import io.aeron.driver.buffer.RawLog;
 import io.aeron.driver.media.ImageConnection;
 import io.aeron.driver.media.ReceiveChannelEndpoint;
@@ -29,26 +28,31 @@ import io.aeron.protocol.RttMeasurementFlyweight;
 import io.aeron.protocol.StatusMessageFlyweight;
 import org.agrona.CloseHelper;
 import org.agrona.ErrorHandler;
+import org.agrona.SystemUtil;
 import org.agrona.collections.ArrayListUtil;
 import org.agrona.collections.ArrayUtil;
 import org.agrona.concurrent.CachedNanoClock;
 import org.agrona.concurrent.EpochClock;
-import org.agrona.concurrent.MemoryAccess;
 import org.agrona.concurrent.NanoClock;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.status.AtomicCounter;
 import org.agrona.concurrent.status.Position;
 import org.agrona.concurrent.status.ReadablePosition;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
-import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 
+import static io.aeron.CommonContext.UNTETHERED_RESTING_TIMEOUT_PARAM_NAME;
+import static io.aeron.CommonContext.UNTETHERED_WINDOW_LIMIT_TIMEOUT_PARAM_NAME;
+import static io.aeron.ErrorCode.IMAGE_REJECTED;
 import static io.aeron.driver.LossDetector.lossFound;
 import static io.aeron.driver.LossDetector.rebuildOffset;
 import static io.aeron.driver.status.SystemCounterDescriptor.*;
 import static io.aeron.logbuffer.LogBufferDescriptor.*;
 import static io.aeron.logbuffer.TermGapFiller.tryFillGap;
+import static io.aeron.protocol.SetupFlyweight.SEND_RESPONSE_SETUP_FLAG;
 import static org.agrona.BitUtil.SIZE_OF_LONG;
 
 class PublicationImagePadding1
@@ -66,6 +70,7 @@ class PublicationImageConductorFields extends PublicationImagePadding1
     ReadablePosition[] subscriberPositions;
     LossReport lossReport;
     LossReport.ReportEntry reportEntry;
+    volatile Integer responseSessionId = null;
 }
 
 class PublicationImagePadding2 extends PublicationImageConductorFields
@@ -82,6 +87,7 @@ class PublicationImageReceiverFields extends PublicationImagePadding2
     boolean isSendingEosSm = false;
     long timeOfLastPacketNs;
     ImageConnection[] imageConnections = new ImageConnection[1];
+    String rejectionReason = null;
 }
 
 class PublicationImagePadding3 extends PublicationImageReceiverFields
@@ -107,30 +113,49 @@ public final class PublicationImage
     // expected minimum number of SMs with EOS bit set sent during draining.
     private static final long SM_EOS_MULTIPLE = 5;
 
-    private static final AtomicLongFieldUpdater<PublicationImage> BEGIN_SM_CHANGE_UPDATER =
-        AtomicLongFieldUpdater.newUpdater(PublicationImage.class, "beginSmChange");
+    private static final VarHandle BEGIN_SM_CHANGE_VH;
+    private static final VarHandle END_SM_CHANGE_VH;
+    private static final VarHandle BEGIN_LOSS_CHANGE_VH;
+    private static final VarHandle END_LOSS_CHANGE_VH;
 
-    private static final AtomicLongFieldUpdater<PublicationImage> END_SM_CHANGE_UPDATER =
-        AtomicLongFieldUpdater.newUpdater(PublicationImage.class, "endSmChange");
+    static
+    {
+        try
+        {
+            final MethodHandles.Lookup lookup = MethodHandles.lookup();
+            BEGIN_SM_CHANGE_VH = lookup
+                .findVarHandle(PublicationImage.class, "beginSmChange", long.class);
+            END_SM_CHANGE_VH = lookup
+                .findVarHandle(PublicationImage.class, "endSmChange", long.class);
+            BEGIN_LOSS_CHANGE_VH = lookup
+                .findVarHandle(PublicationImage.class, "beginLossChange", long.class);
+            END_LOSS_CHANGE_VH = lookup
+                .findVarHandle(PublicationImage.class, "endLossChange", long.class);
+        }
+        catch (final ReflectiveOperationException ex)
+        {
+            throw new ExceptionInInitializerError(ex);
+        }
+    }
 
-    private volatile long beginSmChange = Aeron.NULL_VALUE;
-    private volatile long endSmChange = Aeron.NULL_VALUE;
+    private volatile long beginSmChange;
+    private volatile long endSmChange;
     private long nextSmPosition;
     private int nextSmReceiverWindowLength;
 
-    private long lastSmChangeNumber = Aeron.NULL_VALUE;
+    private long lastSmChangeNumber;
     private long lastSmPosition;
     private long lastOverrunThreshold;
-    private long timeOfLastSmNs;
+    private long nextSmDeadlineNs;
     private final long smTimeoutNs;
     private final long maxReceiverWindowLength;
 
-    private volatile long beginLossChange = Aeron.NULL_VALUE;
-    private volatile long endLossChange = Aeron.NULL_VALUE;
+    private volatile long beginLossChange;
+    private volatile long endLossChange;
     private int lossTermId;
     private int lossTermOffset;
     private int lossLength;
-    private long lastLossChangeNumber = Aeron.NULL_VALUE;
+    private long lastLossChangeNumber;
 
     private volatile long timeOfLastStateChangeNs;
 
@@ -143,7 +168,9 @@ public final class PublicationImage
     private final int positionBitsToShift;
     private final int termLengthMask;
     private final int initialTermId;
+    private final short flags;
     private final boolean isReliable;
+    private boolean smEnabled = true;
 
     private boolean isRebuilding = true;
     private volatile boolean isReceiverReleaseTriggered = false;
@@ -158,7 +185,6 @@ public final class PublicationImage
     private final CongestionControl congestionControl;
     private final ErrorHandler errorHandler;
     private final Position rebuildPosition;
-    private final InetSocketAddress sourceAddress;
     private final String sourceIdentity;
     private final AtomicCounter heartbeatsReceived;
     private final AtomicCounter statusMessagesSent;
@@ -180,28 +206,30 @@ public final class PublicationImage
         final int streamId,
         final int initialTermId,
         final int activeTermId,
-        final int initialTermOffset,
+        final int termOffset,
+        final short flags,
         final RawLog rawLog,
         final FeedbackDelayGenerator lossFeedbackDelayGenerator,
         final ArrayList<SubscriberPosition> subscriberPositions,
         final Position hwmPosition,
         final Position rebuildPosition,
-        final InetSocketAddress sourceAddress,
         final String sourceIdentity,
         final CongestionControl congestionControl)
     {
         this.correlationId = correlationId;
         this.imageLivenessTimeoutNs = ctx.imageLivenessTimeoutNs();
-        this.untetheredWindowLimitTimeoutNs = ctx.untetheredWindowLimitTimeoutNs();
-        this.untetheredRestingTimeoutNs = ctx.untetheredRestingTimeoutNs();
+        this.untetheredWindowLimitTimeoutNs = getTimeoutNsFromChannel(
+            channelEndpoint, UNTETHERED_WINDOW_LIMIT_TIMEOUT_PARAM_NAME, ctx.untetheredWindowLimitTimeoutNs());
+        this.untetheredRestingTimeoutNs = getTimeoutNsFromChannel(
+            channelEndpoint, UNTETHERED_RESTING_TIMEOUT_PARAM_NAME, ctx.untetheredRestingTimeoutNs());
         this.smTimeoutNs = ctx.statusMessageTimeoutNs();
         this.channelEndpoint = channelEndpoint;
         this.sessionId = sessionId;
         this.streamId = streamId;
+        this.flags = flags;
         this.rawLog = rawLog;
         this.hwmPosition = hwmPosition;
         this.rebuildPosition = rebuildPosition;
-        this.sourceAddress = sourceAddress;
         this.sourceIdentity = sourceIdentity;
         this.initialTermId = initialTermId;
         this.congestionControl = congestionControl;
@@ -239,10 +267,10 @@ public final class PublicationImage
 
         nextSmReceiverWindowLength = congestionControl.initialWindowLength();
         maxReceiverWindowLength = congestionControl.maxWindowLength();
-        final long position = computePosition(activeTermId, initialTermOffset, positionBitsToShift, initialTermId);
+        final long position = computePosition(activeTermId, termOffset, positionBitsToShift, initialTermId);
         nextSmPosition = position;
         lastSmPosition = position;
-        lastOverrunThreshold = position + nextSmReceiverWindowLength;
+        lastOverrunThreshold = position + (termLength >> 1);
         cleanPosition = position;
 
         hwmPosition.setOrdered(position);
@@ -372,13 +400,16 @@ public final class PublicationImage
      */
     public void onGapDetected(final int termId, final int termOffset, final int length)
     {
-        final long changeNumber = beginLossChange + 1;
+        final long changeNumber = (long)BEGIN_LOSS_CHANGE_VH.get(this) + 1;
 
-        beginLossChange = changeNumber;
+        BEGIN_LOSS_CHANGE_VH.setRelease(this, changeNumber);
+        VarHandle.storeStoreFence();
+
         lossTermId = termId;
         lossTermOffset = termOffset;
         lossLength = length;
-        endLossChange = changeNumber;
+
+        END_LOSS_CHANGE_VH.setRelease(this, changeNumber);
 
         if (null != reportEntry)
         {
@@ -397,17 +428,7 @@ public final class PublicationImage
     }
 
     /**
-     * The address of the source associated with the image.
-     *
-     * @return source address
-     */
-    InetSocketAddress sourceAddress()
-    {
-        return sourceAddress;
-    }
-
-    /**
-     * Source identity for a {@link #sourceAddress()}.
+     * Source identity for this stream.
      *
      * @return source identity for a source address.
      * @see Configuration#sourceIdentity(InetSocketAddress)
@@ -452,7 +473,7 @@ public final class PublicationImage
     void activate()
     {
         timeOfLastStateChangeNs = cachedNanoClock.nanoTime();
-        state = State.ACTIVE;
+        state(State.ACTIVE);
     }
 
     /**
@@ -475,10 +496,10 @@ public final class PublicationImage
 
             if (isSendingEosSm)
             {
-                timeOfLastSmNs = nowNs - smTimeoutNs - 1;
+                nextSmDeadlineNs = nowNs - 1;
             }
 
-            state = State.DRAINING;
+            state(State.DRAINING);
         }
     }
 
@@ -541,7 +562,7 @@ public final class PublicationImage
                 positionBitsToShift,
                 initialTermId);
 
-            final int rebuildTermOffset = (int)rebuildPosition & termLengthMask;
+            final int rebuildTermOffset = (int)(rebuildPosition & termLengthMask);
             final long newRebuildPosition = (rebuildPosition - rebuildTermOffset) + rebuildOffset(scanOutcome);
             this.rebuildPosition.proposeMaxOrdered(newRebuildPosition);
 
@@ -589,33 +610,58 @@ public final class PublicationImage
         final int transportIndex,
         final InetSocketAddress srcAddress)
     {
+        final boolean isEndOfStream = DataHeaderFlyweight.isEndOfStream(buffer);
+
+        if (null != rejectionReason)
+        {
+            return 0;
+        }
+
         final boolean isHeartbeat = DataHeaderFlyweight.isHeartbeat(buffer, length);
         final long packetPosition = computePosition(termId, termOffset, positionBitsToShift, initialTermId);
         final long proposedPosition = isHeartbeat ? packetPosition : packetPosition + length;
 
         if (!isFlowControlOverRun(proposedPosition))
         {
-            if (!isFlowControlUnderRun(packetPosition))
+            if (isHeartbeat)
+            {
+                final long potentialWindowBottom = lastSmPosition - (termLengthMask + 1);
+                final long publicationWindowBottom = potentialWindowBottom < 0 ? 0 : potentialWindowBottom;
+
+                if (packetPosition >= publicationWindowBottom)
+                {
+                    final long nowNs = cachedNanoClock.nanoTime();
+                    timeOfLastPacketNs = nowNs;
+                    final ImageConnection imageConnection = trackConnection(transportIndex, srcAddress, nowNs);
+
+                    if (isEndOfStream)
+                    {
+                        imageConnection.eosPosition = packetPosition;
+                        imageConnection.isEos = true;
+
+                        if (!this.isEndOfStream && isAllConnectedEos())
+                        {
+                            LogBufferDescriptor.endOfStreamPosition(rawLog.metaData(), findEosPosition());
+                            this.isEndOfStream = true;
+                        }
+                    }
+
+                    hwmPosition.proposeMaxOrdered(proposedPosition);
+                    heartbeatsReceived.incrementOrdered();
+                }
+                else
+                {
+                    flowControlUnderRuns.incrementOrdered();
+                }
+            }
+            else if (!isFlowControlUnderRun(packetPosition))
             {
                 final long nowNs = cachedNanoClock.nanoTime();
                 timeOfLastPacketNs = nowNs;
                 trackConnection(transportIndex, srcAddress, nowNs);
 
-                if (isHeartbeat)
-                {
-                    if (DataHeaderFlyweight.isEndOfStream(buffer) && !isEndOfStream && allEos(transportIndex))
-                    {
-                        LogBufferDescriptor.endOfStreamPosition(rawLog.metaData(), proposedPosition);
-                        isEndOfStream = true;
-                    }
-
-                    heartbeatsReceived.incrementOrdered();
-                }
-                else
-                {
-                    final UnsafeBuffer termBuffer = termBuffers[indexByPosition(packetPosition, positionBitsToShift)];
-                    TermRebuilder.insert(termBuffer, termOffset, buffer, length);
-                }
+                final UnsafeBuffer termBuffer = termBuffers[indexByPosition(packetPosition, positionBitsToShift)];
+                TermRebuilder.insert(termBuffer, termOffset, buffer, length);
 
                 hwmPosition.proposeMaxOrdered(proposedPosition);
             }
@@ -641,6 +687,11 @@ public final class PublicationImage
             (!isEndOfStream || !isReceiverReleaseTriggered);
     }
 
+    boolean isEndOfStream()
+    {
+        return isEndOfStream;
+    }
+
     /**
      * Check for EOS from publication and switch to {@link State#DRAINING} if at end of stream position.
      *
@@ -656,8 +707,8 @@ public final class PublicationImage
                 timeOfLastStateChangeNs = nowNs;
 
                 isSendingEosSm = true;
-                timeOfLastSmNs = nowNs - smTimeoutNs - 1;
-                state = State.DRAINING;
+                nextSmDeadlineNs = nowNs - 1;
+                state(State.DRAINING);
             }
         }
     }
@@ -671,19 +722,41 @@ public final class PublicationImage
     int sendPendingStatusMessage(final long nowNs)
     {
         int workCount = 0;
-        final long changeNumber = endSmChange;
+        final long changeNumber = (long)END_SM_CHANGE_VH.getAcquire(this);
+        final boolean hasSmTimedOut = smEnabled && nextSmDeadlineNs - nowNs < 0;
 
-        if (changeNumber != lastSmChangeNumber || (timeOfLastSmNs + smTimeoutNs) - nowNs < 0)
+        if (null != rejectionReason)
+        {
+            if (hasSmTimedOut)
+            {
+                channelEndpoint.sendErrorFrame(
+                    imageConnections, sessionId, streamId, IMAGE_REJECTED.value(), rejectionReason);
+
+                nextSmDeadlineNs = nowNs + smTimeoutNs;
+                workCount++;
+            }
+
+            return workCount;
+        }
+
+        final Integer responseSessionId;
+        if (hasSmTimedOut && null != (responseSessionId = this.responseSessionId))
+        {
+            channelEndpoint.sendResponseSetup(imageConnections, sessionId, streamId, responseSessionId);
+        }
+
+        if (changeNumber != lastSmChangeNumber || hasSmTimedOut)
         {
             final long smPosition = nextSmPosition;
             final int receiverWindowLength = nextSmReceiverWindowLength;
 
-            MemoryAccess.acquireFence();
+            VarHandle.loadLoadFence();
 
-            if (changeNumber == beginSmChange)
+            if (changeNumber == (long)BEGIN_SM_CHANGE_VH.getAcquire(this))
             {
                 final int termId = computeTermIdFromPosition(smPosition, positionBitsToShift, initialTermId);
                 final int termOffset = (int)smPosition & termLengthMask;
+                final int termLength = termLengthMask + 1;
                 final short flags = isSendingEosSm ? StatusMessageFlyweight.END_OF_STREAM_FLAG : 0;
 
                 channelEndpoint.sendStatusMessage(
@@ -692,9 +765,9 @@ public final class PublicationImage
                 statusMessagesSent.incrementOrdered();
 
                 lastSmPosition = smPosition;
-                lastOverrunThreshold = smPosition + maxReceiverWindowLength;
+                lastOverrunThreshold = smPosition + (termLength >> 1);
                 lastSmChangeNumber = changeNumber;
-                timeOfLastSmNs = nowNs;
+                nextSmDeadlineNs = nowNs + smTimeoutNs;
 
                 updateActiveTransportCount();
             }
@@ -713,7 +786,7 @@ public final class PublicationImage
     int processPendingLoss()
     {
         int workCount = 0;
-        final long changeNumber = endLossChange;
+        final long changeNumber = (long)END_LOSS_CHANGE_VH.getAcquire(this);
 
         if (changeNumber != lastLossChangeNumber)
         {
@@ -721,9 +794,9 @@ public final class PublicationImage
             final int termOffset = lossTermOffset;
             final int length = lossLength;
 
-            MemoryAccess.acquireFence();
+            VarHandle.loadLoadFence();
 
-            if (changeNumber == beginLossChange)
+            if (changeNumber == (long)BEGIN_LOSS_CHANGE_VH.getAcquire(this))
             {
                 if (isReliable)
                 {
@@ -789,8 +862,12 @@ public final class PublicationImage
 
     boolean isAcceptingSubscriptions()
     {
-        return subscriberPositions.length > 0 &&
-            (State.INIT == state || State.ACTIVE == state || (State.DRAINING == state && !isDrained()));
+        if (subscriberPositions.length > 0)
+        {
+            final State state = this.state;
+            return State.INIT == state || State.ACTIVE == state || (State.DRAINING == state && !isDrained());
+        }
+        return false;
     }
 
     long joinPosition()
@@ -803,6 +880,16 @@ public final class PublicationImage
         }
 
         return position;
+    }
+
+    boolean hasSendResponseSetup()
+    {
+        return 0 != (SEND_RESPONSE_SETUP_FLAG & flags);
+    }
+
+    void responseSessionId(final Integer responseSessionId)
+    {
+        this.responseSessionId = responseSessionId;
     }
 
     /**
@@ -826,7 +913,7 @@ public final class PublicationImage
 
                     timeOfLastStateChangeNs = timeNs;
                     isReceiverReleaseTriggered = true;
-                    state = State.LINGER;
+                    state(State.LINGER);
                 }
                 break;
 
@@ -835,7 +922,7 @@ public final class PublicationImage
                 {
                     conductor.cleanupImage(this);
                     timeOfLastStateChangeNs = timeNs;
-                    state = State.DONE;
+                    state(State.DONE);
                 }
                 break;
 
@@ -851,6 +938,24 @@ public final class PublicationImage
     public boolean hasReachedEndOfLife()
     {
         return hasReceiverReleased && State.DONE == state;
+    }
+
+    void reject(final String reason)
+    {
+        rejectionReason = reason;
+    }
+
+    void stopStatusMessagesIfNotActive()
+    {
+        if (State.ACTIVE != state)
+        {
+            smEnabled = false;
+        }
+    }
+
+    private void state(final State state)
+    {
+        this.state = state;
     }
 
     private boolean isDrained()
@@ -903,17 +1008,18 @@ public final class PublicationImage
         if (position > cleanPosition)
         {
             final int bytesForCleaning = (int)(position - cleanPosition);
-            final UnsafeBuffer dirtyTerm = termBuffers[indexByPosition(cleanPosition, positionBitsToShift)];
+            final UnsafeBuffer dirtyTermBuffer = termBuffers[indexByPosition(cleanPosition, positionBitsToShift)];
             final int termOffset = (int)cleanPosition & termLengthMask;
-            final int length = Math.min(bytesForCleaning, dirtyTerm.capacity() - termOffset);
+            final int length = Math.min(bytesForCleaning, dirtyTermBuffer.capacity() - termOffset);
 
-            dirtyTerm.setMemory(termOffset, length - SIZE_OF_LONG, (byte)0);
-            dirtyTerm.putLongOrdered(termOffset + (length - SIZE_OF_LONG), 0);
+            dirtyTermBuffer.setMemory(termOffset, length - SIZE_OF_LONG, (byte)0);
+            dirtyTermBuffer.putLongOrdered(termOffset + (length - SIZE_OF_LONG), 0);
             this.cleanPosition = cleanPosition + length;
         }
     }
 
-    private void trackConnection(final int transportIndex, final InetSocketAddress srcAddress, final long nowNs)
+    private ImageConnection trackConnection(
+        final int transportIndex, final InetSocketAddress srcAddress, final long nowNs)
     {
         imageConnections = ArrayUtil.ensureCapacity(imageConnections, transportIndex + 1);
         ImageConnection imageConnection = imageConnections[transportIndex];
@@ -926,12 +1032,11 @@ public final class PublicationImage
 
         imageConnection.timeOfLastActivityNs = nowNs;
         imageConnection.timeOfLastFrameNs = nowNs;
+        return imageConnection;
     }
 
-    private boolean allEos(final int transportIndex)
+    private boolean isAllConnectedEos()
     {
-        imageConnections[transportIndex].isEos = true;
-
         for (int i = 0, length = imageConnections.length; i < length; i++)
         {
             final ImageConnection imageConnection = imageConnections[i];
@@ -949,17 +1054,32 @@ public final class PublicationImage
         return true;
     }
 
+    private long findEosPosition()
+    {
+        long eosPosition = 0;
+
+        for (final ImageConnection imageConnection : imageConnections)
+        {
+            if (null != imageConnection && imageConnection.eosPosition > eosPosition)
+            {
+                eosPosition = imageConnection.eosPosition;
+            }
+        }
+
+        return eosPosition;
+    }
+
     private void scheduleStatusMessage(final long smPosition, final int receiverWindowLength)
     {
-        final long changeNumber = beginSmChange + 1;
+        final long changeNumber = (long)BEGIN_SM_CHANGE_VH.get(this) + 1;
 
-        BEGIN_SM_CHANGE_UPDATER.lazySet(this, changeNumber);
-        MemoryAccess.releaseFence();
+        BEGIN_SM_CHANGE_VH.setRelease(this, changeNumber);
+        VarHandle.storeStoreFence();
 
         nextSmPosition = smPosition;
         nextSmReceiverWindowLength = receiverWindowLength;
 
-        END_SM_CHANGE_UPDATER.lazySet(this, changeNumber);
+        END_SM_CHANGE_VH.setRelease(this, changeNumber);
     }
 
     private void checkUntetheredSubscriptions(final long nowNs, final DriverConductor conductor)
@@ -968,18 +1088,7 @@ public final class PublicationImage
         final int untetheredSubscriptionsSize = untetheredSubscriptions.size();
         if (untetheredSubscriptionsSize > 0)
         {
-            long maxConsumerPosition = 0;
-            for (final ReadablePosition subscriberPosition : subscriberPositions)
-            {
-                final long position = subscriberPosition.getVolatile();
-                if (position > maxConsumerPosition)
-                {
-                    maxConsumerPosition = position;
-                }
-            }
-
-            final int windowLength = nextSmReceiverWindowLength;
-            final long untetheredWindowLimit = (maxConsumerPosition - windowLength) + (windowLength >> 2);
+            final long untetheredWindowLimit = untetheredWindowLimit();
 
             for (int lastIndex = untetheredSubscriptionsSize - 1, i = lastIndex; i >= 0; i--)
             {
@@ -1008,13 +1117,14 @@ public final class PublicationImage
                 {
                     if ((untethered.timeOfLastUpdateNs + untetheredRestingTimeoutNs) - nowNs <= 0)
                     {
+                        final long joinPosition = joinPosition();
                         subscriberPositions = ArrayUtil.add(subscriberPositions, untethered.position);
                         conductor.notifyAvailableImageLink(
                             correlationId,
                             sessionId,
                             untethered.subscriptionLink,
                             untethered.position.id(),
-                            joinPosition(),
+                            joinPosition,
                             rawLog.fileName(),
                             sourceIdentity);
                         untethered.state(UntetheredSubscription.State.ACTIVE, nowNs, streamId, sessionId);
@@ -1022,6 +1132,24 @@ public final class PublicationImage
                 }
             }
         }
+    }
+
+    private long untetheredWindowLimit()
+    {
+        long maxConsumerPosition = 0;
+
+        for (final ReadablePosition subscriberPosition : subscriberPositions)
+        {
+            final long position = subscriberPosition.getVolatile();
+            if (position > maxConsumerPosition)
+            {
+                maxConsumerPosition = position;
+            }
+        }
+
+        final int windowLength = nextSmReceiverWindowLength;
+
+        return (maxConsumerPosition - windowLength) + (windowLength >> 2);
     }
 
     private void updateActiveTransportCount()
@@ -1062,5 +1190,27 @@ public final class PublicationImage
         }
 
         return positions;
+    }
+
+    private long getTimeoutNsFromChannel(
+        final ReceiveChannelEndpoint channelEndpoint,
+        final String paramName,
+        final long defaultValueNs)
+    {
+        final String timeoutStr = channelEndpoint.subscriptionUdpChannel().channelUri().get(paramName);
+        return null != timeoutStr ? SystemUtil.parseDuration(paramName, timeoutStr) : defaultValueNs;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public String toString()
+    {
+        return "PublicationImage{" +
+            "state=" + state +
+            ", sourceIdentity='" + sourceIdentity + '\'' +
+            ", streamId=" + streamId +
+            ", sessionId=" + sessionId +
+            '}';
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,10 +35,10 @@ typedef int aeron_socket_t;
 
 #elif defined(AERON_COMPILER_MSVC)
 
-#include <winsock2.h>
-#include <windows.h>
+#include <WinSock2.h>
+#include <Windows.h>
 #include <ws2ipdef.h>
-#include <wS2tcpip.h>
+#include <WS2tcpip.h>
 #include <iphlpapi.h>
 
 // SOCKET is uint64_t but we need a signed type to match the Linux version

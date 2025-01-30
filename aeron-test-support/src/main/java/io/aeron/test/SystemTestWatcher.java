@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,11 +22,18 @@ import io.aeron.cluster.service.ClusterTerminationException;
 import io.aeron.samples.SamplesUtil;
 import io.aeron.test.cluster.TestCluster;
 import io.aeron.test.driver.DriverOutputConsumer;
-import org.agrona.*;
+import org.agrona.CloseHelper;
+import org.agrona.IoUtil;
+import org.agrona.LangUtil;
+import org.agrona.SemanticVersion;
+import org.agrona.SystemUtil;
 import org.agrona.collections.MutableInteger;
+import org.agrona.collections.MutableReference;
+import org.agrona.collections.Object2ObjectHashMap;
 import org.agrona.concurrent.AtomicBuffer;
 import org.agrona.concurrent.SystemEpochClock;
 import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.concurrent.errors.ErrorConsumer;
 import org.agrona.concurrent.errors.ErrorLogReader;
 import org.agrona.concurrent.ringbuffer.RingBufferDescriptor;
 import org.agrona.concurrent.status.CountersReader;
@@ -39,22 +46,33 @@ import org.opentest4j.AssertionFailedError;
 import org.opentest4j.TestAbortedException;
 
 import java.io.File;
+import java.io.IOException;
 import java.lang.reflect.Method;
 import java.net.UnknownHostException;
 import java.nio.MappedByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.text.SimpleDateFormat;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static io.aeron.CncFileDescriptor.*;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-public class SystemTestWatcher implements DriverOutputConsumer, AfterTestExecutionCallback, AfterEachCallback,
-    BeforeEachCallback
+public class SystemTestWatcher implements
+    DriverOutputConsumer,
+    AfterTestExecutionCallback,
+    BeforeEachCallback,
+    AfterEachCallback
 {
     public static final Pattern PARAMETERISED_TEST_INDEX_PATTERN = Pattern.compile("\\[([0-9]+)].*");
     private static final String CLUSTER_TERMINATION_EXCEPTION = ClusterTerminationException.class.getName();
@@ -78,12 +96,19 @@ public class SystemTestWatcher implements DriverOutputConsumer, AfterTestExecuti
     private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSSZ");
 
     private final MediaDriverTestUtil mediaDriverTestUtil = new MediaDriverTestUtil();
+    private final Map<String, MarkFileDissector> errorDissectors = new Object2ObjectHashMap<>();
 
     private Predicate<String> logFilter = TEST_CLUSTER_DEFAULT_LOG_FILTER;
     private DataCollector dataCollector = new DataCollector();
     private final ArrayList<AutoCloseable> closeables = new ArrayList<>();
     private long startTimeNs;
-    private long endTimeNs;
+
+    public SystemTestWatcher()
+    {
+        addDissectorInternal(new ArchiveMarkFileDissector());
+        addDissectorInternal(new ConsensusModuleMarkFileDissector());
+        addDissectorInternal(new ClusteredServiceMarkFileDissector());
+    }
 
     public SystemTestWatcher cluster(final TestCluster testCluster)
     {
@@ -94,6 +119,18 @@ public class SystemTestWatcher implements DriverOutputConsumer, AfterTestExecuti
     public SystemTestWatcher addClosable(final AutoCloseable closeable)
     {
         closeables.add(Objects.requireNonNull(closeable));
+        return this;
+    }
+
+    private void addDissectorInternal(final MarkFileDissector markFileDissector)
+    {
+        errorDissectors.put(markFileDissector.filename(), markFileDissector);
+    }
+
+    @SuppressWarnings("unused")
+    public SystemTestWatcher addDissector(final MarkFileDissector markFileDissector)
+    {
+        addDissectorInternal(markFileDissector);
         return this;
     }
 
@@ -137,19 +174,16 @@ public class SystemTestWatcher implements DriverOutputConsumer, AfterTestExecuti
 
     public void beforeEach(final ExtensionContext context)
     {
+        Thread.interrupted(); // clean the interrupted flag so that it does not affect the next test
         startTimeNs = System.nanoTime();
     }
 
+    @SuppressWarnings("MethodLength")
     public void afterTestExecution(final ExtensionContext context)
     {
-        endTimeNs = System.nanoTime();
+        final long endTimeNs = System.nanoTime();
         Thread.interrupted(); // clean the interrupted flag so that it does not prevent cleanup in the tests
-    }
 
-    @SuppressWarnings("methodlength")
-    public void afterEach(final ExtensionContext context)
-    {
-        Thread.interrupted(); // clean the interrupted flag
         Throwable error = context.getExecutionException()
             .filter((t) -> !(t instanceof TestAbortedException))
             .orElse(null);
@@ -161,7 +195,7 @@ public class SystemTestWatcher implements DriverOutputConsumer, AfterTestExecuti
             }
             catch (final Throwable t)
             {
-                error = setOrUpdateError(error, t);
+                error = Tests.setOrUpdateError(error, t);
             }
 
             try
@@ -177,13 +211,13 @@ public class SystemTestWatcher implements DriverOutputConsumer, AfterTestExecuti
                 }
                 else if (0 != count.get())
                 {
-                    error = setOrUpdateError(error, new AssertionFailedError(
+                    error = Tests.setOrUpdateError(error, new AssertionFailedError(
                         "Errors observed in " + context.getDisplayName() + ":\n" + errors));
                 }
             }
             catch (final Throwable t)
             {
-                error = setOrUpdateError(error, t);
+                error = Tests.setOrUpdateError(error, t);
             }
 
             if (null != error)
@@ -202,7 +236,7 @@ public class SystemTestWatcher implements DriverOutputConsumer, AfterTestExecuti
                     }
                     else
                     {
-                        directoryName = testMethod + "_" + System.nanoTime() + context.getUniqueId();
+                        directoryName = testMethod + "_" + System.nanoTime();
                     }
                 }
                 else
@@ -212,17 +246,17 @@ public class SystemTestWatcher implements DriverOutputConsumer, AfterTestExecuti
                 }
 
                 System.out.println(
-                    "*** " + testName + " failed in " +
-                    NANOSECONDS.toMillis(endTimeNs - startTimeNs) + " ms, cause: " + error);
+                    "*** " + testName + " failed in endTimeNs(" + endTimeNs + ") - startTimeNs(" + startTimeNs + ") " +
+                    " = " + NANOSECONDS.toMillis(endTimeNs - startTimeNs) + " ms, cause: " + error);
                 final Throwable terminateError = reportAndTerminate(directoryName);
-                error = setOrUpdateError(error, terminateError);
+                error = Tests.setOrUpdateError(error, terminateError);
                 try
                 {
                     mediaDriverTestUtil.testFailed();
                 }
                 catch (final Throwable t)
                 {
-                    error = setOrUpdateError(error, t);
+                    error = Tests.setOrUpdateError(error, t);
                 }
             }
             else
@@ -234,7 +268,7 @@ public class SystemTestWatcher implements DriverOutputConsumer, AfterTestExecuti
                 }
                 catch (final Throwable t)
                 {
-                    error = setOrUpdateError(error, t);
+                    error = Tests.setOrUpdateError(error, t);
                 }
 
                 try
@@ -243,13 +277,12 @@ public class SystemTestWatcher implements DriverOutputConsumer, AfterTestExecuti
                 }
                 catch (final Throwable t)
                 {
-                    error = setOrUpdateError(error, t);
+                    error = Tests.setOrUpdateError(error, t);
                 }
             }
         }
         finally
         {
-            deleteAllLocations(error);
             if (null != error)
             {
                 System.out.println("*** Complete stack trace: ");
@@ -257,6 +290,11 @@ public class SystemTestWatcher implements DriverOutputConsumer, AfterTestExecuti
                 LangUtil.rethrowUnchecked(error);
             }
         }
+    }
+
+    public void afterEach(final ExtensionContext context)
+    {
+        deleteAllLocations();
     }
 
     private void setTerminationExpected()
@@ -270,12 +308,23 @@ public class SystemTestWatcher implements DriverOutputConsumer, AfterTestExecuti
         }
     }
 
-    private void filterErrors(final MutableInteger count, final StringBuilder errors)
+    private void filterErrors(final MutableInteger count, final StringBuilder errors) throws IOException
     {
         filterCncFileErrors(dataCollector.cncFiles(), count, errors);
-        filterArchiveMarkFileErrors(dataCollector.archiveMarkFiles(), count, errors);
-        filterClusterMarkFileErrors(dataCollector.consensusModuleMarkFiles(), count, errors);
-        filterClusterMarkFileErrors(dataCollector.clusterServiceMarkFiles(), count, errors);
+
+        for (final MarkFileDissector dissector : errorDissectors.values())
+        {
+            filterErrors(dissector, count, errors);
+        }
+    }
+
+    private void filterErrors(
+        final MarkFileDissector markFileDissector,
+        final MutableInteger count,
+        final StringBuilder errors) throws IOException
+    {
+        final List<Path> paths = dataCollector.markFiles(markFileDissector);
+        markFileDissector.filterErrors(paths, count, errors, logFilter);
     }
 
     private void filterCncFileErrors(final List<Path> paths, final MutableInteger count, final StringBuilder errors)
@@ -283,47 +332,32 @@ public class SystemTestWatcher implements DriverOutputConsumer, AfterTestExecuti
         for (final Path path : paths)
         {
             final File file = path.toFile();
-            final MappedByteBuffer mmap = SamplesUtil.mapExistingFileReadOnly(file);
-            try
+            if (file.exists() && file.length() > 0)
             {
-                final AtomicBuffer buffer = CommonContext.errorLogBuffer(mmap);
-                readErrors(path, buffer, count, errors);
-            }
-            finally
-            {
-                IoUtil.unmap(mmap);
-            }
-        }
-    }
-
-    private void filterClusterMarkFileErrors(
-        final List<Path> paths, final MutableInteger count, final StringBuilder errors)
-    {
-        for (final Path path : paths)
-        {
-            try (ClusterMarkFile clusterMarkFile = openClusterMarkFile(path))
-            {
-                final AtomicBuffer buffer = clusterMarkFile.errorBuffer();
-                readErrors(path, buffer, count, errors);
+                final MappedByteBuffer mmap = SamplesUtil.mapExistingFileReadOnly(file);
+                try
+                {
+                    final UnsafeBuffer metaDataBuffer = createMetaDataBuffer(mmap);
+                    final int errorLogBufferLength = metaDataBuffer.getInt(errorLogBufferLengthOffset(0));
+                    if (errorLogBufferLength > 0)
+                    {
+                        readErrors(path, CommonContext.errorLogBuffer(mmap), count, errors, logFilter);
+                    }
+                }
+                finally
+                {
+                    IoUtil.unmap(mmap);
+                }
             }
         }
     }
 
-    private void filterArchiveMarkFileErrors(
-        final List<Path> paths, final MutableInteger count, final StringBuilder errors)
-    {
-        for (final Path path : paths)
-        {
-            try (ArchiveMarkFile archive = openArchiveMarkFile(path))
-            {
-                final AtomicBuffer buffer = archive.errorBuffer();
-                readErrors(path, buffer, count, errors);
-            }
-        }
-    }
-
-    private void readErrors(
-        final Path path, final AtomicBuffer buffer, final MutableInteger count, final StringBuilder errors)
+    public static void readErrors(
+        final Path path,
+        final AtomicBuffer buffer,
+        final MutableInteger count,
+        final StringBuilder errors,
+        final Predicate<String> logFilter)
     {
         ErrorLogReader.read(
             buffer,
@@ -356,8 +390,15 @@ public class SystemTestWatcher implements DriverOutputConsumer, AfterTestExecuti
 
     private static ClusterMarkFile openClusterMarkFile(final Path path)
     {
-        return new ClusterMarkFile(
-            path.getParent().toFile(), path.getFileName().toString(), SystemEpochClock.INSTANCE, 0, (s) -> {});
+        try
+        {
+            return new ClusterMarkFile(
+                path.getParent().toFile(), path.getFileName().toString(), SystemEpochClock.INSTANCE, 0, (s) -> {});
+        }
+        catch (final RuntimeException ex)
+        {
+            throw new RuntimeException("Failed to open mark file=" + path, ex);
+        }
     }
 
     private static ArchiveMarkFile openArchiveMarkFile(final Path path)
@@ -384,47 +425,48 @@ public class SystemTestWatcher implements DriverOutputConsumer, AfterTestExecuti
 
     private Throwable reportAndTerminate(final String directoryName)
     {
-        Throwable error = setOrUpdateError(null, printCncInfo(dataCollector.cncFiles()));
-        error = setOrUpdateError(error, printArchiveMarkFileErrors(dataCollector.archiveMarkFiles()));
-        error = setOrUpdateError(
-            error, printClusterMarkFileErrors(dataCollector.consensusModuleMarkFiles(), "Consensus Module Errors"));
-        error = setOrUpdateError(
-            error, printClusterMarkFileErrors(dataCollector.clusterServiceMarkFiles(), "Cluster Service Errors"));
+        final MutableReference<Throwable> error = new MutableReference<>();
+        setOrUpdateError(error, printCncInfo(dataCollector.cncFiles()));
+
+        errorDissectors.forEach((filename, dissector) -> setOrUpdateError(
+            error,
+            dissector.printErrors(dataCollector.markFiles(dissector), this::printObservationCallback)));
+
+        //grab thread dump while components are still running
+        final byte[] threadDump = SystemUtil.threadDump().getBytes(UTF_8);
 
         try
         {
+            System.out.println("Reported and termination: " + closeables);
             CloseHelper.closeAll(closeables);
         }
         catch (final Throwable t)
         {
-            error = setOrUpdateError(error, t);
+            setOrUpdateError(error, t);
         }
 
         try
         {
-            dataCollector.dumpData(directoryName);
+            dataCollector.dumpData(directoryName, threadDump);
         }
         catch (final Throwable t)
         {
-            error = setOrUpdateError(error, t);
+            setOrUpdateError(error, t);
         }
 
-        return error;
+        return error.get();
     }
 
-    private static Throwable setOrUpdateError(final Throwable existingError, final Throwable newError)
+    private static void setOrUpdateError(final MutableReference<Throwable> existingError, final Throwable newError)
     {
-        if (null == existingError)
+        if (null == existingError.get())
         {
-            return newError;
+            existingError.set(newError);
         }
-
-        if (null != newError)
+        else if (null != newError)
         {
-            existingError.addSuppressed(newError);
+            existingError.get().addSuppressed(newError);
         }
-
-        return existingError;
     }
 
     private Throwable printCncInfo(final List<Path> paths)
@@ -433,6 +475,11 @@ public class SystemTestWatcher implements DriverOutputConsumer, AfterTestExecuti
         for (final Path path : paths)
         {
             final File cncFile = path.toFile();
+            if (!cncFile.exists() || 0 == cncFile.length())
+            {
+                System.out.printf("%n%nCommand `n Control file %s was not created!%n", cncFile);
+                continue;
+            }
             System.out.printf("%n%nCommand `n Control file %s, length=%d%n", cncFile, cncFile.length());
             System.out.println("---------------------------------------------------------------------------------");
             final MappedByteBuffer mappedByteBuffer = SamplesUtil.mapExistingFileReadOnly(cncFile);
@@ -468,7 +515,8 @@ public class SystemTestWatcher implements DriverOutputConsumer, AfterTestExecuti
                 {
                     final CountersReader countersReader = new CountersReader(
                         createCountersMetaDataBuffer(mappedByteBuffer, metaDataBuffer),
-                        createCountersValuesBuffer(mappedByteBuffer, metaDataBuffer));
+                        createCountersValuesBuffer(mappedByteBuffer, metaDataBuffer),
+                        StandardCharsets.US_ASCII);
                     countersReader.forEach(
                         (counterId, label) ->
                         {
@@ -490,7 +538,7 @@ public class SystemTestWatcher implements DriverOutputConsumer, AfterTestExecuti
             }
             catch (final Throwable t)
             {
-                error = setOrUpdateError(error, t);
+                error = Tests.setOrUpdateError(error, t);
             }
             finally
             {
@@ -501,59 +549,173 @@ public class SystemTestWatcher implements DriverOutputConsumer, AfterTestExecuti
         return error;
     }
 
-    private Throwable printArchiveMarkFileErrors(final List<Path> paths)
+    private void deleteAllLocations()
     {
-        Throwable error = null;
-        for (final Path path : paths)
-        {
-            try (ArchiveMarkFile archiveFile = openArchiveMarkFile(path))
-            {
-                final AtomicBuffer buffer = archiveFile.errorBuffer();
-
-                System.out.printf("%n%n%s file %s%n", "Archive Errors", path);
-                final int distinctErrorCount = ErrorLogReader.read(buffer, this::printObservationCallback);
-                System.out.format("%d distinct errors observed.%n", distinctErrorCount);
-            }
-            catch (final Throwable t)
-            {
-                error = setOrUpdateError(error, t);
-            }
-        }
-
-        return error;
-    }
-
-    private Throwable printClusterMarkFileErrors(final List<Path> paths, final String fileDescription)
-    {
-        Throwable error = null;
-        for (final Path path : paths)
-        {
-            try (ClusterMarkFile clusterMarkFile = openClusterMarkFile(path))
-            {
-                final AtomicBuffer buffer = clusterMarkFile.errorBuffer();
-
-                System.out.printf("%n%n%s file %s%n", fileDescription, path);
-                final int distinctErrorCount = ErrorLogReader.read(buffer, this::printObservationCallback);
-                System.out.format("%d distinct errors observed.%n", distinctErrorCount);
-            }
-            catch (final Throwable t)
-            {
-                error = setOrUpdateError(error, t);
-            }
-        }
-        return error;
-    }
-
-    private void deleteAllLocations(final Throwable error)
-    {
-        if (null != error)
-        {
-            return;
-        }
-
         for (final Path path : dataCollector.cleanupLocations())
         {
-            IoUtil.delete(path.toFile(), true);
+            try
+            {
+                IoUtil.delete(path.toFile(), true);
+            }
+            catch (final Exception e)
+            {
+                System.err.println("Failed to delete: '" + path + "', skipping: " + e.getMessage());
+            }
+        }
+    }
+
+    public interface MarkFileDissector
+    {
+        String filename();
+
+        Throwable printErrors(List<Path> paths, ErrorConsumer errorConsumer);
+
+        boolean isRelevantFile(File file);
+
+        void filterErrors(List<Path> paths, MutableInteger count, StringBuilder errors, Predicate<String> logFilter)
+            throws IOException;
+    }
+
+    private static final class ArchiveMarkFileDissector implements MarkFileDissector
+    {
+        public String filename()
+        {
+            return ArchiveMarkFile.FILENAME;
+        }
+
+        public boolean isRelevantFile(final File file)
+        {
+            return ArchiveMarkFile.FILENAME.equals(file.getName());
+        }
+
+        public Throwable printErrors(final List<Path> paths, final ErrorConsumer errorConsumer)
+        {
+            Throwable error = null;
+            for (final Path path : paths)
+            {
+                if (Files.exists(path) && path.toFile().length() > 0)
+                {
+                    try (ArchiveMarkFile archiveFile = openArchiveMarkFile(path))
+                    {
+                        final AtomicBuffer buffer = archiveFile.errorBuffer();
+
+                        System.out.printf("%n%n%s file %s%n", "Archive Errors", path);
+                        final int distinctErrorCount = ErrorLogReader.read(buffer, errorConsumer);
+                        System.out.format("%d distinct errors observed.%n", distinctErrorCount);
+                    }
+                    catch (final Throwable t)
+                    {
+                        error = Tests.setOrUpdateError(error, t);
+                    }
+                }
+            }
+
+            return error;
+        }
+
+        public void filterErrors(
+            final List<Path> paths,
+            final MutableInteger count,
+            final StringBuilder errors,
+            final Predicate<String> logFilter) throws IOException
+        {
+            for (final Path path : paths)
+            {
+                if (Files.exists(path) && Files.size(path) > 0)
+                {
+                    try (ArchiveMarkFile archive = openArchiveMarkFile(path))
+                    {
+                        final AtomicBuffer buffer = archive.errorBuffer();
+                        readErrors(path, buffer, count, errors, logFilter);
+                    }
+                }
+            }
+        }
+    }
+
+    private abstract static class ClusterMarkFileDissector implements MarkFileDissector
+    {
+        public Throwable printErrors(final List<Path> paths, final ErrorConsumer errorConsumer)
+        {
+            Throwable error = null;
+            for (final Path path : paths)
+            {
+                if (Files.exists(path) && path.toFile().length() > 0)
+                {
+                    try (ClusterMarkFile clusterMarkFile = openClusterMarkFile(path))
+                    {
+                        final AtomicBuffer buffer = clusterMarkFile.errorBuffer();
+
+                        System.out.printf("%n%n%s file %s%n", fileDescription(), path);
+                        final int distinctErrorCount = ErrorLogReader.read(buffer, errorConsumer);
+                        System.out.format("%d distinct errors observed.%n", distinctErrorCount);
+                    }
+                    catch (final Throwable t)
+                    {
+                        error = Tests.setOrUpdateError(error, t);
+                    }
+                }
+            }
+            return error;
+        }
+
+        public void filterErrors(
+            final List<Path> paths,
+            final MutableInteger count,
+            final StringBuilder errors,
+            final Predicate<String> logFilter) throws IOException
+        {
+            for (final Path path : paths)
+            {
+                if (Files.exists(path) && Files.size(path) > 0)
+                {
+                    try (ClusterMarkFile clusterMarkFile = openClusterMarkFile(path))
+                    {
+                        final AtomicBuffer buffer = clusterMarkFile.errorBuffer();
+                        readErrors(path, buffer, count, errors, logFilter);
+                    }
+                }
+            }
+        }
+
+        protected abstract String fileDescription();
+    }
+
+    private static final class ConsensusModuleMarkFileDissector extends ClusterMarkFileDissector
+    {
+        public String filename()
+        {
+            return ClusterMarkFile.FILENAME;
+        }
+
+        public boolean isRelevantFile(final File file)
+        {
+            return ClusterMarkFile.FILENAME.equals(file.getName());
+        }
+
+        protected String fileDescription()
+        {
+            return "Consensus Module";
+        }
+    }
+
+    private static final class ClusteredServiceMarkFileDissector extends ClusterMarkFileDissector
+    {
+        public String filename()
+        {
+            return ClusterMarkFile.SERVICE_FILENAME_PREFIX + "X" + ClusterMarkFile.FILE_EXTENSION;
+        }
+
+        public boolean isRelevantFile(final File file)
+        {
+            final String name = file.getName();
+            return name.startsWith(ClusterMarkFile.SERVICE_FILENAME_PREFIX) &&
+                name.endsWith(ClusterMarkFile.FILE_EXTENSION);
+        }
+
+        protected String fileDescription()
+        {
+            return "Clustered Service";
         }
     }
 }

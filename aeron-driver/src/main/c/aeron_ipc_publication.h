@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -58,6 +58,8 @@ typedef struct aeron_ipc_publication_stct
     int64_t term_window_length;
     int64_t trip_gain;
     int64_t unblock_timeout_ns;
+    int64_t untethered_window_limit_timeout_ns;
+    int64_t untethered_resting_timeout_ns;
     int32_t initial_term_id;
     bool is_exclusive;
     int64_t tag;
@@ -72,9 +74,13 @@ typedef struct aeron_ipc_publication_stct
 
     aeron_raw_log_close_func_t raw_log_close_func;
     aeron_raw_log_free_func_t raw_log_free_func;
-    aeron_untethered_subscription_state_change_func_t untethered_subscription_state_change_func;
+    struct
+    {
+        aeron_untethered_subscription_state_change_func_t untethered_subscription_state_change;
+    } log;
 
     volatile int64_t *unblocked_publications_counter;
+    volatile int64_t *mapped_bytes_counter;
 }
 aeron_ipc_publication_t;
 
@@ -97,7 +103,7 @@ void aeron_ipc_publication_close(aeron_counters_manager_t *counters_manager, aer
 
 bool aeron_ipc_publication_free(aeron_ipc_publication_t *publication);
 
-int aeron_ipc_publication_update_pub_lmt(aeron_ipc_publication_t *publication);
+int aeron_ipc_publication_update_pub_pos_and_lmt(aeron_ipc_publication_t *publication);
 
 void aeron_ipc_publication_clean_buffer(aeron_ipc_publication_t *publication, int64_t position);
 
@@ -114,18 +120,18 @@ void aeron_ipc_publication_check_for_blocked_publisher(
 inline void aeron_ipc_publication_add_subscriber_hook(void *clientd, volatile int64_t *value_addr)
 {
     aeron_ipc_publication_t *publication = (aeron_ipc_publication_t *)clientd;
-    AERON_PUT_ORDERED(publication->log_meta_data->is_connected, 1);
+    AERON_SET_RELEASE(publication->log_meta_data->is_connected, 1);
 }
 
 inline void aeron_ipc_publication_remove_subscriber_hook(void *clientd, volatile int64_t *value_addr)
 {
     aeron_ipc_publication_t *publication = (aeron_ipc_publication_t *)clientd;
 
-    aeron_ipc_publication_update_pub_lmt(publication);
+    aeron_ipc_publication_update_pub_pos_and_lmt(publication);
 
     if (1 == publication->conductor_fields.subscribable.length && NULL != publication->mapped_raw_log.mapped_file.addr)
     {
-        AERON_PUT_ORDERED(publication->log_meta_data->is_connected, 0);
+        AERON_SET_RELEASE(publication->log_meta_data->is_connected, 0);
     }
 }
 
@@ -134,7 +140,7 @@ inline bool aeron_ipc_publication_is_possibly_blocked(
 {
     int32_t producer_term_count;
 
-    AERON_GET_VOLATILE(producer_term_count, publication->log_meta_data->active_term_count);
+    AERON_GET_ACQUIRE(producer_term_count, publication->log_meta_data->active_term_count);
     const int32_t expected_term_count = (int32_t)(consumer_position >> publication->position_bits_to_shift);
 
     if (producer_term_count != expected_term_count)
@@ -164,11 +170,16 @@ inline int64_t aeron_ipc_publication_join_position(aeron_ipc_publication_t *publ
 
     for (size_t i = 0, length = publication->conductor_fields.subscribable.length; i < length; i++)
     {
-        int64_t sub_pos = aeron_counter_get_volatile(publication->conductor_fields.subscribable.array[i].value_addr);
+        aeron_tetherable_position_t *tetherable_position = &publication->conductor_fields.subscribable.array[i];
 
-        if (sub_pos < position)
+        if (AERON_SUBSCRIPTION_TETHER_RESTING != tetherable_position->state)
         {
-            position = sub_pos;
+            const int64_t sub_pos = aeron_counter_get_volatile(tetherable_position->value_addr);
+
+            if (sub_pos < position)
+            {
+                position = sub_pos;
+            }
         }
     }
 
@@ -186,20 +197,20 @@ inline bool aeron_ipc_publication_is_drained(aeron_ipc_publication_t *publicatio
 
     for (size_t i = 0, length = publication->conductor_fields.subscribable.length; i < length; i++)
     {
-        int64_t sub_pos = aeron_counter_get_volatile(publication->conductor_fields.subscribable.array[i].value_addr);
+        aeron_tetherable_position_t *tetherable_position = &publication->conductor_fields.subscribable.array[i];
 
-        if (sub_pos < producer_position)
+        if (AERON_SUBSCRIPTION_TETHER_RESTING != tetherable_position->state)
         {
-            return false;
+            const int64_t sub_pos = aeron_counter_get_volatile(tetherable_position->value_addr);
+
+            if (sub_pos < producer_position)
+            {
+                return false;
+            }
         }
     }
 
     return true;
-}
-
-inline size_t aeron_ipc_publication_num_subscribers(aeron_ipc_publication_t *publication)
-{
-    return publication->conductor_fields.subscribable.length;
 }
 
 inline bool aeron_ipc_publication_is_accepting_subscriptions(aeron_ipc_publication_t *publication)

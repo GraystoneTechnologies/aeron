@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,8 +34,8 @@ int aeron_spsc_concurrent_array_queue_init(aeron_spsc_concurrent_array_queue_t *
     queue->capacity = length;
     queue->mask = length - 1;
     queue->producer.head_cache = 0;
-    AERON_PUT_ORDERED(queue->producer.tail, (uint64_t)0);
-    AERON_PUT_ORDERED(queue->consumer.head, (uint64_t)0);
+    AERON_SET_RELEASE(queue->producer.tail, (uint64_t)0);
+    AERON_SET_RELEASE(queue->consumer.head, (uint64_t)0);
 
     return 0;
 }

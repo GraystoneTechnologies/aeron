@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -122,7 +122,7 @@ public class ArchiveCreator
         try (Publication publication = aeronArchive.addRecordedExclusivePublication(uriBuilder.build(), STREAM_ID))
         {
             final CountersReader counters = aeron.countersReader();
-            final int counterId = awaitRecordingCounterId(counters, publication.sessionId());
+            final int counterId = awaitRecordingCounterId(counters, publication.sessionId(), aeronArchive.archiveId());
             final long recordingId = RecordingPos.getRecordingId(counters, counterId);
 
             System.out.println(
@@ -145,10 +145,10 @@ public class ArchiveCreator
         }
     }
 
-    private static int awaitRecordingCounterId(final CountersReader counters, final int sessionId)
+    private static int awaitRecordingCounterId(final CountersReader counters, final int sessionId, final long archiveId)
     {
         int counterId;
-        while (NULL_VALUE == (counterId = RecordingPos.findCounterIdBySession(counters, sessionId)))
+        while (NULL_VALUE == (counterId = RecordingPos.findCounterIdBySession(counters, sessionId, archiveId)))
         {
             Thread.yield();
             checkInterruptStatus();

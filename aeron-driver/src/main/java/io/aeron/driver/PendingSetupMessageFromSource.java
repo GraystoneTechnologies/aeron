@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -99,5 +99,18 @@ final class PendingSetupMessageFromSource
     void removeFromDataPacketDispatcher()
     {
         channelEndpoint.dispatcher().removePendingSetup(sessionId, streamId);
+    }
+
+    public String toString()
+    {
+        return "PendingSetupMessageFromSource{" +
+            "sessionId=" + sessionId +
+            ", streamId=" + streamId +
+            ", transportIndex=" + transportIndex +
+            ", periodic=" + periodic +
+            ", channelEndpoint=" + channelEndpoint +
+            ", controlAddress=" + controlAddress +
+            ", timeOfStatusMessageNs=" + timeOfStatusMessageNs +
+            '}';
     }
 }

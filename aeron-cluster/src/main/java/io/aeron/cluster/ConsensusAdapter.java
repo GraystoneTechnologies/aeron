@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,9 @@ import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
 import org.agrona.collections.ArrayUtil;
 
+import java.util.ArrayList;
+import java.util.List;
+
 class ConsensusAdapter implements FragmentHandler, AutoCloseable
 {
     static final int FRAGMENT_LIMIT = 10;
@@ -39,16 +42,12 @@ class ConsensusAdapter implements FragmentHandler, AutoCloseable
     private final CatchupPositionDecoder catchupPositionDecoder = new CatchupPositionDecoder();
     private final StopCatchupDecoder stopCatchupDecoder = new StopCatchupDecoder();
 
-    private final AddPassiveMemberDecoder addPassiveMemberDecoder = new AddPassiveMemberDecoder();
-    private final ClusterMembersChangeDecoder clusterMembersChangeDecoder = new ClusterMembersChangeDecoder();
-    private final SnapshotRecordingQueryDecoder snapshotRecordingQueryDecoder = new SnapshotRecordingQueryDecoder();
-    private final SnapshotRecordingsDecoder snapshotRecordingsDecoder = new SnapshotRecordingsDecoder();
-    private final JoinClusterDecoder joinClusterDecoder = new JoinClusterDecoder();
     private final TerminationPositionDecoder terminationPositionDecoder = new TerminationPositionDecoder();
     private final TerminationAckDecoder terminationAckDecoder = new TerminationAckDecoder();
     private final BackupQueryDecoder backupQueryDecoder = new BackupQueryDecoder();
     private final ChallengeResponseDecoder challengeResponseDecoder = new ChallengeResponseDecoder();
     private final HeartbeatRequestDecoder heartbeatRequestDecoder = new HeartbeatRequestDecoder();
+    private final StandbySnapshotDecoder standbySnapshotDecoder = new StandbySnapshotDecoder();
 
     private final FragmentAssembler fragmentAssembler = new FragmentAssembler(this);
     private final Subscription subscription;
@@ -215,64 +214,6 @@ class ConsensusAdapter implements FragmentHandler, AutoCloseable
                     stopCatchupDecoder.followerMemberId());
                 break;
 
-            case AddPassiveMemberDecoder.TEMPLATE_ID:
-                addPassiveMemberDecoder.wrap(
-                    buffer,
-                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
-                    messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
-
-                consensusModuleAgent.onAddPassiveMember(
-                    addPassiveMemberDecoder.correlationId(), addPassiveMemberDecoder.memberEndpoints());
-                break;
-
-            case ClusterMembersChangeDecoder.TEMPLATE_ID:
-                clusterMembersChangeDecoder.wrap(
-                    buffer,
-                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
-                    messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
-
-                consensusModuleAgent.onClusterMembersChange(
-                    clusterMembersChangeDecoder.correlationId(),
-                    clusterMembersChangeDecoder.leaderMemberId(),
-                    clusterMembersChangeDecoder.activeMembers(),
-                    clusterMembersChangeDecoder.passiveMembers());
-                break;
-
-            case SnapshotRecordingQueryDecoder.TEMPLATE_ID:
-                snapshotRecordingQueryDecoder.wrap(
-                    buffer,
-                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
-                    messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
-
-                consensusModuleAgent.onSnapshotRecordingQuery(
-                    snapshotRecordingQueryDecoder.correlationId(), snapshotRecordingQueryDecoder.requestMemberId());
-                break;
-
-            case SnapshotRecordingsDecoder.TEMPLATE_ID:
-                snapshotRecordingsDecoder.wrap(
-                    buffer,
-                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
-                    messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
-
-                consensusModuleAgent.onSnapshotRecordings(
-                    snapshotRecordingsDecoder.correlationId(), snapshotRecordingsDecoder);
-                break;
-
-            case JoinClusterDecoder.TEMPLATE_ID:
-                joinClusterDecoder.wrap(
-                    buffer,
-                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
-                    messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
-
-                consensusModuleAgent.onJoinCluster(
-                    joinClusterDecoder.leadershipTermId(), joinClusterDecoder.memberId());
-                break;
-
             case TerminationPositionDecoder.TEMPLATE_ID:
                 terminationPositionDecoder.wrap(
                     buffer,
@@ -376,6 +317,51 @@ class ConsensusAdapter implements FragmentHandler, AutoCloseable
                 break;
             }
 
+            case StandbySnapshotDecoder.TEMPLATE_ID:
+            {
+                standbySnapshotDecoder.wrap(
+                    buffer,
+                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
+                    messageHeaderDecoder.blockLength(),
+                    messageHeaderDecoder.version());
+
+                final long correlationId = standbySnapshotDecoder.correlationId();
+                final int version = standbySnapshotDecoder.version();
+                final int responseStreamId = standbySnapshotDecoder.responseStreamId();
+                final List<StandbySnapshotEntry> standbySnapshotEntries = new ArrayList<>();
+
+                for (final StandbySnapshotDecoder.SnapshotsDecoder standbySnapshot : standbySnapshotDecoder.snapshots())
+                {
+                    standbySnapshotEntries.add(new StandbySnapshotEntry(
+                        standbySnapshot.recordingId(),
+                        standbySnapshot.leadershipTermId(),
+                        standbySnapshot.termBaseLogPosition(),
+                        standbySnapshot.logPosition(),
+                        standbySnapshot.timestamp(),
+                        standbySnapshot.serviceId(),
+                        standbySnapshot.archiveEndpoint()));
+                }
+
+                final String responseChannel = standbySnapshotDecoder.responseChannel();
+                final byte[] encodedCredentials;
+                if (0 == standbySnapshotDecoder.encodedCredentialsLength())
+                {
+                    encodedCredentials = ArrayUtil.EMPTY_BYTE_ARRAY;
+                }
+                else
+                {
+                    encodedCredentials = new byte[standbySnapshotDecoder.encodedCredentialsLength()];
+                    standbySnapshotDecoder.getEncodedCredentials(encodedCredentials, 0, encodedCredentials.length);
+                }
+
+                consensusModuleAgent.onStandbySnapshot(
+                    correlationId,
+                    version,
+                    standbySnapshotEntries,
+                    responseStreamId,
+                    responseChannel,
+                    encodedCredentials);
+            }
         }
     }
 }

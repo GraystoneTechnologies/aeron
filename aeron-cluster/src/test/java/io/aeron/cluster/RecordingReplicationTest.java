@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ import io.aeron.Aeron;
 import io.aeron.Subscription;
 import io.aeron.archive.client.AeronArchive;
 import io.aeron.archive.client.ControlResponsePoller;
+import io.aeron.archive.client.ReplicationParams;
 import io.aeron.archive.codecs.RecordingSignal;
 import io.aeron.cluster.client.ClusterException;
 import org.agrona.concurrent.status.CountersReader;
@@ -70,15 +71,18 @@ class RecordingReplicationTest
         final long stopPosition = 982734;
         final long nowNs = 0;
 
+        final ReplicationParams replicationParams = new ReplicationParams()
+            .dstRecordingId(DST_RECORDING_ID)
+            .stopPosition(stopPosition)
+            .replicationChannel(REPLICATION_CHANNEL)
+            .replicationSessionId(Aeron.NULL_VALUE);
+
         final RecordingReplication logReplication = new RecordingReplication(
             aeronArchive,
             SRC_RECORDING_ID,
-            DST_RECORDING_ID,
-            stopPosition,
             ENDPOINT,
             SRC_STREAM_ID,
-            REPLICATION_CHANNEL,
-            Aeron.NULL_VALUE,
+            replicationParams,
             PROGRESS_CHECK_TIMEOUT_NS,
             PROGRESS_CHECK_INTERVAL_NS,
             nowNs);
@@ -106,15 +110,18 @@ class RecordingReplicationTest
         final long stopPosition = 982734;
         final long nowNs = 0;
 
+        final ReplicationParams replicationParams = new ReplicationParams()
+            .dstRecordingId(DST_RECORDING_ID)
+            .stopPosition(stopPosition)
+            .replicationChannel(REPLICATION_CHANNEL)
+            .replicationSessionId(Aeron.NULL_VALUE);
+
         final RecordingReplication logReplication = new RecordingReplication(
             aeronArchive,
             SRC_RECORDING_ID,
-            DST_RECORDING_ID,
-            stopPosition,
             ENDPOINT,
             SRC_STREAM_ID,
-            REPLICATION_CHANNEL,
-            Aeron.NULL_VALUE,
+            replicationParams,
             PROGRESS_CHECK_TIMEOUT_NS,
             PROGRESS_CHECK_INTERVAL_NS,
             nowNs);
@@ -133,15 +140,18 @@ class RecordingReplicationTest
         final long stopPosition = 982734;
         final long nowNs = 0;
 
+        final ReplicationParams replicationParams = new ReplicationParams()
+            .dstRecordingId(DST_RECORDING_ID)
+            .stopPosition(stopPosition)
+            .replicationChannel(REPLICATION_CHANNEL)
+            .replicationSessionId(Aeron.NULL_VALUE);
+
         final RecordingReplication logReplication = new RecordingReplication(
             aeronArchive,
             SRC_RECORDING_ID,
-            DST_RECORDING_ID,
-            stopPosition,
             ENDPOINT,
             SRC_STREAM_ID,
-            REPLICATION_CHANNEL,
-            Aeron.NULL_VALUE,
+            replicationParams,
             PROGRESS_CHECK_TIMEOUT_NS,
             PROGRESS_CHECK_INTERVAL_NS,
             nowNs);
@@ -159,15 +169,18 @@ class RecordingReplicationTest
         final long stopPosition = 982734;
         final long nowNs = 0;
 
+        final ReplicationParams replicationParams = new ReplicationParams()
+            .dstRecordingId(DST_RECORDING_ID)
+            .stopPosition(stopPosition)
+            .replicationChannel(REPLICATION_CHANNEL)
+            .replicationSessionId(Aeron.NULL_VALUE);
+
         final RecordingReplication logReplication = new RecordingReplication(
             aeronArchive,
             SRC_RECORDING_ID,
-            DST_RECORDING_ID,
-            stopPosition,
             ENDPOINT,
             SRC_STREAM_ID,
-            REPLICATION_CHANNEL,
-            Aeron.NULL_VALUE,
+            replicationParams,
             PROGRESS_CHECK_TIMEOUT_NS,
             PROGRESS_CHECK_INTERVAL_NS,
             nowNs);
@@ -183,15 +196,18 @@ class RecordingReplicationTest
         final long stopPosition = 982734;
         final long t0 = 20L;
 
+        final ReplicationParams replicationParams = new ReplicationParams()
+            .dstRecordingId(DST_RECORDING_ID)
+            .stopPosition(stopPosition)
+            .replicationChannel(REPLICATION_CHANNEL)
+            .replicationSessionId(Aeron.NULL_VALUE);
+
         final RecordingReplication logReplication = new RecordingReplication(
             aeronArchive,
             SRC_RECORDING_ID,
-            DST_RECORDING_ID,
-            stopPosition,
             ENDPOINT,
             SRC_STREAM_ID,
-            REPLICATION_CHANNEL,
-            Aeron.NULL_VALUE,
+            replicationParams,
             PROGRESS_CHECK_TIMEOUT_NS,
             PROGRESS_CHECK_INTERVAL_NS,
             t0);

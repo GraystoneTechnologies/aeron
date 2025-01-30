@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -47,6 +47,11 @@ public final class DriverEventLogger
      * Maximum length of a host name.
      */
     public static final int MAX_HOST_NAME_LENGTH = 256;
+
+    /**
+     * Maximum length of a Channel URI.
+     */
+    public static final int MAX_CHANNEL_URI_LENGTH = 4096;
 
     private final ManyToOneRingBuffer ringBuffer;
 
@@ -385,9 +390,9 @@ public final class DriverEventLogger
      *
      * @param resolverName simple class name of the resolver
      * @param durationNs   of the call in nanoseconds.
-     * @param name         host name being resolved
-     * @param isReLookup      address that was resolved to, can be null
-     * @param resolvedName      address that was resolved to, can be null
+     * @param name         host name being resolved.
+     * @param isReLookup   address that was resolved to, can be null.
+     * @param resolvedName address that was resolved to, can be null.
      */
     public void logLookup(
         final String resolverName,
@@ -418,6 +423,39 @@ public final class DriverEventLogger
                     name,
                     isReLookup,
                     resolvedName);
+            }
+            finally
+            {
+                ringBuffer.commit(index);
+            }
+        }
+    }
+
+    /**
+     * Log a host name resolution duration.
+     *
+     * @param durationNs of the call in nanoseconds.
+     * @param hostName   host name being resolved.
+     */
+    public void logHostName(final long durationNs, final String hostName)
+    {
+        final int length = SIZE_OF_LONG + trailingStringLength(hostName, MAX_HOST_NAME_LENGTH);
+
+        final int encodedLength = encodedLength(length);
+
+        final ManyToOneRingBuffer ringBuffer = this.ringBuffer;
+        final int index = ringBuffer.tryClaim(toEventCodeId(NAME_RESOLUTION_HOST_NAME), encodedLength);
+        if (index > 0)
+        {
+            try
+            {
+                encodeHostName(
+                    (UnsafeBuffer)ringBuffer.buffer(),
+                    index,
+                    length,
+                    length,
+                    durationNs,
+                    hostName);
             }
             finally
             {
@@ -464,6 +502,105 @@ public final class DriverEventLogger
                     streamId,
                     channel,
                     receiverCount);
+            }
+            finally
+            {
+                ringBuffer.commit(index);
+            }
+        }
+    }
+
+    /**
+     * Logs a NAK message sent by the receiver for a single control address or received by the sender.
+     *
+     * @param eventCode  to log Nak by.
+     * @param address    Nak UDP destination/source.
+     * @param sessionId  of the Nak.
+     * @param streamId   of the Nak.
+     * @param termId     of the Nak.
+     * @param termOffset of the Nak.
+     * @param nakLength  of the Nak.
+     * @param channel    of the Nak.
+     */
+    public void logNakMessage(
+        final DriverEventCode eventCode,
+        final InetSocketAddress address,
+        final int sessionId,
+        final int streamId,
+        final int termId,
+        final int termOffset,
+        final int nakLength,
+        final String channel)
+    {
+        final int length = socketAddressLength(address) + (SIZE_OF_INT * 6) + channel.length();
+        final int captureLength = captureLength(length);
+        final int encodedLength = encodedLength(captureLength);
+
+        final ManyToOneRingBuffer ringBuffer = this.ringBuffer;
+        final int index = ringBuffer.tryClaim(toEventCodeId(eventCode), encodedLength);
+        if (index > 0)
+        {
+            try
+            {
+                encodeNakMessage(
+                    (UnsafeBuffer)ringBuffer.buffer(),
+                    index,
+                    captureLength,
+                    length,
+                    address,
+                    sessionId,
+                    streamId,
+                    termId,
+                    termOffset,
+                    nakLength,
+                    channel);
+            }
+            finally
+            {
+                ringBuffer.commit(index);
+            }
+        }
+    }
+
+    /**
+     * Logs a nak message sent by the receiver for a single control address.
+     *
+     * @param sessionId    of the Resend.
+     * @param streamId     of the Resend.
+     * @param termId       of the Resend.
+     * @param termOffset   of the Resend.
+     * @param resendLength of the Resend.
+     * @param channel      of the Resend.
+     */
+    public void logResend(
+        final int sessionId,
+        final int streamId,
+        final int termId,
+        final int termOffset,
+        final int resendLength,
+        final String channel)
+    {
+        final int length = (SIZE_OF_INT * 6) + channel.length();
+        final int captureLength = captureLength(length);
+        final int encodedLength = encodedLength(captureLength);
+
+        final ManyToOneRingBuffer ringBuffer = this.ringBuffer;
+        final int index = ringBuffer.tryClaim(toEventCodeId(RESEND), encodedLength);
+        if (index > 0)
+        {
+            try
+            {
+                encodeResend(
+                    (UnsafeBuffer)ringBuffer.buffer(),
+                    index,
+                    captureLength,
+                    length,
+                    sessionId,
+                    streamId,
+                    termId,
+                    termOffset,
+                    resendLength,
+                    channel);
             }
             finally
             {

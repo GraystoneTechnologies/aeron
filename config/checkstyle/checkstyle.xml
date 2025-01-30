@@ -28,8 +28,8 @@
         <property name="ignorePattern" value="^[ \t]*\*.*@.*$"/>
     </module>
 
-    <module name="Header">
-        <property name="header" value="/*\n * Copyright 2014-2023 Real Logic Limited."/>
+    <module name="RegexpHeader">
+        <property name="header" value="/*\n * Copyright \d{4}(-\d{4})? (Real Logic|Adaptive Financial Consulting) Limited."/>
         <property name="fileExtensions" value="java"/>
     </module>
 
@@ -38,6 +38,13 @@
         <property name="severity" value="error"/>
 
         <module name="SuppressWarningsHolder"/>
+
+        <module name="JavadocStyle"/>
+        <module name="JavadocType"/>
+        <module name="JavadocMethod"/>
+        <module name="JavadocVariable">
+            <property name="scope" value="public"/>
+        </module>
 
         <module name="MissingJavadocType"/>
         <module name="MissingJavadocMethod"/>

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,10 +15,11 @@
  */
 package io.aeron.cluster;
 
-public class ClusterTestConstants
+class ClusterTestConstants
 {
     static final String INGRESS_ENDPOINT = "localhost:20000";
     static final String INGRESS_ENDPOINTS = "0=" + INGRESS_ENDPOINT;
     static final String CLUSTER_MEMBERS =
         "0," + INGRESS_ENDPOINT + ",localhost:20001,localhost:20002,localhost:0,localhost:8010";
+    static final long CATALOG_CAPACITY = 1024 * 1024;
 }

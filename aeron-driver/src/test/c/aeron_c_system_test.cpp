@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 #include <functional>
 
 #include <gtest/gtest.h>
+#include <gmock/gmock.h>
 
 #include "aeron_test_base.h"
 
@@ -54,8 +55,14 @@ static int64_t set_reserved_value(void *clientd, uint8_t *buffer, size_t frame_l
     return *(int64_t *)clientd;
 }
 
+static int64_t subscription_registration_id(aeron_subscription_t *subscription)
+{
+    aeron_subscription_constants_t constants;
+    aeron_subscription_constants(subscription, &constants);
+    return constants.registration_id;
+}
 
-TEST_P(CSystemTest, shouldSpinUpDriverAndConnectSuccessfully)
+TEST_F(CSystemTest, shouldSpinUpDriverAndConnectSuccessfully)
 {
     aeron_context_t *context;
     aeron_t *aeron;
@@ -69,7 +76,7 @@ TEST_P(CSystemTest, shouldSpinUpDriverAndConnectSuccessfully)
     aeron_context_close(context);
 }
 
-TEST_P(CSystemTest, shouldReallocateBindingsClientd)
+TEST_F(CSystemTest, shouldReallocateBindingsClientd)
 {
     aeron_driver_context_t *context = nullptr;
     aeron_driver_t *driver = nullptr;
@@ -79,7 +86,7 @@ TEST_P(CSystemTest, shouldReallocateBindingsClientd)
     const char *name1 = "name1";
     int val1 = 11;
 
-    aeron_temp_filename(aeron_dir, AERON_MAX_PATH - 1);
+    aeron_temp_filename(aeron_dir, sizeof(aeron_dir));
 
     aeron_env_set("AERON_UDP_CHANNEL_INCOMING_INTERCEPTORS", "loss");
 
@@ -100,7 +107,7 @@ TEST_P(CSystemTest, shouldReallocateBindingsClientd)
 
     ASSERT_EQ(0, aeron_driver_init(&driver, context)) << aeron_errmsg();
 
-    ASSERT_EQ(3U, context->num_bindings_clientd_entries);
+    ASSERT_EQ(4U, context->num_bindings_clientd_entries);
 
     ASSERT_STREQ(name0, context->bindings_clientd_entries[0].name);
     ASSERT_EQ((void *)&val0, context->bindings_clientd_entries[0].clientd);
@@ -182,7 +189,7 @@ TEST_P(CSystemTest, shouldAddAndCloseSubscription)
     }
 }
 
-TEST_P(CSystemTest, shouldAddAndCloseCounter)
+TEST_F(CSystemTest, shouldAddAndCloseCounter)
 {
     std::atomic<bool> counterClosedFlag(false);
     aeron_async_add_counter_t *async = nullptr;
@@ -205,6 +212,84 @@ TEST_P(CSystemTest, shouldAddAndCloseCounter)
     {
         std::this_thread::yield();
     }
+
+    aeron_counters_reader_t *counters_reader = aeron_counters_reader(m_aeron);
+    int32_t state = AERON_COUNTER_RECORD_ALLOCATED;
+    while(AERON_COUNTER_RECORD_RECLAIMED != state)
+    {
+        ASSERT_EQ(0, aeron_counters_reader_counter_state(counters_reader, counter_constants.counter_id, &state));
+    }
+}
+
+TEST_F(CSystemTest, shouldAddStaticCounter)
+{
+    std::atomic<bool> counterClosedFlag(false);
+    aeron_async_add_counter_t *async = nullptr;
+    aeron_counter_constants_t counter_constants;
+    aeron_counter_constants_t counter_constants2;
+    aeron_counter_constants_t counter_constants3;
+
+    ASSERT_TRUE(connect());
+
+    const char *key = "my static key";
+    size_t key_length = strlen(key);
+    const char *label = "my static counter label";
+    size_t label_length = strlen(label);
+    int type_id = 12;
+    int64_t registration_id = -51515155188822;
+    ASSERT_EQ(aeron_async_add_static_counter(
+        &async, m_aeron, type_id, (uint8_t *)key, key_length, label, label_length, registration_id), 0);
+
+    aeron_counter_t *counter = awaitStaticCounterOrError(async);
+    ASSERT_TRUE(counter) << aeron_errmsg();
+    ASSERT_EQ(0, aeron_counter_constants(counter, &counter_constants));
+    ASSERT_EQ(registration_id, counter_constants.registration_id);
+
+    ASSERT_EQ(aeron_async_add_static_counter(
+        &async, m_aeron, type_id, nullptr, 0, "test", 4, registration_id), 0);
+
+    aeron_counter_t *counter2 = awaitStaticCounterOrError(async);
+    ASSERT_TRUE(counter2) << aeron_errmsg();
+    ASSERT_EQ(0, aeron_counter_constants(counter2, &counter_constants2));
+    ASSERT_EQ(counter_constants.counter_id, counter_constants2.counter_id);
+    ASSERT_EQ(counter_constants.registration_id, counter_constants2.registration_id);
+    ASSERT_NE(counter, counter2);
+
+    counterClosedFlag = false;
+    aeron_counter_close(counter, setFlagOnClose, &counterClosedFlag);
+    while (!counterClosedFlag)
+    {
+        std::this_thread::yield();
+    }
+
+    counterClosedFlag = false;
+    aeron_counter_close(counter2, setFlagOnClose, &counterClosedFlag);
+    while (!counterClosedFlag)
+    {
+        std::this_thread::yield();
+    }
+
+    ASSERT_EQ(aeron_async_add_static_counter(
+        &async, m_aeron, type_id, nullptr, 0, "another counter", 4, 999999999), 0);
+
+    aeron_counter_t *counter3 = awaitStaticCounterOrError(async);
+    ASSERT_TRUE(counter3) << aeron_errmsg();
+    ASSERT_EQ(0, aeron_counter_constants(counter3, &counter_constants3));
+    ASSERT_EQ(999999999, counter_constants3.registration_id);
+    ASSERT_NE(counter_constants.counter_id, counter_constants3.counter_id);
+
+    counterClosedFlag = false;
+    aeron_counter_close(counter3, setFlagOnClose, &counterClosedFlag);
+    while (!counterClosedFlag)
+    {
+        std::this_thread::yield();
+    }
+
+    // verify that the closed static counter was not deleted
+    aeron_counters_reader_t *counters_reader = aeron_counters_reader(m_aeron);
+    int32_t state;
+    ASSERT_EQ(0, aeron_counters_reader_counter_state(counters_reader, counter_constants.counter_id, &state));
+    ASSERT_EQ(AERON_COUNTER_RECORD_ALLOCATED, state);
 }
 
 TEST_P(CSystemTest, shouldAddPublicationAndSubscription)
@@ -648,26 +733,99 @@ TEST_P(CSystemTest, shouldAllowImageToGoUnavailableAndThenRejoin)
     EXPECT_EQ(aeron_subscription_close(subscription, nullptr, nullptr), 0);
 }
 
-TEST_P(CSystemTest, shouldAddMdsSubscription)
+TEST_P(CSystemTest, shouldAddMultipleSubscriptionsUsingSameImage)
 {
     aeron_async_add_publication_t *async_pub = nullptr;
     aeron_async_add_subscription_t *async_sub = nullptr;
 
     ASSERT_TRUE(connect());
 
-    ASSERT_EQ(aeron_async_add_publication(&async_pub, m_aeron, std::get<0>(GetParam()), STREAM_ID), 0);
+    const char *uri = std::get<0>(GetParam());
+    bool isIpc = 0 == strncmp(AERON_IPC_CHANNEL, uri, sizeof(AERON_IPC_CHANNEL));
+    std::string pubUri = isIpc ? std::string(uri) : std::string(uri) + "|linger=0";
 
+    ASSERT_EQ(aeron_async_add_publication(&async_pub, m_aeron, pubUri.c_str(), STREAM_ID), 0);
     aeron_publication_t *publication = awaitPublicationOrError(async_pub);
     ASSERT_TRUE(publication) << aeron_errmsg();
 
+    std::vector<std::pair<int64_t, int64_t>> unavailable_images;
+    std::atomic<int64_t> unavailable_count(0);
+
+    m_onUnavailableImage = [&](aeron_subscription_t *sub, aeron_image_t *img)
+    {
+        int64_t sub_id = subscription_registration_id(sub);
+
+        aeron_image_constants_t img_constants;
+        aeron_image_constants(img, &img_constants);
+
+        int64_t img_sub_id = subscription_registration_id(img_constants.subscription);
+
+        unavailable_images.emplace_back(sub_id, img_sub_id);
+        unavailable_count.fetch_add(1, std::memory_order_release);
+    };
+
     ASSERT_EQ(aeron_async_add_subscription(
-        &async_sub, m_aeron, std::get<0>(GetParam()), STREAM_ID, nullptr, nullptr, nullptr, nullptr), 0);
+        &async_sub, m_aeron, std::get<0>(GetParam()), STREAM_ID, nullptr, nullptr, onUnavailableImage, this), 0);
+    aeron_subscription_t *subscription1 = awaitSubscriptionOrError(async_sub);
+    ASSERT_TRUE(subscription1) << aeron_errmsg();
 
-    aeron_subscription_t *subscription = awaitSubscriptionOrError(async_sub);
-    ASSERT_TRUE(subscription) << aeron_errmsg();
+    ASSERT_EQ(aeron_async_add_subscription(
+        &async_sub, m_aeron, std::get<0>(GetParam()), STREAM_ID, nullptr, nullptr, onUnavailableImage, this), 0);
+    aeron_subscription_t *subscription2 = awaitSubscriptionOrError(async_sub);
+    ASSERT_TRUE(subscription2) << aeron_errmsg();
 
-    awaitConnected(subscription);
+    awaitConnected(subscription1);
+    awaitConnected(subscription2);
 
     EXPECT_EQ(aeron_publication_close(publication, nullptr, nullptr), 0);
-    EXPECT_EQ(aeron_subscription_close(subscription, nullptr, nullptr), 0);
+
+    int64_t start_time_ms = aeron_epoch_clock();
+    while (unavailable_count.load(std::memory_order_acquire) < 2)
+    {
+        if (aeron_epoch_clock() - start_time_ms > 10000)
+        {
+            throw std::runtime_error(std::string("timeout, count=").append(std::to_string(unavailable_count)));
+        }
+        std::this_thread::yield();
+    }
+
+    int64_t id1 = subscription_registration_id(subscription1);
+    int64_t id2 = subscription_registration_id(subscription2);
+    EXPECT_THAT(unavailable_images, testing::UnorderedElementsAre(
+        std::pair<int64_t, int64_t>(id1, id1),
+        std::pair<int64_t, int64_t>(id2, id2)));
+}
+
+TEST_P(CSystemTest, shouldSetClientName)
+{
+    aeron_context_t *context;
+    ASSERT_EQ(aeron_context_init(&context), 0);
+    aeron_context_set_client_name(context, "this is a name");
+
+    ASSERT_STREQ("this is a name", aeron_context_get_client_name(context));
+
+    aeron_context_close(context);
+}
+
+TEST_P(CSystemTest, shouldSetNullClientName)
+{
+    aeron_context_t *context;
+    ASSERT_EQ(aeron_context_init(&context), 0);
+    ASSERT_EQ(-1, aeron_context_set_client_name(context, nullptr));
+
+    aeron_context_close(context);
+}
+
+TEST_P(CSystemTest, shouldSetClientNameOverLong)
+{
+    const char *name =
+        "this is a very long value that we are hoping with be reject when the value gets "
+        "set on the the context without causing issues will labels";
+
+    aeron_context_t *context;
+    ASSERT_EQ(aeron_context_init(&context), 0);
+    ASSERT_EQ(-1, aeron_context_set_client_name(context, name));
+    ASSERT_EQ(EINVAL, aeron_errcode());
+
+    aeron_context_close(context);
 }

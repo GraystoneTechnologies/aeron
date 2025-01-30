@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,14 +43,11 @@ class ErrorHandlerTest
     @RegisterExtension
     final SystemTestWatcher watcher = new SystemTestWatcher();
 
-    private final MediaDriver.Context context = new MediaDriver.Context();
-    {
-        context
-            .errorHandler(ignore -> {})
-            .dirDeleteOnStart(true)
-            .publicationConnectionTimeoutNs(TimeUnit.MILLISECONDS.toNanos(500))
-            .timerIntervalNs(TimeUnit.MILLISECONDS.toNanos(100));
-    }
+    private final MediaDriver.Context context = new MediaDriver.Context()
+        .errorHandler((ignore) -> {})
+        .dirDeleteOnStart(true)
+        .publicationConnectionTimeoutNs(TimeUnit.MILLISECONDS.toNanos(500))
+        .timerIntervalNs(TimeUnit.MILLISECONDS.toNanos(100));
 
     private final ArrayList<AutoCloseable> closeables = new ArrayList<>();
 
@@ -61,7 +58,7 @@ class ErrorHandlerTest
     {
         driver = TestMediaDriver.launch(context, watcher);
         watcher.dataCollector().add(driver.context().aeronDirectory());
-        watcher.ignoreErrorsMatching(s -> true);
+        watcher.ignoreErrorsMatching((s) -> true);
 
         aeron = Aeron.connect();
     }

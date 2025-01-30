@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -54,13 +54,13 @@ volatile bool running = true;
 
 void sigint_handler(int signal)
 {
-    AERON_PUT_ORDERED(running, false);
+    AERON_SET_RELEASE(running, false);
 }
 
 inline bool is_running(void)
 {
     bool result;
-    AERON_GET_VOLATILE(result, running);
+    AERON_GET_ACQUIRE(result, running);
     return result;
 }
 
@@ -143,8 +143,14 @@ int main(int argc, char **argv)
 
             case 'v':
             {
-                printf("%s <%s> major %d minor %d patch %d\n",
-                    argv[0], aeron_version_full(), aeron_version_major(), aeron_version_minor(), aeron_version_patch());
+                printf(
+                    "%s <%s> major %d minor %d patch %d git %s\n",
+                    argv[0],
+                    aeron_version_full(),
+                    aeron_version_major(),
+                    aeron_version_minor(),
+                    aeron_version_patch(),
+                    aeron_version_gitsha());
                 exit(EXIT_SUCCESS);
             }
 
@@ -204,7 +210,7 @@ int main(int argc, char **argv)
         sched_yield();
     }
 
-    printf("Publication channel status %" PRIu64 "\n", aeron_exclusive_publication_channel_status(publication));
+    printf("Publication channel status %" PRId64 "\n", aeron_exclusive_publication_channel_status(publication));
 
     if (show_rate_progress)
     {

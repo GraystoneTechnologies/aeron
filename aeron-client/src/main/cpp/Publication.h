@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -178,7 +178,7 @@ public:
     /**
      * Maximum length of a message payload that fits within a message fragment.
      *
-     * This is he MTU length minus the message fragment header length.
+     * This is the MTU length minus the message fragment header length.
      *
      * @return maximum message fragment payload length.
      */
@@ -505,7 +505,7 @@ public:
      * {@link #ADMIN_ACTION} or {@link #CLOSED}.
      */
     std::int64_t offer(
-        const concurrent::AtomicBuffer buffers[],
+        const concurrent::AtomicBuffer *buffers,
         std::size_t length,
         const on_reserved_value_supplier_t &reservedValueSupplier = DEFAULT_RESERVED_VALUE_SUPPLIER)
     {
@@ -679,16 +679,6 @@ private:
         }
     }
 
-    inline static util::index_t computeFramedLength(const util::index_t length, const util::index_t maxPayloadLength)
-    {
-        const int numMaxPayloads = length / maxPayloadLength;
-        const util::index_t remainingPayload = length % maxPayloadLength;
-        const util::index_t lastFrameLength = remainingPayload > 0 ?
-            util::BitUtil::align(remainingPayload + DataFrameHeader::LENGTH, FrameDescriptor::FRAME_ALIGNMENT) : 0;
-
-        return (numMaxPayloads * (maxPayloadLength + DataFrameHeader::LENGTH)) + lastFrameLength;
-    }
-
     inline std::int64_t claim(
         AtomicBuffer &termBuffer,
         const util::index_t tailCounterOffset,
@@ -807,7 +797,8 @@ private:
         util::index_t length,
         const on_reserved_value_supplier_t &reservedValueSupplier)
     {
-        const util::index_t framedLength = computeFramedLength(length, m_maxPayloadLength);
+        const util::index_t framedLength = LogBufferDescriptor::computeFragmentedFrameLength(
+            length, m_maxPayloadLength);
         const std::int64_t rawTail = m_logMetaDataBuffer.getAndAddInt64(tailCounterOffset, framedLength);
         const std::int32_t termLength = termBuffer.capacity();
         const std::int32_t termOffset = LogBufferDescriptor::termOffset(rawTail, termLength);
@@ -869,7 +860,8 @@ private:
         util::index_t length,
         const on_reserved_value_supplier_t &reservedValueSupplier)
     {
-        const util::index_t framedLength = computeFramedLength(length, m_maxPayloadLength);
+        const util::index_t framedLength = LogBufferDescriptor::computeFragmentedFrameLength(
+            length, m_maxPayloadLength);
         const std::int64_t rawTail = m_logMetaDataBuffer.getAndAddInt64(tailCounterOffset, framedLength);
         const std::int32_t termLength = termBuffer.capacity();
         const std::int32_t termOffset = LogBufferDescriptor::termOffset(rawTail, termLength);

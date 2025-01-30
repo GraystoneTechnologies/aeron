@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,7 +33,8 @@ import java.nio.channels.SelectionKey;
 import java.util.ArrayList;
 
 import static io.aeron.driver.Configuration.PENDING_SETUPS_TIMEOUT_NS;
-import static io.aeron.driver.status.SystemCounterDescriptor.*;
+import static io.aeron.driver.status.SystemCounterDescriptor.BYTES_RECEIVED;
+import static io.aeron.driver.status.SystemCounterDescriptor.RESOLUTION_CHANGES;
 
 /**
  * Agent that receives messages streams and rebuilds {@link PublicationImage}s, plus iterates over them sending status
@@ -115,7 +116,7 @@ public final class Receiver implements Agent
         cachedNanoClock.update(nowNs);
         dutyCycleTracker.measureAndUpdate(nowNs);
 
-        int workCount = commandQueue.drain(Runnable::run, Configuration.COMMAND_DRAIN_LIMIT);
+        int workCount = commandQueue.drain(CommandProxy.RUN_TASK, Configuration.COMMAND_DRAIN_LIMIT);
 
         final int bytesReceived = dataTransportPoller.pollTransports();
         totalBytesReceived.getAndAddOrdered(bytesReceived);
@@ -175,6 +176,20 @@ public final class Receiver implements Agent
     void onAddSubscription(final ReceiveChannelEndpoint channelEndpoint, final int streamId, final int sessionId)
     {
         channelEndpoint.dispatcher().addSubscription(streamId, sessionId);
+        if (channelEndpoint.hasExplicitControl())
+        {
+            channelEndpoint.sendSetupElicitingStatusMessage(
+                0, channelEndpoint.explicitControlAddress(), sessionId, streamId);
+        }
+    }
+
+    void onRequestSetup(final ReceiveChannelEndpoint channelEndpoint, final int streamId, final int sessionId)
+    {
+        if (channelEndpoint.hasExplicitControl())
+        {
+            channelEndpoint.sendSetupElicitingStatusMessage(
+                0, channelEndpoint.explicitControlAddress(), sessionId, streamId);
+        }
     }
 
     void onRemoveSubscription(final ReceiveChannelEndpoint channelEndpoint, final int streamId)
@@ -185,10 +200,25 @@ public final class Receiver implements Agent
     void onRemoveSubscription(final ReceiveChannelEndpoint channelEndpoint, final int streamId, final int sessionId)
     {
         channelEndpoint.dispatcher().removeSubscription(streamId, sessionId);
+
+        final ArrayList<PendingSetupMessageFromSource> pendingSetupMessages = this.pendingSetupMessages;
+        for (int lastIndex = pendingSetupMessages.size() - 1, i = lastIndex; i >= 0; i--)
+        {
+            final PendingSetupMessageFromSource pending = pendingSetupMessages.get(i);
+
+            if (pending.channelEndpoint() == channelEndpoint &&
+                pending.streamId() == streamId &&
+                pending.sessionId() == sessionId)
+            {
+                ArrayListUtil.fastUnorderedRemove(pendingSetupMessages, i, lastIndex--);
+                pending.removeFromDataPacketDispatcher();
+            }
+        }
     }
 
     void onNewPublicationImage(final ReceiveChannelEndpoint channelEndpoint, final PublicationImage image)
     {
+        disconnectInactiveImage(channelEndpoint, image.streamId(), image.sessionId());
         publicationImages = ArrayUtil.add(publicationImages, image);
         channelEndpoint.dispatcher().addPublicationImage(image);
     }
@@ -305,6 +335,18 @@ public final class Receiver implements Agent
         channelEndpoint.updateControlAddress(transportIndex, newAddress);
     }
 
+    void onRejectImage(final long imageCorrelationId, final long position, final String reason)
+    {
+        for (final PublicationImage image : publicationImages)
+        {
+            if (imageCorrelationId == image.correlationId())
+            {
+                image.reject(reason);
+                break;
+            }
+        }
+    }
+
     private void checkPendingSetupMessages(final long nowNs)
     {
         for (int lastIndex = pendingSetupMessages.size() - 1, i = lastIndex; i >= 0; i--)
@@ -324,6 +366,22 @@ public final class Receiver implements Agent
                     pending.channelEndpoint().sendSetupElicitingStatusMessage(
                         pending.transportIndex(), pending.controlAddress(), pending.sessionId(), pending.streamId());
                 }
+            }
+        }
+    }
+
+    void disconnectInactiveImage(
+        final ReceiveChannelEndpoint channelEndpoint,
+        final int streamId,
+        final int sessionId)
+    {
+        for (final PublicationImage publicationImage : publicationImages)
+        {
+            if (publicationImage.channelEndpoint() == channelEndpoint &&
+                publicationImage.streamId() == streamId &&
+                publicationImage.sessionId() == sessionId)
+            {
+                publicationImage.stopStatusMessagesIfNotActive();
             }
         }
     }

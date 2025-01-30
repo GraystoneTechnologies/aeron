@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,6 +32,7 @@
 #include "LogBuffers.h"
 #include "HeartbeatTimestamp.h"
 #include "util/Export.h"
+#include "AeronVersion.h"
 
 namespace aeron
 {
@@ -68,7 +69,8 @@ public:
         long driverTimeoutMs,
         long resourceLingerTimeoutMs,
         long long interServiceTimeoutNs,
-        bool preTouchMappedMemory) :
+        bool preTouchMappedMemory,
+        std::string clientName) :
         m_driverProxy(driverProxy),
         m_driverListenerAdapter(broadcastReceiver, *this),
         m_countersReader(counterMetadataBuffer, counterValuesBuffer),
@@ -78,6 +80,7 @@ public:
         m_onNewSubscriptionHandler(newSubscriptionHandler),
         m_errorHandler(errorHandler),
         m_epochClock(std::move(epochClock)),
+        m_clientName(clientName),
         m_driverTimeoutMs(driverTimeoutMs),
         m_resourceLingerTimeoutMs(resourceLingerTimeoutMs),
         m_interServiceTimeoutMs(static_cast<long>(interServiceTimeoutNs / 1000000)),
@@ -412,6 +415,7 @@ private:
     std::vector<std::pair<std::int64_t, on_close_client_t>> m_onCloseClientHandlers;
 
     epoch_clock_t m_epochClock;
+    std::string m_clientName;
     long m_driverTimeoutMs;
     long m_resourceLingerTimeoutMs;
     long m_interServiceTimeoutMs;
@@ -446,16 +450,24 @@ private:
 
         if (nowMs > (m_timeOfLastKeepaliveMs + KEEPALIVE_TIMEOUT_MS))
         {
-            
-            int64_t lastKeepaliveMs = m_driverProxy.timeOfLastDriverKeepalive();
-            if (nowMs > (lastKeepaliveMs + m_driverTimeoutMs))
+            int64_t lastDriverKeepaliveMs = m_driverProxy.timeOfLastDriverKeepalive();
+            if (nowMs > (lastDriverKeepaliveMs + m_driverTimeoutMs))
             {
                 m_driverActive = false;
+                closeAllResources(nowMs);
 
-                DriverTimeoutException exception(
-                    "MediaDriver keepalive: age=" + std::to_string(nowMs - lastKeepaliveMs) +
-                    "ms > timeout=" + std::to_string(m_driverTimeoutMs) + "ms", SOURCEINFO);
-                m_errorHandler(exception);
+                if (NULL_VALUE == lastDriverKeepaliveMs)
+                {
+                    DriverTimeoutException exception("MediaDriver has been shutdown", SOURCEINFO);
+                    m_errorHandler(exception);
+                }
+                else
+                {
+                    DriverTimeoutException exception(
+                        "MediaDriver keepalive: age=" + std::to_string(nowMs - lastDriverKeepaliveMs) +
+                        "ms > timeout=" + std::to_string(m_driverTimeoutMs) + "ms", SOURCEINFO);
+                    m_errorHandler(exception);
+                }
             }
 
             if (m_heartbeatTimestamp)
@@ -483,6 +495,17 @@ private:
 
                 if (CountersReader::NULL_COUNTER_ID != counterId)
                 {
+                    index_t labelLengthOffset =
+                        CountersReader::metadataOffset(counterId) + CountersReader::LABEL_LENGTH_OFFSET;
+                    int32_t labelLength = m_countersReader.metaDataBuffer().getInt32(labelLengthOffset);
+                    std::string extendedInfo = std::string(" name=") + m_clientName + " version=" + AeronVersion::text() +
+                        " commit=" + AeronVersion::gitSha();
+                    int32_t copyLength = std::min((int32_t)extendedInfo.length(), CountersReader::MAX_LABEL_LENGTH - labelLength);
+                    m_countersReader.metaDataBuffer().putStringWithoutLength(
+                        labelLengthOffset + (int32_t)sizeof(int32_t) + labelLength, extendedInfo.substr(0, copyLength));
+                    m_countersReader.metaDataBuffer().putInt32(
+                        labelLengthOffset, labelLength + copyLength);
+                    
                     m_heartbeatTimestamp.reset(new AtomicCounter(m_counterValuesBuffer, counterId));
                     m_heartbeatTimestamp->setOrdered(nowMs);
                 }
@@ -534,8 +557,7 @@ private:
         auto it = m_logBuffersByRegistrationId.find(registrationId);
         if (it == m_logBuffersByRegistrationId.end())
         {
-            auto touch = m_preTouchMappedMemory && channel.find(std::string("sparse=true")) == std::string::npos;
-            auto logBuffers = std::make_shared<LogBuffers>(logFilename.c_str(), touch);
+            auto logBuffers = std::make_shared<LogBuffers>(logFilename.c_str(), m_preTouchMappedMemory);
             m_logBuffersByRegistrationId.insert(std::pair<std::int64_t, LogBuffersDefn>(
                 registrationId, LogBuffersDefn(logBuffers)));
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -110,6 +110,68 @@ int64_t aeron_max_flow_control_strategy_on_sm(
     return snd_lmt > window_edge ? snd_lmt : window_edge;
 }
 
+void aeron_max_flow_control_strategy_on_error(
+    void *state,
+    const uint8_t *error,
+    size_t length,
+    struct sockaddr_storage *recv_addr,
+    int64_t now_ns)
+{
+}
+
+size_t aeron_flow_control_calculate_retransmission_length(
+    size_t resend_length,
+    size_t term_buffer_length,
+    size_t term_offset,
+    size_t retransmit_receiver_window_multiple)
+{
+    size_t length_to_end_of_term = term_buffer_length - term_offset;
+    size_t initial_window_length = aeron_driver_context_get_rcv_initial_window_length(NULL);
+    size_t receiver_window_length = aeron_receiver_window_length(initial_window_length, term_buffer_length);
+    size_t estimated_retransmit_length = receiver_window_length * retransmit_receiver_window_multiple;
+
+    return (length_to_end_of_term < estimated_retransmit_length) ?
+        AERON_MIN(length_to_end_of_term, resend_length) :
+        AERON_MIN(estimated_retransmit_length, resend_length);
+}
+
+size_t aeron_max_flow_control_strategy_max_retransmission_length(
+    void *state,
+    size_t term_offset,
+    size_t resend_length,
+    size_t term_buffer_length,
+    size_t mtu_length)
+{
+    return aeron_flow_control_calculate_retransmission_length(
+        resend_length,
+        term_buffer_length,
+        term_offset,
+        AERON_MAX_FLOW_CONTROL_RETRANSMIT_RECEIVER_WINDOW_MULTIPLE);
+}
+
+size_t aeron_unicast_flow_control_strategy_max_retransmission_length(
+    void *state,
+    size_t term_offset,
+    size_t resend_length,
+    size_t term_buffer_length,
+    size_t mtu_length)
+{
+    return aeron_flow_control_calculate_retransmission_length(
+        resend_length,
+        term_buffer_length,
+        term_offset,
+        AERON_UNICAST_FLOW_CONTROL_RETRANSMIT_RECEIVER_WINDOW_MULTIPLE);
+}
+
+void aeron_max_flow_control_strategy_on_trigger_send_setup(
+    void *state,
+    const uint8_t *sm,
+    size_t length,
+    struct sockaddr_storage *recv_addr,
+    int64_t now_ns)
+{
+}
+
 int aeron_max_flow_control_strategy_fini(aeron_flow_control_strategy_t *strategy)
 {
     aeron_free(strategy->state);
@@ -139,8 +201,11 @@ int aeron_max_multicast_flow_control_strategy_supplier(
     _strategy->on_idle = aeron_max_flow_control_strategy_on_idle;
     _strategy->on_status_message = aeron_max_flow_control_strategy_on_sm;
     _strategy->on_setup = aeron_max_flow_control_strategy_on_setup;
+    _strategy->on_error = aeron_max_flow_control_strategy_on_error;
     _strategy->fini = aeron_max_flow_control_strategy_fini;
     _strategy->has_required_receivers = aeron_flow_control_strategy_has_required_receivers_default;
+    _strategy->on_trigger_send_setup = aeron_max_flow_control_strategy_on_trigger_send_setup;
+    _strategy->max_retransmission_length = aeron_max_flow_control_strategy_max_retransmission_length;
 
     *strategy = _strategy;
 
@@ -158,9 +223,26 @@ int aeron_unicast_flow_control_strategy_supplier(
     int32_t initial_term_id,
     size_t term_length)
 {
-    return aeron_max_multicast_flow_control_strategy_supplier(
-        strategy, context, counters_manager, channel,
-        stream_id, session_id, registration_id, initial_term_id, term_length);
+    aeron_flow_control_strategy_t *_strategy;
+
+    if (aeron_alloc((void **)&_strategy, sizeof(aeron_flow_control_strategy_t)) < 0)
+    {
+        return -1;
+    }
+
+    _strategy->state = NULL;  // Unicast does not require any state.
+    _strategy->on_idle = aeron_max_flow_control_strategy_on_idle;
+    _strategy->on_status_message = aeron_max_flow_control_strategy_on_sm;
+    _strategy->on_setup = aeron_max_flow_control_strategy_on_setup;
+    _strategy->on_error = aeron_max_flow_control_strategy_on_error;
+    _strategy->fini = aeron_max_flow_control_strategy_fini;
+    _strategy->has_required_receivers = aeron_flow_control_strategy_has_required_receivers_default;
+    _strategy->on_trigger_send_setup = aeron_max_flow_control_strategy_on_trigger_send_setup;
+    _strategy->max_retransmission_length = aeron_unicast_flow_control_strategy_max_retransmission_length;
+
+    *strategy = _strategy;
+
+    return 0;
 }
 
 aeron_flow_control_strategy_supplier_func_table_entry_t aeron_flow_control_strategy_supplier_table[] =
@@ -209,9 +291,7 @@ int aeron_default_multicast_flow_control_strategy_supplier(
 {
     aeron_flow_control_strategy_supplier_func_t flow_control_strategy_supplier_func;
 
-    if (channel->is_manual_control_mode ||
-        channel->is_dynamic_control_mode ||
-        channel->has_explicit_control ||
+    if (aeron_udp_channel_is_multi_destination(channel) ||
         channel->is_multicast)
     {
         const char *flow_control_options = aeron_uri_find_param_value(

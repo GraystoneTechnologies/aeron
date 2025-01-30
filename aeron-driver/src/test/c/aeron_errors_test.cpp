@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2020 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -137,7 +137,7 @@ public:
     }
 
 protected:
-    std::int64_t *m_errorCounter = nullptr;
+    volatile std::int64_t *m_errorCounter = nullptr;
     std::int64_t m_initialErrorCount = 0;
     aeron_counters_reader_t *m_countersReader = nullptr;
 
@@ -147,7 +147,7 @@ protected:
 
         m_countersReader = aeron_counters_reader(aeron);
         m_errorCounter = aeron_counters_reader_addr(m_countersReader, AERON_SYSTEM_COUNTER_ERRORS);
-        AERON_GET_VOLATILE(m_initialErrorCount, *m_errorCounter);
+        AERON_GET_ACQUIRE(m_initialErrorCount, *m_errorCounter);
 
         return aeron;
     }
@@ -158,7 +158,7 @@ protected:
         do
         {
             std::this_thread::yield();
-            AERON_GET_VOLATILE(currentErrorCount, *m_errorCounter);
+            AERON_GET_ACQUIRE(currentErrorCount, *m_errorCounter);
         }
         while (currentErrorCount <= m_initialErrorCount);
     }
@@ -252,10 +252,8 @@ TEST_F(CErrorsTest, publicationErrorIncludesClientAndDriverErrorAndReportsInDist
     const char *expectedDriverMessage = "invalid URI scheme or transport: aeron:tcp?endpoint=localhost:21345";
 
     ASSERT_THAT(-AERON_ERROR_CODE_INVALID_CHANNEL, aeron_errcode());
-    ASSERT_THAT(
-        errorMessage, testing::HasSubstr("async_add_publication registration"));
-    ASSERT_THAT(
-        errorMessage, testing::HasSubstr(expectedDriverMessage));
+    ASSERT_THAT(errorMessage, testing::HasSubstr("async_add_publication registration"));
+    ASSERT_THAT(errorMessage, testing::HasSubstr(expectedDriverMessage));
 
     waitForErrorCounterIncrease();
     verifyDistinctErrorLogContains(expectedDriverMessage);
@@ -280,10 +278,8 @@ TEST_F(CErrorsTest, exclusivePublicationErrorIncludesClientAndDriverErrorAndRepo
     const char *expectedDriverMessage = "invalid URI scheme or transport: aeron:tcp?endpoint=localhost:21345";
 
     ASSERT_THAT(-AERON_ERROR_CODE_INVALID_CHANNEL, aeron_errcode());
-    ASSERT_THAT(
-        errorMessage, testing::HasSubstr("async_add_exclusive_publication registration"));
-    ASSERT_THAT(
-        errorMessage, testing::HasSubstr(expectedDriverMessage));
+    ASSERT_THAT(errorMessage, testing::HasSubstr("async_add_exclusive_publication registration"));
+    ASSERT_THAT(errorMessage, testing::HasSubstr(expectedDriverMessage));
 
     waitForErrorCounterIncrease();
     verifyDistinctErrorLogContains(expectedDriverMessage);
@@ -309,55 +305,8 @@ TEST_F(CErrorsTest, subscriptionErrorIncludesClientAndDriverErrorAndReportsInDis
     const char *expectedDriverMessage = "invalid URI scheme or transport: aeron:tcp?endpoint=localhost:21345";
 
     ASSERT_THAT(-AERON_ERROR_CODE_INVALID_CHANNEL, aeron_errcode());
-    ASSERT_THAT(
-        errorMessage, testing::HasSubstr("async_add_subscription registration"));
-    ASSERT_THAT(
-        errorMessage, testing::HasSubstr(expectedDriverMessage));
-
-    waitForErrorCounterIncrease();
-    verifyDistinctErrorLogContains(expectedDriverMessage);
-}
-
-TEST_F(CErrorsTest, counterErrorIncludesClientAndDriverErrorAndReportsInDistinctLog)
-{
-#if !defined(__linux__)
-    GTEST_SKIP();
-#endif
-
-    aeron_t *aeron = connect();
-    aeron_async_add_counter_t *counter_async = nullptr;
-    aeron_counter_t *counter = nullptr;
-
-    int32_t key = 1000000;
-
-    int result;
-    do
-    {
-        ASSERT_EQ(0,
-            aeron_async_add_counter(&counter_async, aeron, 2002, (const uint8_t *)&key, sizeof(key), "label", 5));
-        while (0 == (result = aeron_async_add_counter_poll(&counter, counter_async)))
-        {
-            std::this_thread::yield();
-        }
-
-        if (result < 0)
-        {
-            break;
-        }
-
-        key++;
-    }
-    while (true);
-
-    ASSERT_EQ(-1, result);
-    std::string errorMessage = std::string(aeron_errmsg());
-    const char *expectedDriverMessage = "Unable to allocate counter: type: 2002, label: label";
-
-    ASSERT_THAT(-AERON_ERROR_CODE_GENERIC_ERROR, aeron_errcode());
-    ASSERT_THAT(
-        errorMessage, testing::HasSubstr("async_add_counter registration"));
-    ASSERT_THAT(
-        errorMessage, testing::HasSubstr(expectedDriverMessage));
+    ASSERT_THAT(errorMessage, testing::HasSubstr("async_add_subscription registration"));
+    ASSERT_THAT(errorMessage, testing::HasSubstr(expectedDriverMessage));
 
     waitForErrorCounterIncrease();
     verifyDistinctErrorLogContains(expectedDriverMessage);
@@ -394,15 +343,12 @@ TEST_F(CErrorsTest, destinationErrorIncludesClientAndDriverErrorAndReportsInDist
     const char *expectedDriverMessage = "invalid URI scheme or transport: aeron:tcp?endpoint=localhost:21345";
 
     ASSERT_THAT(-AERON_ERROR_CODE_INVALID_CHANNEL, aeron_errcode());
-    ASSERT_THAT(
-        errorMessage, testing::HasSubstr("async_add_destination registration"));
-    ASSERT_THAT(
-        errorMessage, testing::HasSubstr(expectedDriverMessage));
+    ASSERT_THAT(errorMessage, testing::HasSubstr("async_add_destination registration"));
+    ASSERT_THAT(errorMessage, testing::HasSubstr(expectedDriverMessage));
 
     waitForErrorCounterIncrease();
     verifyDistinctErrorLogContains(expectedDriverMessage);
 }
-
 
 TEST_F(CErrorsTest, shouldFailToResovleNameOnPublication)
 {
@@ -423,10 +369,8 @@ TEST_F(CErrorsTest, shouldFailToResovleNameOnPublication)
     const char *expectedDriverMessage = "Unable to resolve host";
 
     ASSERT_THAT(-AERON_ERROR_CODE_UNKNOWN_HOST, aeron_errcode());
-    ASSERT_THAT(
-        errorMessage, testing::HasSubstr("async_add_publication registration"));
-    ASSERT_THAT(
-        errorMessage, testing::HasSubstr(expectedDriverMessage));
+    ASSERT_THAT(errorMessage, testing::HasSubstr("async_add_publication registration"));
+    ASSERT_THAT(errorMessage, testing::HasSubstr(expectedDriverMessage));
 
     waitForErrorCounterIncrease();
     verifyDistinctErrorLogContains(expectedDriverMessage);

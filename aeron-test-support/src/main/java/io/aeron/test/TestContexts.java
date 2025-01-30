@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,8 @@ package io.aeron.test;
 import io.aeron.archive.Archive;
 import io.aeron.archive.client.AeronArchive;
 import io.aeron.cluster.ConsensusModule;
+
+import static io.aeron.CommonContext.IPC_CHANNEL;
 
 public class TestContexts
 {
@@ -39,6 +41,13 @@ public class TestContexts
         return new AeronArchive.Context()
             .controlRequestChannel(LOCALHOST_CONTROL_REQUEST_CHANNEL)
             .controlResponseChannel(LOCALHOST_CONTROL_RESPONSE_CHANNEL);
+    }
+
+    public static AeronArchive.Context ipcAeronArchive()
+    {
+        return new AeronArchive.Context()
+            .controlRequestChannel(IPC_CHANNEL)
+            .controlResponseChannel(IPC_CHANNEL);
     }
 
     public static ConsensusModule.Context localhostConsensusModule()

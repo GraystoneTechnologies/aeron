@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -102,6 +102,9 @@ protected:
 
         m_receiver_proxy.receiver = &m_receiver;
         m_context->receiver_proxy = &m_receiver_proxy;
+        m_context->error_log = &m_error_log;
+        m_context->error_buffer = m_error_log_buffer.data();
+        m_context->error_buffer_length = m_error_log_buffer.size();
     }
 
     void TearDown() override
@@ -138,7 +141,7 @@ protected:
         status_indicator.value_addr = aeron_counters_manager_addr(&m_counters_manager, status_indicator.counter_id);
 
         aeron_receive_destination_t *destination = nullptr;
-        if (!channel->is_manual_control_mode)
+        if (AERON_UDP_CHANNEL_CONTROL_MODE_MANUAL != channel->control_mode)
         {
             if (0 != aeron_receive_destination_create(
                 &destination, channel, channel, m_context, &m_counters_manager, 0, status_indicator.counter_id))
@@ -219,11 +222,14 @@ protected:
             m_context,
             &m_counters_manager);
 
+        aeron_driver_conductor_t conductor; // the conductor struct is only used for its context
+        conductor.context = m_context;
+
         if (aeron_publication_image_create(
-            &image, endpoint, destination, m_context, correlation_id, session_id, stream_id, 0, 0, 0,
+            &image, endpoint, destination, &conductor, correlation_id, session_id, stream_id, 0, 0, 0,
             &hwm_position, &pos_position, congestion_control_strategy,
             &channel->remote_control, &channel->local_data,
-            TERM_BUFFER_SIZE, MTU, nullptr, true, true, false, &m_system_counters) < 0)
+            TERM_BUFFER_SIZE, MTU, UINT8_C(0), nullptr, true, true, false, &m_system_counters) < 0)
         {
             congestion_control_strategy->fini(congestion_control_strategy);
             return nullptr;

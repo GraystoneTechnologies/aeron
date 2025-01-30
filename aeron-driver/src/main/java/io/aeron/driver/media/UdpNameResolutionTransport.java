@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -67,7 +67,7 @@ public final class UdpNameResolutionTransport extends UdpChannelTransport
         final UnsafeBuffer unsafeBuffer,
         final MediaDriver.Context context)
     {
-        super(udpChannel, null, resolverAddress, null, context);
+        super(udpChannel, null, resolverAddress, null, context.receiverPortManager(), context);
 
         this.unsafeBuffer = unsafeBuffer;
         this.byteBuffer = unsafeBuffer.byteBuffer();
@@ -108,7 +108,6 @@ public final class UdpNameResolutionTransport extends UdpChannelTransport
      */
     public int sendTo(final ByteBuffer buffer, final InetSocketAddress remoteAddress)
     {
-        final int remaining = buffer.remaining();
         int bytesSent = 0;
         try
         {
@@ -123,7 +122,7 @@ public final class UdpNameResolutionTransport extends UdpChannelTransport
         }
         catch (final IOException ex)
         {
-            sendError(remaining, ex, remoteAddress);
+            onSendError(ex, remoteAddress, errorHandler);
         }
 
         return bytesSent;

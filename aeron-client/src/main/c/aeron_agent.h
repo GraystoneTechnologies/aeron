@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -105,7 +105,7 @@ inline int aeron_agent_do_work(aeron_agent_runner_t *runner)
 inline bool aeron_agent_is_running(aeron_agent_runner_t *runner)
 {
     bool running;
-    AERON_GET_VOLATILE(running, runner->running);
+    AERON_GET_ACQUIRE(running, runner->running);
     return running;
 }
 

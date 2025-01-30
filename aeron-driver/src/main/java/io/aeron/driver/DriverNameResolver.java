@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -99,20 +99,31 @@ final class DriverNameResolver implements AutoCloseable, UdpNameResolutionTransp
         shortSends = ctx.systemCounters().get(SystemCounterDescriptor.SHORT_SENDS);
         delegateResolver = ctx.nameResolver();
 
-        final long nowMs = ctx.epochClock().time();
+        localDriverName = ctx.resolverName();
+        localName = localDriverName.getBytes(StandardCharsets.US_ASCII);
+        localSocketAddress = UdpNameResolutionTransport.getInterfaceAddress(ctx.resolverInterface());
+        localAddress = localSocketAddress.getAddress().getAddress();
 
         bootstrapNeighbors = null != ctx.resolverBootstrapNeighbor() ?
             ctx.resolverBootstrapNeighbor().split(",") : null;
-        bootstrapNeighborAddress = null != bootstrapNeighbors ? resolveBootstrapNeighbor() : null;
+        if (null != bootstrapNeighbors)
+        {
+            final long nowNs = ctx.nanoClock().nanoTime();
+            final DutyCycleTracker nameResolverTimeTracker = ctx.nameResolverTimeTracker();
+            nameResolverTimeTracker.update(nowNs);
+
+            bootstrapNeighborAddress = resolveBootstrapNeighbor();
+
+            final long endNs = ctx.nanoClock().nanoTime();
+            nameResolverTimeTracker.measureAndUpdate(endNs);
+        }
+        else
+        {
+            bootstrapNeighborAddress = null;
+        }
+
+        final long nowMs = ctx.epochClock().time();
         bootstrapNeighborResolveDeadlineMs = nowMs + TIMEOUT_MS;
-
-        localSocketAddress = null != ctx.resolverInterface() ?
-            UdpNameResolutionTransport.getInterfaceAddress(ctx.resolverInterface()) :
-            new InetSocketAddress("0.0.0.0", 0);
-
-        localDriverName = null != ctx.resolverName() ? ctx.resolverName() : getCanonicalName();
-        localName = localDriverName.getBytes(StandardCharsets.US_ASCII);
-        localAddress = localSocketAddress.getAddress().getAddress();
 
         selfResolutionDeadlineMs = 0;
         neighborResolutionDeadlineMs = nowMs + neighborResolutionIntervalMs;
@@ -147,7 +158,7 @@ final class DriverNameResolver implements AutoCloseable, UdpNameResolutionTransp
     {
         int workCount = 0;
 
-        if (nowMs > workDeadlineMs)
+        if (workDeadlineMs - nowMs < 0)
         {
             workDeadlineMs = nowMs + WORK_INTERVAL_MS;
             workCount += transport.poll(this, nowMs);
@@ -250,23 +261,7 @@ final class DriverNameResolver implements AutoCloseable, UdpNameResolutionTransp
         return 0;
     }
 
-    static String getCanonicalName()
-    {
-        String canonicalName = null;
-
-        try
-        {
-            canonicalName = InetAddress.getLocalHost().getHostName();
-        }
-        catch (final UnknownHostException ex)
-        {
-            LangUtil.rethrowUnchecked(ex);
-        }
-
-        return canonicalName;
-    }
-
-    static String getCanonicalName(final String fallback)
+    static String getHostName()
     {
         try
         {
@@ -274,10 +269,9 @@ final class DriverNameResolver implements AutoCloseable, UdpNameResolutionTransp
         }
         catch (final UnknownHostException ignore)
         {
-            return fallback;
+            return "<unresolved>";
         }
     }
-
 
     private void openDatagramChannel()
     {

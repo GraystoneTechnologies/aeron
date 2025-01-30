@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ import org.agrona.concurrent.CachedEpochClock;
 import org.agrona.concurrent.CountedErrorHandler;
 import org.agrona.concurrent.NanoClock;
 import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.concurrent.status.CountersReader;
 
 import java.io.File;
 import java.io.IOException;
@@ -37,7 +38,6 @@ import java.nio.file.StandardOpenOption;
 import java.util.EnumSet;
 
 import static io.aeron.archive.Archive.segmentFileName;
-import static io.aeron.archive.client.AeronArchive.NULL_POSITION;
 import static io.aeron.logbuffer.FrameDescriptor.*;
 import static io.aeron.protocol.DataHeaderFlyweight.*;
 import static java.lang.Math.min;
@@ -94,7 +94,7 @@ class ReplaySession implements Session, AutoCloseable
     private final NanoClock nanoClock;
     final ArchiveConductor.Replayer replayer;
     private final File archiveDir;
-    private final Catalog catalog;
+    private final CountersReader countersReader;
     private final Counter limitPosition;
     private final UnsafeBuffer replayBuffer;
     private FileChannel fileChannel;
@@ -104,20 +104,24 @@ class ReplaySession implements Session, AutoCloseable
     private volatile boolean isAborted;
 
     ReplaySession(
-        final long position,
-        final long length,
+        final long correlationId,
+        final long recordingId,
+        final long replayPosition,
+        final long replayLength,
+        final long startPosition,
+        final long stopPosition,
+        final int segmentFileLength,
+        final int termBufferLength,
+        final int streamId,
         final long replaySessionId,
         final long connectTimeoutMs,
-        final long correlationId,
         final ControlSession controlSession,
-        final ControlResponseProxy controlResponseProxy,
         final UnsafeBuffer replayBuffer,
-        final Catalog catalog,
         final File archiveDir,
         final CachedEpochClock epochClock,
         final NanoClock nanoClock,
         final ExclusivePublication publication,
-        final RecordingSummary recordingSummary,
+        final CountersReader countersReader,
         final Counter replayLimitPosition,
         final Checksum checksum,
         final ArchiveConductor.Replayer replayer)
@@ -125,51 +129,27 @@ class ReplaySession implements Session, AutoCloseable
         this.controlSession = controlSession;
         this.sessionId = replaySessionId;
         this.correlationId = correlationId;
-        this.recordingId = recordingSummary.recordingId;
-        this.segmentLength = recordingSummary.segmentFileLength;
-        this.termLength = recordingSummary.termBufferLength;
-        this.streamId = recordingSummary.streamId;
+        this.recordingId = recordingId;
+        this.segmentLength = segmentFileLength;
+        this.termLength = termBufferLength;
+        this.streamId = streamId;
         this.epochClock = epochClock;
         this.nanoClock = nanoClock;
         this.archiveDir = archiveDir;
         this.publication = publication;
+        this.countersReader = countersReader;
         this.limitPosition = replayLimitPosition;
         this.replayBuffer = replayBuffer;
         this.replayBufferAddress = replayBuffer.addressOffset();
-        this.catalog = catalog;
         this.checksum = checksum;
-        this.startPosition = recordingSummary.startPosition;
-        this.stopPosition = null == limitPosition ? recordingSummary.stopPosition : limitPosition.get();
+        this.startPosition = startPosition;
+        this.stopPosition = stopPosition;
         this.replayer = replayer;
 
-        final long fromPosition = position == NULL_POSITION ? startPosition : position;
-        final long maxLength = null == limitPosition ? stopPosition - fromPosition : Long.MAX_VALUE - fromPosition;
-        final long replayLength = length == AeronArchive.NULL_LENGTH ? maxLength : min(length, maxLength);
-        if (replayLength < 0)
-        {
-            close();
-            final String msg = "replay recording " + recordingId + " - " + "length must be positive: " + replayLength;
-            controlSession.attemptErrorResponse(correlationId, msg, controlResponseProxy);
-            throw new ArchiveException(msg);
-        }
-
-        if (null != limitPosition)
-        {
-            final long currentPosition = limitPosition.get();
-            if (currentPosition < fromPosition)
-            {
-                close();
-                final String msg = "replay recording " + recordingId + " - " +
-                    fromPosition + " after current position of " + currentPosition;
-                controlSession.attemptErrorResponse(correlationId, msg, controlResponseProxy);
-                throw new ArchiveException(msg);
-            }
-        }
-
         segmentFileBasePosition = AeronArchive.segmentFileBasePosition(
-            startPosition, fromPosition, termLength, segmentLength);
-        replayPosition = fromPosition;
-        replayLimit = fromPosition + replayLength;
+            startPosition, replayPosition, termLength, segmentLength);
+        this.replayPosition = replayPosition;
+        replayLimit = replayPosition + replayLength;
 
         segmentFile = new File(archiveDir, segmentFileName(recordingId, segmentFileBasePosition));
         connectDeadlineMs = epochClock.time() + connectTimeoutMs;
@@ -202,7 +182,7 @@ class ReplaySession implements Session, AutoCloseable
 
         if (isAborted)
         {
-            state(State.INACTIVE);
+            state(State.INACTIVE, "replay aborted");
         }
 
         try
@@ -226,7 +206,7 @@ class ReplaySession implements Session, AutoCloseable
         if (State.INACTIVE == state)
         {
             closeRecordingSegment();
-            state(State.DONE);
+            state(State.DONE, "");
         }
 
         return workCount;
@@ -235,7 +215,7 @@ class ReplaySession implements Session, AutoCloseable
     /**
      * {@inheritDoc}
      */
-    public void abort()
+    public void abort(final String reason)
     {
         isAborted = true;
     }
@@ -273,17 +253,12 @@ class ReplaySession implements Session, AutoCloseable
         return segmentFileBasePosition;
     }
 
-    Counter limitPosition()
+    void sendPendingError()
     {
-        return limitPosition;
-    }
-
-    void sendPendingError(final ControlResponseProxy controlResponseProxy)
-    {
-        if (null != errorMessage && !controlSession.isDone())
+        if (null != errorMessage)
         {
             onPendingError(sessionId, recordingId, errorMessage);
-            controlSession.attemptErrorResponse(correlationId, errorMessage, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, ArchiveException.GENERIC, errorMessage);
         }
     }
 
@@ -327,7 +302,7 @@ class ReplaySession implements Session, AutoCloseable
                     }
                 }
 
-                controlSession.asyncSendReplayOkResponse(correlationId, sessionId);
+                controlSession.asyncSendOkResponse(correlationId, sessionId);
             }
         }
 
@@ -341,7 +316,7 @@ class ReplaySession implements Session, AutoCloseable
             return 0;
         }
 
-        state(State.REPLAY);
+        state(State.REPLAY, "");
 
         return 1;
     }
@@ -350,11 +325,11 @@ class ReplaySession implements Session, AutoCloseable
     {
         if (!publication.isConnected())
         {
-            state(State.INACTIVE);
+            state(State.INACTIVE, "publication is not connected");
             return 0;
         }
 
-        if (replayPosition >= stopPosition && null != limitPosition && noNewData(replayPosition, stopPosition))
+        if (null != limitPosition && replayPosition >= stopPosition && notExtended(replayPosition, stopPosition))
         {
             return 0;
         }
@@ -371,13 +346,11 @@ class ReplaySession implements Session, AutoCloseable
             final int bytesRead = readRecording(stopPosition - replayPosition);
             if (bytesRead > 0)
             {
-                int batchOffset = 0;
-                int paddingFrameLength = 0;
                 final int sessionId = publication.sessionId();
                 final int streamId = publication.streamId();
                 final int remaining = (int)Math.min(replayLimit - replayPosition, LogBufferDescriptor.TERM_MAX_LENGTH);
-                final Checksum checksum = this.checksum;
-                final UnsafeBuffer replayBuffer = this.replayBuffer;
+                int batchOffset = 0;
+                int paddingFrameLength = 0;
 
                 while (batchOffset < bytesRead && batchOffset < remaining)
                 {
@@ -464,7 +437,7 @@ class ReplaySession implements Session, AutoCloseable
 
             if (replayPosition >= replayLimit)
             {
-                state(State.INACTIVE);
+                state(State.INACTIVE, "position (" + replayPosition + ") past limit (" + replayLimit + ")");
             }
 
             return true;
@@ -516,31 +489,35 @@ class ReplaySession implements Session, AutoCloseable
     private void onError(final String errorMessage)
     {
         this.errorMessage = errorMessage + ", recordingId=" + recordingId + ", sessionId=" + sessionId;
-        state(State.INACTIVE);
+        state(State.INACTIVE, errorMessage);
     }
 
-    private boolean noNewData(final long replayPosition, final long oldStopPosition)
+    private boolean notExtended(final long replayPosition, final long oldStopPosition)
     {
         final Counter limitPosition = this.limitPosition;
         final long currentLimitPosition = limitPosition.get();
-        final boolean isCounterClosed = limitPosition.isClosed();
-        final long newStopPosition = isCounterClosed ? catalog.stopPosition(recordingId) : currentLimitPosition;
+        long newStopPosition = oldStopPosition;
 
-        if (isCounterClosed)
+        if (limitPosition.isClosed())
         {
-            if (NULL_POSITION == newStopPosition)
+            if (countersReader.getCounterRegistrationId(limitPosition.id()) == limitPosition.registrationId())
+            {
+                replayLimit = currentLimitPosition;
+                newStopPosition = Math.max(oldStopPosition, currentLimitPosition);
+            }
+            else if (replayLimit >= oldStopPosition)
             {
                 replayLimit = oldStopPosition;
             }
-            else if (newStopPosition < replayLimit)
-            {
-                replayLimit = newStopPosition;
-            }
+        }
+        else
+        {
+            newStopPosition = currentLimitPosition;
         }
 
         if (replayPosition >= replayLimit)
         {
-            state(State.INACTIVE);
+            state(State.INACTIVE, "position (" + replayPosition + ") past limit (" + replayLimit + ") (notExtended)");
         }
         else if (newStopPosition > oldStopPosition)
         {
@@ -559,6 +536,7 @@ class ReplaySession implements Session, AutoCloseable
         if (termBaseSegmentOffset == segmentLength)
         {
             closeRecordingSegment();
+            //noinspection NonAtomicOperationOnVolatileField
             segmentFileBasePosition += segmentLength;
             openRecordingSegment();
             termBaseSegmentOffset = 0;
@@ -608,10 +586,22 @@ class ReplaySession implements Session, AutoCloseable
         return isInvalidHeader(buffer, streamId, termId, termOffset);
     }
 
-    private void state(final State newState)
+    private void state(final State newState, final String reason)
     {
-        //System.out.println("ReplaySession: " + epochClock.time() + ": " + state + " -> " + newState);
+        logStateChange(state, newState, sessionId, recordingId, replayPosition, null == reason ? "" : reason);
         state = newState;
+    }
+
+    @SuppressWarnings("unused")
+    private void logStateChange(
+        final State oldState,
+        final State newState,
+        final long sessionId,
+        final long recordingId,
+        final long position,
+        final String reason)
+    {
+        //System.out.println("ReplaySession: " + state + " -> " + newState);
     }
 
     static boolean isInvalidHeader(

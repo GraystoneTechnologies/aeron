@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ import io.aeron.driver.NameResolver;
 import io.aeron.driver.ThreadingMode;
 import io.aeron.logbuffer.Header;
 import io.aeron.test.DataCollector;
+import io.aeron.test.EventLogExtension;
 import io.aeron.test.InterruptAfter;
 import io.aeron.test.InterruptingTestCallback;
 import io.aeron.test.SystemTestWatcher;
@@ -49,7 +50,7 @@ import java.io.File;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-@ExtendWith(InterruptingTestCallback.class)
+@ExtendWith({ EventLogExtension.class, InterruptingTestCallback.class })
 class MultiModuleSharedDriverTest
 {
     @RegisterExtension
@@ -217,11 +218,7 @@ class MultiModuleSharedDriverTest
             final int length,
             final Header header)
         {
-            idleStrategy.reset();
-            while (session.offer(buffer, offset, length) < 0)
-            {
-                idleStrategy.idle();
-            }
+            echoMessage(session, buffer, offset, length);
         }
     }
 
@@ -287,9 +284,8 @@ class MultiModuleSharedDriverTest
         ConsensusModule consensusModule(final int clusterId, final String aeronDirectoryName)
         {
             final int nodeOffset = (clusterId * 100) + (nodeId * 10);
-            // The `:X` suffix will be removed by the `RedirectingNameResolver:lookup`
             final String ingressChannelWithInvalidEndpointFormatToBeRemovedByNameResolver =
-                "aeron:udp?term-length=64k|endpoint=node" + nodeId + ":2" + clusterId + "11" + nodeId + ":X";
+                "aeron:udp?term-length=64k|endpoint=node" + nodeId + ":2" + clusterId + "11" + nodeId;
             final ConsensusModule.Context ctx = new ConsensusModule.Context()
                 .clusterMemberId(nodeId)
                 .clusterId(clusterId)
@@ -301,7 +297,6 @@ class MultiModuleSharedDriverTest
                 .serviceStreamId(104 + nodeOffset)
                 .consensusModuleStreamId(105 + nodeOffset)
                 .ingressChannel(ingressChannelWithInvalidEndpointFormatToBeRemovedByNameResolver)
-                .nameResolver(nameResolver)
                 .replicationChannel("aeron:udp?endpoint=localhost:0");
 
             return ConsensusModule.launch(ctx);

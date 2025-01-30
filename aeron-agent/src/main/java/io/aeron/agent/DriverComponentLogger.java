@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -77,6 +77,7 @@ public class DriverComponentLogger implements ComponentLogger
         tempBuilder = addDriverSenderProxyInstrumentation(tempBuilder);
         tempBuilder = addDriverReceiverProxyInstrumentation(tempBuilder);
         tempBuilder = addDriverUdpChannelTransportInstrumentation(tempBuilder);
+        tempBuilder = addChannelEndpointInstrumentation(tempBuilder);
 
         tempBuilder = addEventInstrumentation(
             tempBuilder,
@@ -107,7 +108,7 @@ public class DriverComponentLogger implements ComponentLogger
             enabledEventCodes,
             SPECIAL_EVENTS,
             DriverEventCode::get,
-            DriverEventCode::valueOf);
+            DriverEventCode::get);
     }
 
     private static AgentBuilder addDriverConductorInstrumentation(final AgentBuilder agentBuilder)
@@ -221,8 +222,37 @@ public class DriverComponentLogger implements ComponentLogger
             ChannelEndpointInterceptor.UdpChannelTransport.ReceiveHook.class,
             "receiveHook");
 
+        tempBuilder = addEventInstrumentation(
+            tempBuilder,
+            RESEND,
+            "UdpChannelTransport",
+            ChannelEndpointInterceptor.UdpChannelTransport.ResendHook.class,
+            "resendHook");
+
         return tempBuilder;
     }
+
+    private AgentBuilder addChannelEndpointInstrumentation(final AgentBuilder agentBuilder)
+    {
+        AgentBuilder tempBuilder = agentBuilder;
+
+        tempBuilder = addEventInstrumentation(
+            tempBuilder,
+            NAK_SENT,
+            "ReceiveChannelEndpoint",
+            ChannelEndpointInterceptor.ReceiveChannelEndpointInterceptor.NakSent.class,
+            "sendNakMessage");
+
+        tempBuilder = addEventInstrumentation(
+            tempBuilder,
+            NAK_RECEIVED,
+            "SendChannelEndpoint",
+            ChannelEndpointInterceptor.SendChannelEndpointInterceptor.NakReceived.class,
+            "onNakMessage");
+
+        return tempBuilder;
+    }
+
 
     private static AgentBuilder addDriverNameResolutionInstrumentation(final AgentBuilder agentBuilder)
     {
@@ -254,6 +284,13 @@ public class DriverComponentLogger implements ComponentLogger
             "TimeTrackingNameResolver",
             DriverInterceptor.NameResolution.Lookup.class,
             "logLookup");
+
+        tempBuilder = addEventInstrumentation(
+            tempBuilder,
+            NAME_RESOLUTION_HOST_NAME,
+            "TimeTrackingNameResolver",
+            DriverInterceptor.NameResolution.HostName.class,
+            "logHostName");
 
         return tempBuilder;
     }

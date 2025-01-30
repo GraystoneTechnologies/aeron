@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -51,32 +51,40 @@ public final class ChannelUriStringBuilder
     private String alias;
     private String cc;
     private String fc;
+    private String mediaReceiveTimestampOffset;
+    private String channelReceiveTimestampOffset;
+    private String channelSendTimestampOffset;
+    private String responseEndpoint;
     private Boolean reliable;
-    private Integer ttl;
-    private Integer mtu;
-    private Integer termLength;
-    private Integer initialTermId;
-    private Integer termId;
-    private Integer termOffset;
-    private Long sessionId;
-    private Long groupTag;
-    private Long linger;
     private Boolean sparse;
     private Boolean eos;
     private Boolean tether;
     private Boolean group;
     private Boolean rejoin;
     private Boolean ssc;
-    private boolean isSessionIdTagged;
+    private Integer ttl;
+    private Integer mtu;
+    private Integer termLength;
+    private Integer initialTermId;
+    private Integer termId;
+    private Integer termOffset;
     private Integer socketSndbufLength;
     private Integer socketRcvbufLength;
     private Integer receiverWindowLength;
-    private String mediaReceiveTimestampOffset;
-    private String channelReceiveTimestampOffset;
-    private String channelSendTimestampOffset;
+    private Integer maxResend;
+    private Integer streamId;
+    private Integer publicationWindowLength;
+    private Long sessionId;
+    private Long groupTag;
+    private Long linger;
+    private Long responseCorrelationId;
+    private Long nakDelay;
+    private Long untetheredWindowLimitTimeoutNs;
+    private Long untetheredRestingTimeoutNs;
+    private boolean isSessionIdTagged;
 
     /**
-     * Default constructor
+     * Default constructor.
      */
     public ChannelUriStringBuilder()
     {
@@ -134,6 +142,14 @@ public final class ChannelUriStringBuilder
         mediaReceiveTimestampOffset(channelUri);
         channelReceiveTimestampOffset(channelUri);
         channelSendTimestampOffset(channelUri);
+        responseEndpoint(channelUri);
+        responseCorrelationId(channelUri);
+        nakDelay(channelUri);
+        untetheredWindowLimitTimeout(channelUri);
+        untetheredRestingTimeout(channelUri);
+        maxResend(channelUri);
+        streamId(channelUri);
+        publicationWindowLength(channelUri);
     }
 
     /**
@@ -175,6 +191,11 @@ public final class ChannelUriStringBuilder
         mediaReceiveTimestampOffset = null;
         channelReceiveTimestampOffset = null;
         channelSendTimestampOffset = null;
+        responseEndpoint = null;
+        responseCorrelationId = null;
+        maxResend = null;
+        streamId = null;
+        publicationWindowLength = null;
 
         return this;
     }
@@ -183,18 +204,18 @@ public final class ChannelUriStringBuilder
      * Validates that the collection of set parameters are valid together.
      *
      * @return this for a fluent API.
-     * @throws IllegalStateException if the combination of params is invalid.
+     * @throws IllegalArgumentException if the combination of params is invalid.
      */
     public ChannelUriStringBuilder validate()
     {
         if (null == media)
         {
-            throw new IllegalStateException("media type is mandatory");
+            throw new IllegalArgumentException("media type is mandatory");
         }
 
         if (CommonContext.UDP_MEDIA.equals(media) && (null == endpoint && null == controlEndpoint))
         {
-            throw new IllegalStateException("either 'endpoint' or 'control' must be specified for UDP.");
+            throw new IllegalArgumentException("either 'endpoint' or 'control' must be specified for UDP.");
         }
 
         final boolean anyNonNull = null != initialTermId || null != termId || null != termOffset;
@@ -203,19 +224,19 @@ public final class ChannelUriStringBuilder
         {
             if (anyNull)
             {
-                throw new IllegalStateException(
+                throw new IllegalArgumentException(
                     "either all or none of the parameters ['initialTermId', 'termId', 'termOffset'] must be provided");
             }
 
             if (termId - initialTermId < 0)
             {
-                throw new IllegalStateException(
+                throw new IllegalArgumentException(
                     "difference greater than 2^31 - 1: termId=" + termId + " - initialTermId=" + initialTermId);
             }
 
             if (null != termLength && termOffset > termLength)
             {
-                throw new IllegalStateException("termOffset=" + termOffset + " > termLength=" + termLength);
+                throw new IllegalArgumentException("termOffset=" + termOffset + " > termLength=" + termLength);
             }
         }
 
@@ -424,12 +445,14 @@ public final class ChannelUriStringBuilder
      * @see CommonContext#MDC_CONTROL_MODE_PARAM_NAME
      * @see CommonContext#MDC_CONTROL_MODE_MANUAL
      * @see CommonContext#MDC_CONTROL_MODE_DYNAMIC
+     * @see CommonContext#CONTROL_MODE_RESPONSE
      */
     public ChannelUriStringBuilder controlMode(final String controlMode)
     {
         if (null != controlMode &&
-            !controlMode.equals(CommonContext.MDC_CONTROL_MODE_MANUAL) &&
-            !controlMode.equals(CommonContext.MDC_CONTROL_MODE_DYNAMIC))
+            !controlMode.equals(MDC_CONTROL_MODE_MANUAL) &&
+            !controlMode.equals(MDC_CONTROL_MODE_DYNAMIC) &&
+            !controlMode.equals(CONTROL_MODE_RESPONSE))
         {
             throw new IllegalArgumentException("invalid control mode: " + controlMode);
         }
@@ -457,6 +480,7 @@ public final class ChannelUriStringBuilder
      * @see CommonContext#MDC_CONTROL_MODE_PARAM_NAME
      * @see CommonContext#MDC_CONTROL_MODE_MANUAL
      * @see CommonContext#MDC_CONTROL_MODE_DYNAMIC
+     * @see CommonContext#CONTROL_MODE_RESPONSE
      */
     public String controlMode()
     {
@@ -613,7 +637,7 @@ public final class ChannelUriStringBuilder
             final long value = parseSize(MTU_LENGTH_PARAM_NAME, mtuValue);
             if (value > Integer.MAX_VALUE)
             {
-                throw new IllegalStateException(MTU_LENGTH_PARAM_NAME + " " + value + " > " + Integer.MAX_VALUE);
+                throw new IllegalArgumentException(MTU_LENGTH_PARAM_NAME + " " + value + " > " + Integer.MAX_VALUE);
             }
 
             return mtu((int)value);
@@ -670,7 +694,7 @@ public final class ChannelUriStringBuilder
             final long value = parseSize(TERM_LENGTH_PARAM_NAME, termLengthValue);
             if (value > Integer.MAX_VALUE)
             {
-                throw new IllegalStateException(
+                throw new IllegalArgumentException(
                     "term length more than max length of " + TERM_MAX_LENGTH + ": value=" + value);
             }
 
@@ -1655,7 +1679,7 @@ public final class ChannelUriStringBuilder
             final long value = parseSize(SOCKET_SNDBUF_PARAM_NAME, valueStr);
             if (value > Integer.MAX_VALUE)
             {
-                throw new IllegalStateException("value exceeds maximum permitted: value=" + value);
+                throw new IllegalArgumentException("value exceeds maximum permitted: value=" + value);
             }
 
             return socketSndbufLength((int)value);
@@ -1663,7 +1687,7 @@ public final class ChannelUriStringBuilder
     }
 
     /**
-     * Get the underling OS send buffer length setting
+     * Get the underlying OS send buffer length setting.
      *
      * @return underlying OS send buffer length setting or null if not specified.
      * @see CommonContext#SOCKET_SNDBUF_PARAM_NAME
@@ -1676,7 +1700,7 @@ public final class ChannelUriStringBuilder
     /**
      * Set the underlying OS receive buffer length.
      *
-     * @param socketRcvbufLength parameter to be passed as SO_SNDBUF value.
+     * @param socketRcvbufLength parameter to be passed as SO_RCVBUF value.
      * @return this for a fluent API.
      * @see CommonContext#SOCKET_RCVBUF_PARAM_NAME
      */
@@ -1707,7 +1731,7 @@ public final class ChannelUriStringBuilder
             final long value = parseSize(SOCKET_RCVBUF_PARAM_NAME, valueStr);
             if (value > Integer.MAX_VALUE)
             {
-                throw new IllegalStateException("value exceeds maximum permitted: value=" + value);
+                throw new IllegalArgumentException("value exceeds maximum permitted: value=" + value);
             }
 
             return socketRcvbufLength((int)value);
@@ -1715,7 +1739,7 @@ public final class ChannelUriStringBuilder
     }
 
     /**
-     * Get the underling OS receive buffer length setting.
+     * Get the underlying OS receive buffer length setting.
      *
      * @return underlying OS receive buffer length setting or null if not specified.
      * @see CommonContext#SOCKET_RCVBUF_PARAM_NAME
@@ -1759,7 +1783,7 @@ public final class ChannelUriStringBuilder
             final long value = parseSize(RECEIVER_WINDOW_LENGTH_PARAM_NAME, valueStr);
             if (value > Integer.MAX_VALUE)
             {
-                throw new IllegalStateException("value exceeds maximum permitted: value=" + value);
+                throw new IllegalArgumentException("value exceeds maximum permitted: value=" + value);
             }
 
             return receiverWindowLength((int)value);
@@ -1770,7 +1794,7 @@ public final class ChannelUriStringBuilder
      * Get the receiver window length to be used as the initial receiver window for flow control.
      *
      * @return receiver window length.
-     * @see CommonContext#SOCKET_RCVBUF_PARAM_NAME
+     * @see CommonContext#RECEIVER_WINDOW_LENGTH_PARAM_NAME
      */
     public Integer receiverWindowLength()
     {
@@ -1783,6 +1807,7 @@ public final class ChannelUriStringBuilder
      *
      * @return current mediaReceiveTimestampOffset value either as string representation of an integer index or the
      * special value 'reserved'
+     * @see CommonContext#MEDIA_RCV_TIMESTAMP_OFFSET_PARAM_NAME
      */
     public String mediaReceiveTimestampOffset()
     {
@@ -1796,6 +1821,7 @@ public final class ChannelUriStringBuilder
      * @param timestampOffset to use as the offset.
      * @return this for a fluent API.
      * @throws IllegalArgumentException if the string is not null and doesn't represent an int or the 'reserved' value.
+     * @see CommonContext#MEDIA_RCV_TIMESTAMP_OFFSET_PARAM_NAME
      */
     public ChannelUriStringBuilder mediaReceiveTimestampOffset(final String timestampOffset)
     {
@@ -1808,7 +1834,8 @@ public final class ChannelUriStringBuilder
             catch (final NumberFormatException ex)
             {
                 throw new IllegalArgumentException(
-                    "mediaReceiveTimestampOffset must be a number or the value '" + RESERVED_OFFSET + "'");
+                    "mediaReceiveTimestampOffset must be a number or the value '" + RESERVED_OFFSET + "' found: " +
+                    timestampOffset);
             }
         }
 
@@ -1822,6 +1849,7 @@ public final class ChannelUriStringBuilder
      *
      * @param channelUri the existing URI to extract the mediaReceiveTimestampOffset from
      * @return this for a fluent API.
+     * @see CommonContext#MEDIA_RCV_TIMESTAMP_OFFSET_PARAM_NAME
      */
     public ChannelUriStringBuilder mediaReceiveTimestampOffset(final ChannelUri channelUri)
     {
@@ -1834,6 +1862,7 @@ public final class ChannelUriStringBuilder
      *
      * @return current channelReceiveTimestampOffset value either as string representation of an integer index or
      * the special value 'reserved'
+     * @see CommonContext#CHANNEL_RECEIVE_TIMESTAMP_OFFSET_PARAM_NAME
      */
     public String channelReceiveTimestampOffset()
     {
@@ -1847,6 +1876,7 @@ public final class ChannelUriStringBuilder
      * @param timestampOffset to use as the offset.
      * @return this for a fluent API.
      * @throws IllegalArgumentException if the string doesn't represent an int or the 'reserved' value.
+     * @see CommonContext#CHANNEL_RECEIVE_TIMESTAMP_OFFSET_PARAM_NAME
      */
     public ChannelUriStringBuilder channelReceiveTimestampOffset(final String timestampOffset)
     {
@@ -1859,7 +1889,8 @@ public final class ChannelUriStringBuilder
             catch (final NumberFormatException ex)
             {
                 throw new IllegalArgumentException(
-                    "channelReceiveTimestampOffset must be a number or the value '" + RESERVED_OFFSET + "'");
+                    "channelReceiveTimestampOffset must be a number or the value '" + RESERVED_OFFSET + "' found: " +
+                    timestampOffset);
             }
         }
 
@@ -1873,6 +1904,7 @@ public final class ChannelUriStringBuilder
      *
      * @param channelUri the existing URI to extract the receiveTimestampOffset from.
      * @return this for a fluent API.
+     * @see CommonContext#CHANNEL_RECEIVE_TIMESTAMP_OFFSET_PARAM_NAME
      */
     public ChannelUriStringBuilder channelReceiveTimestampOffset(final ChannelUri channelUri)
     {
@@ -1883,21 +1915,10 @@ public final class ChannelUriStringBuilder
      * Offset into a message to store the channel send timestamp. May also be the special value 'reserved' which means
      * to store the timestamp in the reserved value field.
      *
-     * @return current sendTimestampOffset value either as string representation of an integer index or the special
-     * value 'reserved'.
-     */
-    public String channelSendTimestampOffset()
-    {
-        return channelSendTimestampOffset;
-    }
-
-    /**
-     * Offset into a message to store the channel send timestamp. May also be the special value 'reserved' which means
-     * to store the timestamp in the reserved value field.
-     *
      * @param timestampOffset to use as the offset.
      * @return this for a fluent API.
      * @throws IllegalArgumentException if the string is not null doesn't represent an int or the 'reserved' value.
+     * @see CommonContext#CHANNEL_SEND_TIMESTAMP_OFFSET_PARAM_NAME
      */
     public ChannelUriStringBuilder channelSendTimestampOffset(final String timestampOffset)
     {
@@ -1911,7 +1932,7 @@ public final class ChannelUriStringBuilder
             {
                 throw new IllegalArgumentException(
                     "channelSendTimestampOffset must be a number or the value '" + RESERVED_OFFSET + "' found: " +
-                    timestampOffset);
+                        timestampOffset);
             }
         }
 
@@ -1925,6 +1946,7 @@ public final class ChannelUriStringBuilder
      *
      * @param channelUri the existing URI to extract the channelSendTimestampOffset from.
      * @return this for a fluent API.
+     * @see CommonContext#CHANNEL_SEND_TIMESTAMP_OFFSET_PARAM_NAME
      */
     public ChannelUriStringBuilder channelSendTimestampOffset(final ChannelUri channelUri)
     {
@@ -1932,11 +1954,403 @@ public final class ChannelUriStringBuilder
     }
 
     /**
+     * Offset into a message to store the channel send timestamp. May also be the special value 'reserved' which means
+     * to store the timestamp in the reserved value field.
+     *
+     * @return current sendTimestampOffset value either as string representation of an integer index or the special
+     * value 'reserved'.
+     * @see CommonContext#CHANNEL_SEND_TIMESTAMP_OFFSET_PARAM_NAME
+     */
+    public String channelSendTimestampOffset()
+    {
+        return channelSendTimestampOffset;
+    }
+
+    /**
+     * Set the response endpoint to be used for a response channel subscription or publication.
+     *
+     * @param responseEndpoint  response endpoint to be used in this channel URI.
+     * @return this for a fluent API.
+     * @see CommonContext#RESPONSE_ENDPOINT_PARAM_NAME
+     */
+    public ChannelUriStringBuilder responseEndpoint(final String responseEndpoint)
+    {
+        this.responseEndpoint = responseEndpoint;
+        return this;
+    }
+
+    /**
+     * Set the response endpoint to be used for a response channel subscription or publication by extracting it from the
+     * ChannelUri.
+     *
+     * @param channelUri the existing URI to extract the responseEndpoint from.
+     * @return this for a fluent API.
+     * @see CommonContext#RESPONSE_ENDPOINT_PARAM_NAME
+     */
+    public ChannelUriStringBuilder responseEndpoint(final ChannelUri channelUri)
+    {
+        return responseEndpoint(channelUri.get(RESPONSE_ENDPOINT_PARAM_NAME));
+    }
+
+    /**
+     * The response endpoint to be used for a response channel subscription or publication.
+     *
+     * @return response endpoint.
+     * @see CommonContext#RESPONSE_ENDPOINT_PARAM_NAME
+     */
+    public String responseEndpoint()
+    {
+        return this.responseEndpoint;
+    }
+
+    /**
+     * Set the correlation id from the image received on the response "server's" subscription to be used by a response
+     * publication.
+     *
+     * @param responseCorrelationId correlation id of an image from the response "server's" subscription.
+     * @return this for a fluent API.
+     * @see CommonContext#RESPONSE_CORRELATION_ID_PARAM_NAME
+     */
+    public ChannelUriStringBuilder responseCorrelationId(final Long responseCorrelationId)
+    {
+        this.responseCorrelationId = responseCorrelationId;
+        return this;
+    }
+
+    /**
+     * Set the correlation id from the image received on the response "server's" subscription to be used by a response
+     * publication extracted from the channelUri.
+     *
+     * @param channelUri the existing URI to extract the responseCorrelationId from.
+     * @return this for a fluent API.
+     * @see CommonContext#RESPONSE_CORRELATION_ID_PARAM_NAME
+     */
+    public ChannelUriStringBuilder responseCorrelationId(final ChannelUri channelUri)
+    {
+        final String responseCorrelationIdString = channelUri.get(RESPONSE_CORRELATION_ID_PARAM_NAME);
+
+        if (null != responseCorrelationIdString)
+        {
+            try
+            {
+                responseCorrelationId(Long.valueOf(responseCorrelationIdString));
+            }
+            catch (final NumberFormatException ex)
+            {
+                throw new IllegalArgumentException("'response-correlation-id' must be a valid long value", ex);
+            }
+        }
+
+        return this;
+    }
+
+    /**
+     * The delay to apply before sending a NAK in response to a gap being detected by the receiver.
+     *
+     * @param nakDelay express as a numeric value with a suffix, e.g. 10ms, 100us.
+     * @return this for a fluent API.
+     * @see CommonContext#NAK_DELAY_PARAM_NAME
+     */
+    public ChannelUriStringBuilder nakDelay(final String nakDelay)
+    {
+        this.nakDelay = null != nakDelay ? parseDuration(NAK_DELAY_PARAM_NAME, nakDelay) : null;
+        return this;
+    }
+
+    /**
+     * The delay to apply before sending a NAK in response to a gap being detected by the receiver.
+     *
+     * @param channelUri the existing URI to extract the nakDelay from.
+     * @return this for a fluent API.
+     * @see CommonContext#NAK_DELAY_PARAM_NAME
+     */
+    public ChannelUriStringBuilder nakDelay(final ChannelUri channelUri)
+    {
+        return nakDelay(channelUri.get(NAK_DELAY_PARAM_NAME));
+    }
+
+    /**
+     * The delay to apply before sending a NAK in response to a gap being detected by the receiver.
+     *
+     * @return the delay in nanoseconds, null if not set.
+     * @see CommonContext#NAK_DELAY_PARAM_NAME
+     */
+    public Long nakDelay()
+    {
+        return nakDelay;
+    }
+
+    /**
+     * The timeout for when an untethered subscription that is outside the window limit will participate in local
+     * flow control.
+     *
+     * @param timeout specified either in nanoseconds or using a units suffix, e.g. 1ms, 1us.
+     * @return this for a fluent API.
+     * @see CommonContext#UNTETHERED_WINDOW_LIMIT_TIMEOUT_PARAM_NAME
+     */
+    public ChannelUriStringBuilder untetheredWindowLimitTimeout(final String timeout)
+    {
+        this.untetheredWindowLimitTimeoutNs = null != timeout ?
+            parseDuration(UNTETHERED_WINDOW_LIMIT_TIMEOUT_PARAM_NAME, timeout) : null;
+        return this;
+    }
+
+    /**
+     * The timeout for when an untethered subscription that is outside the window limit will participate in local
+     * flow control.
+     *
+     * @param timeout specified either in nanoseconds.
+     * @return this for a fluent API.
+     * @see CommonContext#UNTETHERED_WINDOW_LIMIT_TIMEOUT_PARAM_NAME
+     */
+    public ChannelUriStringBuilder untetheredWindowLimitTimeoutNs(final Long timeout)
+    {
+        this.untetheredWindowLimitTimeoutNs = timeout;
+        return this;
+    }
+
+    /**
+     * The timeout for when an untethered subscription that is outside the window limit will participate in local
+     * flow control.
+     *
+     * @param channelUri the existing URI to extract the untetheredWindowLimitTimeout from.
+     * @return this for a fluent API.
+     * @see CommonContext#UNTETHERED_WINDOW_LIMIT_TIMEOUT_PARAM_NAME
+     */
+    public ChannelUriStringBuilder untetheredWindowLimitTimeout(final ChannelUri channelUri)
+    {
+        this.untetheredWindowLimitTimeout(channelUri.get(UNTETHERED_WINDOW_LIMIT_TIMEOUT_PARAM_NAME));
+        return this;
+    }
+
+    /**
+     * The timeout for when an untethered subscription that is outside the window limit will participate in local
+     * flow control.
+     *
+     * @return the timeout in ns.
+     * @see CommonContext#UNTETHERED_WINDOW_LIMIT_TIMEOUT_PARAM_NAME
+     */
+    public Long untetheredWindowLimitTimeoutNs()
+    {
+        return untetheredWindowLimitTimeoutNs;
+    }
+
+    /**
+     * The timeout for when an untethered subscription is resting after not being able to keep up before it is allowed
+     * to rejoin a stream.
+     *
+     * @param timeout specified either in nanoseconds or using a units suffix, e.g. 1ms, 1us.
+     * @return this for a fluent API.
+     * @see CommonContext#UNTETHERED_RESTING_TIMEOUT_PARAM_NAME
+     */
+    public ChannelUriStringBuilder untetheredRestingTimeout(final String timeout)
+    {
+        this.untetheredRestingTimeoutNs = null != timeout ?
+            parseDuration(UNTETHERED_RESTING_TIMEOUT_PARAM_NAME, timeout) : null;
+        return this;
+    }
+
+    /**
+     * The timeout for when an untethered subscription is resting after not being able to keep up before it is allowed
+     * to rejoin a stream.
+     *
+     * @param timeout specified either in nanoseconds.
+     * @return this for a fluent API.
+     * @see CommonContext#UNTETHERED_RESTING_TIMEOUT_PARAM_NAME
+     */
+    public ChannelUriStringBuilder untetheredRestingTimeoutNs(final Long timeout)
+    {
+        this.untetheredRestingTimeoutNs = timeout;
+        return this;
+    }
+
+    /**
+     * The timeout for when an untethered subscription is resting after not being able to keep up before it is allowed
+     * to rejoin a stream.
+     *
+     * @param channelUri the existing URI to extract the untetheredRestingTimeout from.
+     * @return this for a fluent API.
+     * @see CommonContext#UNTETHERED_RESTING_TIMEOUT_PARAM_NAME
+     */
+    public ChannelUriStringBuilder untetheredRestingTimeout(final ChannelUri channelUri)
+    {
+        this.untetheredRestingTimeout(channelUri.get(UNTETHERED_RESTING_TIMEOUT_PARAM_NAME));
+        return this;
+    }
+
+    /**
+     * The timeout for when an untethered subscription is resting after not being able to keep up before it is allowed
+     * to rejoin a stream.
+     *
+     * @return the timeout in ns.
+     * @see CommonContext#UNTETHERED_RESTING_TIMEOUT_PARAM_NAME
+     */
+    public Long untetheredRestingTimeoutNs()
+    {
+        return untetheredRestingTimeoutNs;
+    }
+
+    /**
+     * The max number of retransmit actions.
+     *
+     * @param maxResend the max number of retransmit actions.
+     * @return this for a fluent API.
+     * @see CommonContext#MAX_RESEND_PARAM_NAME
+     */
+    public ChannelUriStringBuilder maxResend(final Integer maxResend)
+    {
+        this.maxResend = maxResend;
+        return this;
+    }
+
+    /**
+     * The max number of retransmit actions.
+     *
+     * @param channelUri the existing URI to extract the maxResend from.
+     * @return this for a fluent API.
+     * @see CommonContext#MAX_RESEND_PARAM_NAME
+     */
+    public ChannelUriStringBuilder maxResend(final ChannelUri channelUri)
+    {
+        final String valueStr = channelUri.get(MAX_RESEND_PARAM_NAME);
+        if (null == valueStr)
+        {
+            this.maxResend = null;
+            return this;
+        }
+        else
+        {
+            try
+            {
+                return maxResend(Integer.parseInt(valueStr));
+            }
+            catch (final NumberFormatException ex)
+            {
+                throw new IllegalArgumentException(
+                    MAX_RESEND_PARAM_NAME + " must be a number", ex);
+            }
+        }
+    }
+
+    /**
+     * The max number of retransmit actions.
+     *
+     * @return the max number of outstanding retransmit actions
+     * @see CommonContext#MAX_RESEND_PARAM_NAME
+     */
+    public Integer maxResend()
+    {
+        return maxResend;
+    }
+
+    /**
+     * The stream id of the channel.
+     *
+     * @return the stream or null of no streamId is set.
+     */
+    public Integer streamId()
+    {
+        return streamId;
+    }
+
+    /**
+     * The stream id of the channel.
+     *
+     * @param streamId of the channel.
+     * @return this for a fluent API.
+     */
+    public ChannelUriStringBuilder streamId(final Integer streamId)
+    {
+        this.streamId = streamId;
+        return this;
+    }
+
+    /**
+     * The stream id of the channel.
+     *
+     * @param channelUri the existing URI to extract the streamId from.
+     * @return this for a fluent API.
+     */
+    public ChannelUriStringBuilder streamId(final ChannelUri channelUri)
+    {
+        final String valueStr = channelUri.get(STREAM_ID_PARAM_NAME);
+        if (null == valueStr)
+        {
+            this.streamId = null;
+            return this;
+        }
+        else
+        {
+            try
+            {
+                return streamId(Integer.parseInt(valueStr));
+            }
+            catch (final NumberFormatException ex)
+            {
+                throw new IllegalArgumentException(
+                    STREAM_ID_PARAM_NAME + " must be a number", ex);
+            }
+        }
+    }
+
+    /**
+     * Set the publication window length which defines how far ahead can publication accept offers.
+     *
+     * @param publicationWindowLength of the channel.
+     * @return this for a fluent API.
+     * @see CommonContext#PUBLICATION_WINDOW_LENGTH_PARAM_NAME
+     */
+    public ChannelUriStringBuilder publicationWindowLength(final Integer publicationWindowLength)
+    {
+        this.publicationWindowLength = publicationWindowLength;
+        return this;
+    }
+
+    /**
+     * Set the publication window length for this channel from an existing {@link ChannelUri},
+     * which may have a null value for this field.
+     *
+     * @param channelUri to read the value from.
+     * @return this for a fluent API.
+     * @see CommonContext#PUBLICATION_WINDOW_LENGTH_PARAM_NAME
+     */
+    public ChannelUriStringBuilder publicationWindowLength(final ChannelUri channelUri)
+    {
+        final String valueStr = channelUri.get(PUBLICATION_WINDOW_LENGTH_PARAM_NAME);
+        if (null == valueStr)
+        {
+            this.publicationWindowLength = null;
+            return this;
+        }
+        else
+        {
+            final long value = parseSize(PUBLICATION_WINDOW_LENGTH_PARAM_NAME, valueStr);
+            if (value > Integer.MAX_VALUE)
+            {
+                throw new IllegalArgumentException("value exceeds maximum permitted: value=" + value);
+            }
+
+            return publicationWindowLength((int)value);
+        }
+    }
+
+    /**
+     * Get the publication window length.
+     *
+     * @return publication window length or {@code null} if was not set.
+     * @see CommonContext#PUBLICATION_WINDOW_LENGTH_PARAM_NAME
+     */
+    public Integer publicationWindowLength()
+    {
+        return publicationWindowLength;
+    }
+
+    /**
      * Build a channel URI String for the given parameters.
      *
      * @return a channel URI String for the given parameters.
      */
-    @SuppressWarnings("MethodLength")
+    @SuppressWarnings({ "MethodLength", "DuplicatedCode" })
     public String build()
     {
         sb.setLength(0);
@@ -1948,164 +2362,49 @@ public final class ChannelUriStringBuilder
 
         sb.append(ChannelUri.AERON_SCHEME).append(':').append(media).append('?');
 
-        if (null != tags)
-        {
-            sb.append(TAGS_PARAM_NAME).append('=').append(tags).append('|');
-        }
-
-        if (null != endpoint)
-        {
-            sb.append(ENDPOINT_PARAM_NAME).append('=').append(endpoint).append('|');
-        }
-
-        if (null != networkInterface)
-        {
-            sb.append(INTERFACE_PARAM_NAME).append('=').append(networkInterface).append('|');
-        }
-
-        if (null != controlEndpoint)
-        {
-            sb.append(MDC_CONTROL_PARAM_NAME).append('=').append(controlEndpoint).append('|');
-        }
-
-        if (null != controlMode)
-        {
-            sb.append(MDC_CONTROL_MODE_PARAM_NAME).append('=').append(controlMode).append('|');
-        }
-
-        if (null != mtu)
-        {
-            sb.append(MTU_LENGTH_PARAM_NAME).append('=').append(mtu.intValue()).append('|');
-        }
-
-        if (null != termLength)
-        {
-            sb.append(TERM_LENGTH_PARAM_NAME).append('=').append(termLength.intValue()).append('|');
-        }
-
-        if (null != initialTermId)
-        {
-            sb.append(INITIAL_TERM_ID_PARAM_NAME).append('=').append(initialTermId.intValue()).append('|');
-        }
-
-        if (null != termId)
-        {
-            sb.append(TERM_ID_PARAM_NAME).append('=').append(termId.intValue()).append('|');
-        }
-
-        if (null != termOffset)
-        {
-            sb.append(TERM_OFFSET_PARAM_NAME).append('=').append(termOffset.intValue()).append('|');
-        }
+        appendParameter(sb, TAGS_PARAM_NAME, tags);
+        appendParameter(sb, ENDPOINT_PARAM_NAME, endpoint);
+        appendParameter(sb, INTERFACE_PARAM_NAME, networkInterface);
+        appendParameter(sb, MDC_CONTROL_PARAM_NAME, controlEndpoint);
+        appendParameter(sb, MDC_CONTROL_MODE_PARAM_NAME, controlMode);
+        appendParameter(sb, MTU_LENGTH_PARAM_NAME, mtu);
+        appendParameter(sb, TERM_LENGTH_PARAM_NAME, termLength);
+        appendParameter(sb, INITIAL_TERM_ID_PARAM_NAME, initialTermId);
+        appendParameter(sb, TERM_ID_PARAM_NAME, termId);
+        appendParameter(sb, TERM_OFFSET_PARAM_NAME, termOffset);
 
         if (null != sessionId)
         {
-            sb.append(SESSION_ID_PARAM_NAME).append('=').append(prefixTag(isSessionIdTagged, sessionId)).append('|');
+            appendParameter(sb, SESSION_ID_PARAM_NAME, prefixTag(isSessionIdTagged, sessionId));
         }
 
-        if (null != ttl)
-        {
-            sb.append(TTL_PARAM_NAME).append('=').append(ttl.intValue()).append('|');
-        }
-
-        if (null != reliable)
-        {
-            sb.append(RELIABLE_STREAM_PARAM_NAME).append('=').append(reliable).append('|');
-        }
-
-        if (null != linger)
-        {
-            sb.append(LINGER_PARAM_NAME).append('=').append(linger).append('|');
-        }
-
-        if (null != alias)
-        {
-            sb.append(ALIAS_PARAM_NAME).append('=').append(alias).append('|');
-        }
-
-        if (null != cc)
-        {
-            sb.append(CONGESTION_CONTROL_PARAM_NAME).append('=').append(cc).append('|');
-        }
-
-        if (null != fc)
-        {
-            sb.append(FLOW_CONTROL_PARAM_NAME).append('=').append(fc).append('|');
-        }
-
-        if (null != groupTag)
-        {
-            sb.append(GROUP_TAG_PARAM_NAME).append('=').append(groupTag).append('|');
-        }
-
-        if (null != sparse)
-        {
-            sb.append(SPARSE_PARAM_NAME).append('=').append(sparse).append('|');
-        }
-
-        if (null != eos)
-        {
-            sb.append(EOS_PARAM_NAME).append('=').append(eos).append('|');
-        }
-
-        if (null != tether)
-        {
-            sb.append(TETHER_PARAM_NAME).append('=').append(tether).append('|');
-        }
-
-        if (null != group)
-        {
-            sb.append(GROUP_PARAM_NAME).append('=').append(group).append('|');
-        }
-
-        if (null != rejoin)
-        {
-            sb.append(REJOIN_PARAM_NAME).append('=').append(rejoin).append('|');
-        }
-
-        if (null != ssc)
-        {
-            sb.append(SPIES_SIMULATE_CONNECTION_PARAM_NAME).append('=').append(ssc).append('|');
-        }
-
-        if (null != socketSndbufLength)
-        {
-            sb.append(SOCKET_SNDBUF_PARAM_NAME).append('=').append(socketSndbufLength).append('|');
-        }
-
-        if (null != socketRcvbufLength)
-        {
-            sb.append(SOCKET_RCVBUF_PARAM_NAME).append('=').append(socketRcvbufLength).append('|');
-        }
-
-        if (null != receiverWindowLength)
-        {
-            sb.append(RECEIVER_WINDOW_LENGTH_PARAM_NAME).append('=').append(receiverWindowLength).append('|');
-        }
-
-        if (null != mediaReceiveTimestampOffset)
-        {
-            sb.append(MEDIA_RCV_TIMESTAMP_OFFSET_PARAM_NAME)
-                .append('=')
-                .append(mediaReceiveTimestampOffset)
-                .append('|');
-        }
-
-        if (null != channelReceiveTimestampOffset)
-        {
-            sb.append(CHANNEL_RECEIVE_TIMESTAMP_OFFSET_PARAM_NAME)
-                .append('=')
-                .append(channelReceiveTimestampOffset)
-                .append('|');
-        }
-
-        if (null != channelSendTimestampOffset)
-        {
-            sb.append(CHANNEL_SEND_TIMESTAMP_OFFSET_PARAM_NAME)
-                .append('=')
-                .append(channelSendTimestampOffset)
-                .append('|');
-        }
+        appendParameter(sb, TTL_PARAM_NAME, ttl);
+        appendParameter(sb, RELIABLE_STREAM_PARAM_NAME, reliable);
+        appendParameter(sb, LINGER_PARAM_NAME, linger);
+        appendParameter(sb, ALIAS_PARAM_NAME, alias);
+        appendParameter(sb, CONGESTION_CONTROL_PARAM_NAME, cc);
+        appendParameter(sb, FLOW_CONTROL_PARAM_NAME, fc);
+        appendParameter(sb, GROUP_TAG_PARAM_NAME, groupTag);
+        appendParameter(sb, SPARSE_PARAM_NAME, sparse);
+        appendParameter(sb, EOS_PARAM_NAME, eos);
+        appendParameter(sb, TETHER_PARAM_NAME, tether);
+        appendParameter(sb, GROUP_PARAM_NAME, group);
+        appendParameter(sb, REJOIN_PARAM_NAME, rejoin);
+        appendParameter(sb, SPIES_SIMULATE_CONNECTION_PARAM_NAME, ssc);
+        appendParameter(sb, SOCKET_SNDBUF_PARAM_NAME, socketSndbufLength);
+        appendParameter(sb, SOCKET_RCVBUF_PARAM_NAME, socketRcvbufLength);
+        appendParameter(sb, RECEIVER_WINDOW_LENGTH_PARAM_NAME, receiverWindowLength);
+        appendParameter(sb, MEDIA_RCV_TIMESTAMP_OFFSET_PARAM_NAME, mediaReceiveTimestampOffset);
+        appendParameter(sb, CHANNEL_RECEIVE_TIMESTAMP_OFFSET_PARAM_NAME, channelReceiveTimestampOffset);
+        appendParameter(sb, CHANNEL_SEND_TIMESTAMP_OFFSET_PARAM_NAME, channelSendTimestampOffset);
+        appendParameter(sb, RESPONSE_ENDPOINT_PARAM_NAME, responseEndpoint);
+        appendParameter(sb, RESPONSE_CORRELATION_ID_PARAM_NAME, responseCorrelationId);
+        appendParameter(sb, NAK_DELAY_PARAM_NAME, nakDelay);
+        appendParameter(sb, UNTETHERED_WINDOW_LIMIT_TIMEOUT_PARAM_NAME, untetheredWindowLimitTimeoutNs);
+        appendParameter(sb, UNTETHERED_RESTING_TIMEOUT_PARAM_NAME, untetheredRestingTimeoutNs);
+        appendParameter(sb, MAX_RESEND_PARAM_NAME, maxResend);
+        appendParameter(sb, STREAM_ID_PARAM_NAME, streamId);
+        appendParameter(sb, PUBLICATION_WINDOW_LENGTH_PARAM_NAME, publicationWindowLength);
 
         final char lastChar = sb.charAt(sb.length() - 1);
         if (lastChar == '|' || lastChar == '?')
@@ -2114,6 +2413,14 @@ public final class ChannelUriStringBuilder
         }
 
         return sb.toString();
+    }
+
+    private static void appendParameter(final StringBuilder sb, final String paramName, final Object paramValue)
+    {
+        if (null != paramValue)
+        {
+            sb.append(paramName).append('=').append(paramValue).append('|');
+        }
     }
 
     /**

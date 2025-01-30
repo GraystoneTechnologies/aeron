@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,18 +13,23 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 plugins {
     id 'java-library'
-    id 'com.github.johnrengelman.shadow' version '8.1.1' apply false
-    id 'biz.aQute.bnd.builder' version '6.4.0' apply false
-    id 'com.github.ben-manes.versions' version '0.47.0'
+    alias(libs.plugins.bnd).apply(false)
+    alias(libs.plugins.shadow).apply(false)
+    alias(libs.plugins.versions)
 }
 
 defaultTasks 'clean', 'build'
 
+static def rawBuildJavaVersion()
+{
+    return System.getenv('BUILD_JAVA_VERSION') ?: JavaVersion.current().getMajorVersion()
+}
+boolean isEarlyAccessJavaVersion = rawBuildJavaVersion().endsWith("-ea")
+
 static def getBuildJavaVersion() {
-    def buildJavaVersion = System.getenv('BUILD_JAVA_VERSION') ?: JavaVersion.current().getMajorVersion()
+    def buildJavaVersion = rawBuildJavaVersion()
 
     if (buildJavaVersion.indexOf('.') > 0) {
         buildJavaVersion = buildJavaVersion.substring(0, buildJavaVersion.indexOf('.'))
@@ -44,21 +49,10 @@ def toolchainLauncher = javaToolchains.launcherFor {
 
 def aeronGroup = 'io.aeron'
 def aeronVersion = file('version.txt').text.trim()
-
-def agronaVersion = '1.18.2'
-def agronaVersionRange = '[1.18.2,2.0[' // allow any release >= 1.18.2 and < 2.0.0
-def sbeVersion = '1.28.3'
-def checkstyleVersion = '9.3'
-def hamcrestVersion = '2.2'
-def junitVersion = '5.9.3'
-def junitPlatformVersion = '1.9.3'
-def mockitoVersion = '4.11.0'
-def byteBuddyVersion = '1.14.5'
-def findbugsAnnotationsVersion = '3.0.1'
-def hdrHistogramVersion = '2.1.12'
+def gitCommitHash = io.aeron.build.GithubUtil.currentGitHash("${projectDir}")
 
 ext {
-    isReleaseVersion = !version.endsWith('-SNAPSHOT')
+    isReleaseVersion = !aeronVersion.endsWith('-SNAPSHOT')
     releasesRepoUrl = 'https://oss.sonatype.org/service/local/staging/deploy/maven2/'
     snapshotsRepoUrl = 'https://oss.sonatype.org/content/repositories/snapshots/'
 
@@ -68,6 +62,14 @@ ext {
 
     if (!project.hasProperty('ossrhPassword')) {
         ossrhPassword = ''
+    }
+
+    if (!project.hasProperty('signingKey')) {
+        signingKey = null
+    }
+
+    if (!project.hasProperty('signingPassword')) {
+        signingPassword = null
     }
 }
 
@@ -123,7 +125,7 @@ def projectPom = {
         }
         developer {
             id = 'vyazelenko'
-            name = 'Dmitry Vyazelenko'
+            name = 'Dmytro Vyazelenko'
             email = 'vyazelenko@protonmail.com '
             url = 'https://github.com/vyazelenko'
         }
@@ -142,9 +144,14 @@ allprojects {
         resolutionStrategy {
             failOnVersionConflict()
 
-            force "org.agrona:agrona:${agronaVersion}",
-                  "net.bytebuddy:byte-buddy:${byteBuddyVersion}",
-                  "net.bytebuddy:byte-buddy-agent:${byteBuddyVersion}"
+            force libs.agrona,
+                  libs.byteBuddy,
+                  libs.byteBuddy.agent,
+                  // patching conflicting Checkstyle dependencies
+                  libs.commons.codec,
+                  libs.commons.lang3,
+                  libs.httpcore,
+                  libs.plexus.utils
         }
     }
 
@@ -154,26 +161,30 @@ allprojects {
 }
 
 subprojects {
+    apply plugin: 'base'
     apply plugin: 'java-library'
     apply plugin: 'checkstyle'
 
     dependencies {
-        testImplementation "org.hamcrest:hamcrest:${hamcrestVersion}"
-        testImplementation "org.mockito:mockito-core:${mockitoVersion}"
-        testImplementation "org.junit.jupiter:junit-jupiter-params:${junitVersion}"
-        testRuntimeOnly "org.junit.jupiter:junit-jupiter-engine:${junitVersion}"
+        testImplementation libs.hamcrest
+        testImplementation libs.mockito
+        testImplementation platform(libs.junit.bom)
+        testImplementation "org.junit.jupiter:junit-jupiter-params"
+        testRuntimeOnly "org.junit.jupiter:junit-jupiter-engine"
+        testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
     }
 
     java {
         toolchain {
             languageVersion = JavaLanguageVersion.of(buildJavaVersion)
         }
+        sourceCompatibility = JavaVersion.VERSION_17
     }
 
     group = aeronGroup
     version = aeronVersion
 
-    checkstyle.toolVersion = "${checkstyleVersion}"
+    checkstyle.toolVersion = libs.versions.checkstyle.get()
 
     tasks.withType(Sign).configureEach {
         onlyIf {
@@ -189,19 +200,34 @@ subprojects {
     tasks.withType(JavaCompile).configureEach {
         options.encoding = 'UTF-8'
         options.deprecation = true
-        options.compilerArgs.addAll(['-Xlint:all', '-Werror']) // Enable all warnings and treat them as errors
+        options.compilerArgs.add('--release')
+        options.compilerArgs.add(java.sourceCompatibility.majorVersion)
+        options.compilerArgs.addAll(['-Xlint:all,-processing', '-Werror']) // Enable all warnings and treat them as errors
+        options.compilerArgs.add("-Aio.aeron.version=${aeronVersion}")
+        options.compilerArgs.add("-Aio.aeron.gitsha=${gitCommitHash}")
     }
 
+    def mockitoAgent = configurations.create('mockitoAgent') { transitive = false }
+    mockitoAgent.withDependencies {it.add(libs.mockito.get()) }
+
     tasks.withType(Test).configureEach { test ->
-        if (buildJavaVersion >= 9) {
-            jvmArgs('--add-opens', 'java.base/sun.nio.ch=ALL-UNNAMED')
-            jvmArgs('--add-opens', 'java.base/java.util.zip=ALL-UNNAMED')
+        jvmArgs('--add-opens', 'java.base/jdk.internal.misc=ALL-UNNAMED')
+        jvmArgs('--add-opens', 'java.base/java.util.zip=ALL-UNNAMED')
+        jvmArgs("-javaagent:${mockitoAgent.asPath}")
+        if (buildJavaVersion >= 21) {
+            jvmArgs('-XX:+EnableDynamicAgentLoading')
         }
         testClassesDirs = testing.suites.test.sources.output.classesDirs
         classpath = testing.suites.test.sources.runtimeClasspath
+        maxHeapSize("1g")
+        jvmArgs("-XX:MaxDirectMemorySize=1g",
+                "-XX:+CreateCoredumpOnCrash",
+                "-XX:+HeapDumpOnOutOfMemoryError",
+                "-XX:+CrashOnOutOfMemoryError",
+                "-XX:HeapDumpPath=" + project.rootDir + "/heap.hprof")
 
         useJUnitPlatform {
-            if (!test.name.equals('slowTest') && !test.name.equals('bindingsTest') && !test.name.equals('topologyTest'))
+            if (test.name != 'slowTest' && test.name != 'bindingsTest' && test.name != 'topologyTest')
             {
                 excludeTags 'any()'
             }
@@ -227,10 +253,24 @@ subprojects {
             'aeron.dir.delete.on.start': 'true',
             'aeron.term.buffer.sparse.file': 'true',
             'aeron.perform.storage.checks': 'false',
-            'agrona.strict.alignment.checks': 'true')
+            'agrona.disable.bounds.checks': 'false',
+            'agrona.strict.alignment.checks': 'true',
+            'net.bytebuddy.experimental': 'true',
+            'io.aeron.shadow.net.bytebuddy.experimental': 'true',
+            'java.net.preferIPv4Stack': 'true',
+            'aeron.test.system.aeronmd.path': System.getProperty('aeron.test.system.aeronmd.path'),
+            'aeron.test.system.binding.remote.host': System.getProperty('aeron.test.system.binding.remote.host'),
+            'aeron.test.system.binding.local.host': System.getProperty('aeron.test.system.binding.local.host'),
+            'aeron.test.system.aeron.dir': System.getProperty('aeron.test.system.aeron.dir'),
+            'aeron.test.system.ats.path': System.getProperty('aeron.test.system.ats.path'),
+            'aeron.test.system.ats.conf.dir': System.getProperty('aeron.test.system.ats.conf.dir'),
+            'aeron.test.system.ats.conf.file': System.getProperty('aeron.test.system.ats.conf.file'),
+            'aeron.test.system.driver.await.counters': System.getProperty('aeron.test.system.driver.await.counters'))
 
         javaLauncher.set(toolchainLauncher)
     }
+
+    def aeronLoggingAgent = project.file("../aeron-agent/build/libs/aeron-agent-${aeronVersion}.jar").absolutePath
 
     tasks.register('slowTest', Test) {
         group 'verification'
@@ -241,13 +281,11 @@ subprojects {
             includeTags 'slow'
         }
 
-        ext.agentFilename = {
-            project.file("../aeron-agent/build/libs/aeron-agent-${aeronVersion}.jar").absolutePath
-        }
-
-        jvmArgs '-javaagent:' + agentFilename()
+        jvmArgs("-javaagent:${aeronLoggingAgent}")
         systemProperty 'aeron.event.cluster.log', 'all'
         systemProperty 'aeron.event.cluster.log.disable', 'CANVASS_POSITION,APPEND_POSITION,COMMIT_POSITION'
+        systemProperty 'aeron.event.archive.log', 'all'
+        systemProperty 'aeron.event.log', 'admin'
         systemProperty 'aeron.debug.timeout', '3600s'
         systemProperty 'aeron.event.log.reader.classname', 'io.aeron.agent.CollectingEventLogReaderAgent'
         systemProperty 'aeron.fallback.logger', 'no_op'
@@ -262,11 +300,7 @@ subprojects {
             includeTags 'bindings'
         }
 
-        ext.agentFilename = {
-            project.file("../aeron-agent/build/libs/aeron-agent-${aeronVersion}.jar").absolutePath
-        }
-
-        jvmArgs '-javaagent:' + agentFilename()
+        jvmArgs("-javaagent:${aeronLoggingAgent}")
         systemProperty 'aeron.event.cluster.log', 'all'
         systemProperty 'aeron.event.cluster.log.disable', 'CANVASS_POSITION'
         systemProperty 'aeron.debug.timeout', '3600s'
@@ -284,30 +318,32 @@ subprojects {
     javadoc {
         failOnError false
         title = '<h1>Aeron Message Transport</h1>'
-        options.bottom = '<i>Copyright &#169; 2014-2022 Real Logic Limited. All Rights Reserved.</i>'
+        options.bottom = '<i>Copyright &#169; 2014-2025 Real Logic Limited. All Rights Reserved.</i>'
         options.encoding = 'UTF-8'
         options.docEncoding = 'UTF-8'
         options.charSet = 'UTF-8'
-        options.links("https://www.javadoc.io/doc/org.agrona/agrona/${agronaVersion}/")
+        options.links("https://www.javadoc.io/doc/org.agrona/agrona/${libs.versions.agrona.get()}/")
 
-        if (buildJavaVersion >= 19) { // early access JavaDoc location is different
+        if (isEarlyAccessJavaVersion) {
             options.links("https://download.java.net/java/early_access/jdk${buildJavaVersion}/docs/api/")
         }
-        else if (buildJavaVersion >= 11) {
+        else {
             options.links("https://docs.oracle.com/en/java/javase/${buildJavaVersion}/docs/api/")
         }
-        else {
-            options.links("https://docs.oracle.com/javase/${buildJavaVersion}/docs/api/")
-        }
 
-        if (buildJavaVersion >= 10) {
-            options.addBooleanOption 'html5', true
-        }
+        exclude 'io/aeron/archive/codecs/**'
+        exclude 'io/aeron/cluster/codecs/**'
+        exclude 'io/aeron/samples/**'
+        exclude 'io/aeron/test/**'
+
+        options.addStringOption('-release', java.sourceCompatibility.majorVersion)
+        options.addBooleanOption('Werror', true)
+        options.addBooleanOption('Xdoclint:all', true)
     }
 
     tasks.register('testJar', Jar) {
         dependsOn 'testClasses'
-        archiveClassifier.set("test-${project.archivesBaseName}")
+        archiveClassifier.set("test-${base.archivesName}")
         from sourceSets.test.output
     }
 
@@ -320,42 +356,100 @@ subprojects {
     }
 }
 
+project(':aeron-annotations') {
+    apply plugin: 'maven-publish'
+    apply plugin: 'signing'
+    apply plugin: 'biz.aQute.bnd.builder'
+
+    jar {
+        bundle {
+            bnd """
+                Automatic-Module-Name:  io.aeron.annotations
+                Bundle-Name:            io.aeron.annotations
+                Bundle-SymbolicName:    io.aeron.annotations
+                Implementation-Title:   Aeron
+                Implementation-Vendor:  Real Logic Limited
+                Implementation-Version: ${aeronVersion}
+    
+                -exportcontents: io.aeron.version
+    
+                # Suppress headers that reduce reproducibility.
+                -reproducible: true
+                -noextraheaders: true
+            """
+        }
+    }
+
+    java {
+        withSourcesJar()
+        withJavadocJar()
+    }
+
+    publishing {
+        publications {
+            aeronAnnotations(MavenPublication) {
+                from components.java
+                pom(projectPom)
+            }
+        }
+
+        repositories {
+            maven {
+                url(!isReleaseVersion ? snapshotsRepoUrl : releasesRepoUrl)
+                credentials {
+                    username = ossrhUsername
+                    password = ossrhPassword
+                }
+            }
+        }
+    }
+
+    signing {
+        if (signingKey != null) {
+            useInMemoryPgpKeys(signingKey, signingPassword)
+        }
+        sign publishing.publications.aeronAnnotations
+    }
+}
+
 project(':aeron-client') {
     apply plugin: 'maven-publish'
     apply plugin: 'signing'
     apply plugin: 'biz.aQute.bnd.builder'
 
     dependencies {
-        api("org.agrona:agrona") {
-            version {
-                strictly(agronaVersionRange)
-                prefer(agronaVersion)
-            }
-        }
+        api libs.agrona
+        implementation project(':aeron-annotations')
+        annotationProcessor project(':aeron-annotations')
         testImplementation project(':aeron-test-support')
-        testImplementation "org.mockito:mockito-inline:${mockitoVersion}"
     }
 
     jar {
-        bnd """
-            Automatic-Module-Name:  io.aeron.client
-            Bundle-Name:            io.aeron.client
-            Bundle-SymbolicName:    io.aeron.client
-            Implementation-Title:   Aeron
-            Implementation-Vendor:  Real Logic Limited
-            Implementation-Version: ${aeronVersion}
-
-            -exportcontents: io.aeron, io.aeron.*
-
-            # Suppress headers that reduce reproducibility.
-            -reproducible: true
-            -noextraheaders: true
-        """
+        bundle {
+            bnd """
+                Automatic-Module-Name:  io.aeron.client
+                Bundle-Name:            io.aeron.client
+                Bundle-SymbolicName:    io.aeron.client
+                Implementation-Title:   Aeron
+                Implementation-Vendor:  Real Logic Limited
+                Implementation-Version: ${aeronVersion}
+    
+                -exportcontents: io.aeron, io.aeron.*
+    
+                # Suppress headers that reduce reproducibility.
+                -reproducible: true
+                -noextraheaders: true
+            """
+        }
     }
 
     java {
         withSourcesJar()
         withJavadocJar()
+    }
+
+    javadoc {
+        source += project(':aeron-annotations').sourceSets.main.allJava
     }
 
     publishing {
@@ -378,7 +472,44 @@ project(':aeron-client') {
     }
 
     signing {
+        if (signingKey != null) {
+            useInMemoryPgpKeys(signingKey, signingPassword)
+        }
         sign publishing.publications.aeronClient
+    }
+
+    def configInfoFile = "${layout.buildDirectory.get()}/generated/sources/headers/java/main/config-info.dat"
+
+    tasks.register('validateConfigExpectations', JavaExec) {
+        def sourceDir = 'src/main/c'
+
+        inputs.files(configInfoFile)
+
+        mainClass.set('io.aeron.config.validation.ValidateConfigExpectationsTask')
+        classpath project(':aeron-annotations').sourceSets.main.runtimeClasspath
+        args = [configInfoFile, sourceDir]
+    }
+
+    tasks.register('generateConfigDoc', JavaExec) {
+        def generatedDocFile = "${layout.buildDirectory.get()}/generated-doc/out.md"
+
+        inputs.files(configInfoFile)
+        outputs.files(generatedDocFile)
+
+        mainClass.set('io.aeron.config.docgen.GenerateConfigDocTask')
+        classpath project(':aeron-annotations').sourceSets.main.runtimeClasspath
+        args = [configInfoFile, generatedDocFile]
+    }
+
+    tasks.register('validateCounterExpectations', JavaExec) {
+        def counterInfoFile = "${layout.buildDirectory.get()}/generated/sources/headers/java/main/counter-info.dat"
+        def sourceDir = 'src/main/c'
+
+        inputs.files(counterInfoFile)
+
+        mainClass.set('io.aeron.counter.validation.ValidateCounterExpectationsTask')
+        classpath project(':aeron-annotations').sourceSets.main.runtimeClasspath
+        args = [counterInfoFile, sourceDir]
     }
 }
 
@@ -388,29 +519,34 @@ project(':aeron-driver') {
     apply plugin: 'application'
     apply plugin: 'biz.aQute.bnd.builder'
 
-    mainClassName = 'io.aeron.driver.MediaDriver'
+    application {
+        mainClass.set('io.aeron.driver.MediaDriver')
+    }
 
     dependencies {
         api project(':aeron-client')
+        implementation project(':aeron-annotations')
+        annotationProcessor project(':aeron-annotations')
         testImplementation project(':aeron-test-support')
-        testImplementation "org.mockito:mockito-inline:${mockitoVersion}"
     }
 
     jar {
-        bnd """
-            Automatic-Module-Name:  io.aeron.driver
-            Bundle-Name:            io.aeron.driver
-            Bundle-SymbolicName:    io.aeron.driver
-            Implementation-Title:   Aeron
-            Implementation-Vendor:  Real Logic Limited
-            Implementation-Version: ${aeronVersion}
-
-            -exportcontents: io.aeron.driver, io.aeron.driver.*
-
-            # Suppress headers that reduce reproducibility.
-            -reproducible: true
-            -noextraheaders: true
-        """
+        bundle {
+            bnd """
+                Automatic-Module-Name:  io.aeron.driver
+                Bundle-Name:            io.aeron.driver
+                Bundle-SymbolicName:    io.aeron.driver
+                Implementation-Title:   Aeron
+                Implementation-Vendor:  Real Logic Limited
+                Implementation-Version: ${aeronVersion}
+    
+                -exportcontents: io.aeron.driver, io.aeron.driver.*
+    
+                # Suppress headers that reduce reproducibility.
+                -reproducible: true
+                -noextraheaders: true
+            """
+        }
     }
 
     jar.finalizedBy assembleDist
@@ -421,6 +557,7 @@ project(':aeron-driver') {
     }
 
     javadoc {
+        source += project(':aeron-annotations').sourceSets.main.allJava
         source += project(':aeron-client').sourceSets.main.allJava
     }
 
@@ -446,7 +583,33 @@ project(':aeron-driver') {
     }
 
     signing {
+        if (signingKey != null) {
+            useInMemoryPgpKeys(signingKey, signingPassword)
+        }
         sign publishing.publications.aeronDriver
+    }
+
+    tasks.register('validateConfigExpectations', JavaExec) {
+        def configInfoFile = "${layout.buildDirectory.get()}/generated/sources/headers/java/main/config-info.dat"
+        def sourceDir = 'src/main/c'
+
+        inputs.files(configInfoFile)
+
+        mainClass.set('io.aeron.config.validation.ValidateConfigExpectationsTask')
+        classpath project(':aeron-annotations').sourceSets.main.runtimeClasspath
+        args = [configInfoFile, sourceDir]
+    }
+
+    tasks.register('generateConfigDoc', JavaExec) {
+        def configInfoFile = "${layout.buildDirectory.get()}/generated/sources/headers/java/main/config-info.dat"
+        def generatedDocFile = "${layout.buildDirectory.get()}/generated-doc/out.md"
+
+        inputs.files(configInfoFile)
+        outputs.files(generatedDocFile)
+
+        mainClass.set('io.aeron.config.docgen.GenerateConfigDocTask')
+        classpath project(':aeron-annotations').sourceSets.main.runtimeClasspath
+        args = [configInfoFile, generatedDocFile]
     }
 }
 
@@ -462,14 +625,15 @@ project(':aeron-archive') {
     dependencies {
         api project(':aeron-driver')
         api files('build/classes/java/generated')
-        codecGeneration "uk.co.real-logic:sbe-tool:${sbeVersion}"
+        codecGeneration libs.sbe
+        implementation project(':aeron-annotations')
+        annotationProcessor project(':aeron-annotations')
         testImplementation project(':aeron-test-support')
-        testImplementation "org.mockito:mockito-inline:${mockitoVersion}"
-        testImplementation files('build/classes/java/generatedTest')
+        testImplementation files("${layout.buildDirectory.get()}/classes/java/generatedTest")
     }
 
-    def generatedSrcDir = file("${buildDir}/generated-src")
-    def generatedTestDir = file("${buildDir}/generated-test")
+    def generatedSrcDir = file("${layout.buildDirectory.get()}/generated-src")
+    def generatedTestDir = file("${layout.buildDirectory.get()}/generated-test")
 
     sourceSets {
         generated {
@@ -482,15 +646,16 @@ project(':aeron-archive') {
         }
     }
 
-    tasks.register('generateCodecs', JavaExec) {
-        def codecsFile = 'src/main/resources/archive/aeron-archive-codecs.xml'
-        def markCodecsFile = 'src/main/resources/archive/aeron-archive-mark-codecs.xml'
-        def sbeFile = 'src/main/resources/archive/fpl/sbe.xsd'
+    def codecsFile = 'src/main/resources/archive/aeron-archive-codecs.xml'
+    def markCodecsFile = 'src/main/resources/archive/aeron-archive-mark-codecs.xml'
+    def sbeFile = 'src/main/resources/archive/fpl/sbe.xsd'
 
+    tasks.register('generateCodecs', JavaExec) {
         inputs.files(codecsFile, markCodecsFile, sbeFile)
         outputs.dir generatedSrcDir
 
         mainClass.set('uk.co.real_logic.sbe.SbeTool')
+        jvmArgs('--add-opens', 'java.base/jdk.internal.misc=ALL-UNNAMED')
         classpath = configurations.codecGeneration
         systemProperties(
             'sbe.output.dir': generatedSrcDir,
@@ -500,60 +665,115 @@ project(':aeron-archive') {
         args = [codecsFile, markCodecsFile]
     }
 
-    tasks.register('generateV6Codecs', JavaExec) {
-        def codecsFile = 'src/main/resources/archive/aeron-archive-codecs.xml'
-        def sbeFile = 'src/main/resources/archive/fpl/sbe.xsd'
-
-        inputs.files(codecsFile, sbeFile)
-        outputs.dir generatedTestDir
-
-        mainClass.set('uk.co.real_logic.sbe.SbeTool')
-        classpath = configurations.codecGeneration
-        systemProperties(
-                'sbe.output.dir': generatedTestDir,
-                'sbe.target.language': 'Java',
-                'sbe.validation.xsd': sbeFile,
-                'sbe.validation.stop.on.error': 'true',
-                'sbe.target.namespace': 'io.aeron.archive.codecs.v6',
-                'sbe.schema.transform.version': '*:6')
-        args = [codecsFile]
-    }
-
     def generatedCppDir = file(System.getProperty('codec.target.dir') ?: "${rootDir}/cppbuild/Release/generated")
     tasks.register('generateCppCodecs', JavaExec) {
+        inputs.files(codecsFile, sbeFile)
+        outputs.dir generatedCppDir
+
         mainClass.set('uk.co.real_logic.sbe.SbeTool')
+        jvmArgs('--add-opens', 'java.base/jdk.internal.misc=ALL-UNNAMED')
         classpath = configurations.codecGeneration
         systemProperties(
             'sbe.output.dir': generatedCppDir,
             'sbe.target.language': 'Cpp',
             'sbe.target.namespace': 'aeron.archive.client',
-            'sbe.validation.xsd': 'src/main/resources/archive/fpl/sbe.xsd',
+            'sbe.validation.xsd': sbeFile,
             'sbe.validation.stop.on.error': 'true')
-        args = ['src/main/resources/archive/aeron-archive-codecs.xml']
+        args = [codecsFile]
+    }
+
+    def generatedCDir = file(System.getProperty('codec.target.dir') ?: "${rootDir}/cppbuild/Release/generated/c")
+    tasks.register('generateCCodecs', JavaExec) {
+        inputs.files(codecsFile, sbeFile)
+        outputs.dir generatedCDir
+
+        mainClass.set('uk.co.real_logic.sbe.SbeTool')
+        jvmArgs('--add-opens', 'java.base/jdk.internal.misc=ALL-UNNAMED')
+        classpath = configurations.codecGeneration
+        systemProperties(
+            'sbe.output.dir': generatedCDir,
+            'sbe.target.language': 'C',
+            'sbe.target.namespace': 'aeron.archive.client',
+            'sbe.validation.xsd': sbeFile,
+            'sbe.validation.stop.on.error': 'true')
+        args = [codecsFile]
+    }
+
+    tasks.register('generateTestCodecsV6', JavaExec) {
+        inputs.files(codecsFile, sbeFile)
+        outputs.dir generatedTestDir
+
+        mainClass.set('uk.co.real_logic.sbe.SbeTool')
+        jvmArgs('--add-opens', 'java.base/jdk.internal.misc=ALL-UNNAMED')
+        classpath = configurations.codecGeneration
+        systemProperties(
+            'sbe.output.dir': generatedTestDir,
+            'sbe.target.language': 'Java',
+            'sbe.validation.xsd': sbeFile,
+            'sbe.validation.stop.on.error': 'true',
+            'sbe.target.namespace': 'io.aeron.archive.codecs.v6',
+            'sbe.schema.transform.version': '*:6')
+        args = [codecsFile]
+    }
+
+    tasks.register('generateTestCodecsMarkFileV0', JavaExec) {
+        inputs.files(markCodecsFile, sbeFile)
+        outputs.dir generatedTestDir
+
+        mainClass.set('uk.co.real_logic.sbe.SbeTool')
+        jvmArgs('--add-opens', 'java.base/jdk.internal.misc=ALL-UNNAMED')
+        classpath = configurations.codecGeneration
+        systemProperties(
+            'sbe.output.dir': generatedTestDir,
+            'sbe.target.language': 'Java',
+            'sbe.validation.xsd': sbeFile,
+            'sbe.validation.stop.on.error': 'true',
+            'sbe.target.namespace': 'io.aeron.archive.codecs.mark.v0',
+            'sbe.schema.transform.version': '*:0')
+        args = [markCodecsFile]
+    }
+
+    tasks.register('generateTestCodecsMarkFileV1', JavaExec) {
+        inputs.files(markCodecsFile, sbeFile)
+        outputs.dir generatedTestDir
+
+        mainClass.set('uk.co.real_logic.sbe.SbeTool')
+        jvmArgs('--add-opens', 'java.base/jdk.internal.misc=ALL-UNNAMED')
+        classpath = configurations.codecGeneration
+        systemProperties(
+            'sbe.output.dir': generatedTestDir,
+            'sbe.target.language': 'Java',
+            'sbe.validation.xsd': sbeFile,
+            'sbe.validation.stop.on.error': 'true',
+            'sbe.target.namespace': 'io.aeron.archive.codecs.mark.v1',
+            'sbe.schema.transform.version': '*:1')
+        args = [markCodecsFile]
     }
 
     compileJava.dependsOn 'compileGeneratedJava'
     compileGeneratedJava.dependsOn 'generateCodecs'
     compileTestJava.dependsOn 'compileGeneratedTestJava'
-    compileGeneratedTestJava.dependsOn 'generateV6Codecs'
+    compileGeneratedTestJava.dependsOn 'generateTestCodecsV6', 'generateTestCodecsMarkFileV0', 'generateTestCodecsMarkFileV1'
 
     jar {
         from sourceSets.generated.output
 
-        bnd """
-            Automatic-Module-Name:  io.aeron.archive
-            Bundle-Name:            io.aeron.archive
-            Bundle-SymbolicName:    io.aeron.archive
-            Implementation-Title:   Aeron
-            Implementation-Vendor:  Real Logic Limited
-            Implementation-Version: ${aeronVersion}
-
-            -exportcontents: io.aeron.archive, io.aeron.archive.*
-
-            # Suppress headers that reduce reproducibility.
-            -reproducible: true
-            -noextraheaders: true
-        """
+        bundle {
+            bnd """
+                Automatic-Module-Name:  io.aeron.archive
+                Bundle-Name:            io.aeron.archive
+                Bundle-SymbolicName:    io.aeron.archive
+                Implementation-Title:   Aeron
+                Implementation-Vendor:  Real Logic Limited
+                Implementation-Version: ${aeronVersion}
+    
+                -exportcontents: io.aeron.archive, io.aeron.archive.*
+    
+                # Suppress headers that reduce reproducibility.
+                -reproducible: true
+                -noextraheaders: true
+            """
+        }
     }
 
     tasks.register('sourcesJar', Jar) {
@@ -565,6 +785,7 @@ project(':aeron-archive') {
 
     javadoc {
         source += sourceSets.generated.allJava
+        source += project(':aeron-annotations').sourceSets.main.allJava
         source += project(':aeron-client').sourceSets.main.allJava
         source += project(':aeron-driver').sourceSets.main.allJava
     }
@@ -596,7 +817,22 @@ project(':aeron-archive') {
     }
 
     signing {
+        if (signingKey != null) {
+            useInMemoryPgpKeys(signingKey, signingPassword)
+        }
         sign publishing.publications.aeronArchive
+    }
+
+    tasks.register('generateConfigDoc', JavaExec) {
+        def configInfoFile = "${layout.buildDirectory.get()}/generated/sources/headers/java/main/config-info.dat"
+        def generatedDocFile = "${layout.buildDirectory.get()}/generated-doc/out.md"
+
+        inputs.files(configInfoFile)
+        outputs.files(generatedDocFile)
+
+        mainClass.set('io.aeron.config.docgen.GenerateConfigDocTask')
+        classpath project(':aeron-annotations').sourceSets.main.runtimeClasspath
+        args = [configInfoFile, generatedDocFile]
     }
 }
 
@@ -612,58 +848,88 @@ project(':aeron-cluster') {
     dependencies {
         api project(':aeron-archive')
         api files('build/classes/java/generated')
-        codecGeneration "uk.co.real-logic:sbe-tool:${sbeVersion}"
+        codecGeneration libs.sbe
+        implementation project(':aeron-annotations')
+        annotationProcessor project(':aeron-annotations')
         testImplementation project(':aeron-test-support')
-        testImplementation "org.mockito:mockito-inline:${mockitoVersion}"
+        testImplementation files("${layout.buildDirectory.get()}/classes/java/generatedTest")
     }
 
-    def generatedDir = file("${buildDir}/generated-src")
+    def generatedSrcDir = file("${layout.buildDirectory.get()}/generated-src")
+    def generatedTestDir = file("${layout.buildDirectory.get()}/generated-test")
+
     sourceSets {
         generated {
-            java.srcDir generatedDir
+            java.srcDir generatedSrcDir
+            compileClasspath += configurations.codecGeneration
+        }
+        generatedTest {
+            java.srcDir generatedTestDir
             compileClasspath += configurations.codecGeneration
         }
     }
 
-    tasks.register('generateCodecs', JavaExec) {
-        def codecsFile = 'src/main/resources/cluster/aeron-cluster-codecs.xml'
-        def markCodecsFile = 'src/main/resources/cluster/aeron-cluster-mark-codecs.xml'
-        def nodeStateCodecsFile = 'src/main/resources/cluster/aeron-cluster-node-state-codecs.xml'
-        def sbeFile = 'src/main/resources/cluster/fpl/sbe.xsd'
+    def codecsFile = 'src/main/resources/cluster/aeron-cluster-codecs.xml'
+    def markCodecsFile = 'src/main/resources/cluster/aeron-cluster-mark-codecs.xml'
+    def nodeStateCodecsFile = 'src/main/resources/cluster/aeron-cluster-node-state-codecs.xml'
+    def sbeFile = 'src/main/resources/cluster/fpl/sbe.xsd'
 
+    tasks.register('generateCodecs', JavaExec) {
         inputs.files(codecsFile, markCodecsFile, sbeFile)
-        outputs.dir generatedDir
+        outputs.dir generatedSrcDir
 
         mainClass.set('uk.co.real_logic.sbe.SbeTool')
         classpath = configurations.codecGeneration
         systemProperties(
-            'sbe.output.dir': generatedDir,
+            'sbe.output.dir': generatedSrcDir,
             'sbe.target.language': 'Java',
             'sbe.validation.xsd': sbeFile,
             'sbe.validation.stop.on.error': 'true')
         args = [codecsFile, markCodecsFile, nodeStateCodecsFile]
     }
 
-    compileJava.dependsOn compileGeneratedJava
-    compileGeneratedJava.dependsOn generateCodecs
+    def markCodecsFileV0 = 'src/test/resources/aeron-cluster-mark-codecs-v0.xml'
+    tasks.register('generateTestCodecsMarkFileV0', JavaExec) {
+        inputs.files(markCodecsFileV0, sbeFile)
+        outputs.dir generatedTestDir
+
+        mainClass.set('uk.co.real_logic.sbe.SbeTool')
+        jvmArgs('--add-opens', 'java.base/jdk.internal.misc=ALL-UNNAMED')
+        classpath = configurations.codecGeneration
+        systemProperties(
+            'sbe.output.dir': generatedTestDir,
+            'sbe.target.language': 'Java',
+            'sbe.validation.xsd': sbeFile,
+            'sbe.validation.stop.on.error': 'true',
+            'sbe.target.namespace': 'io.aeron.cluster.codecs.mark.v0',
+            'sbe.schema.transform.version': '*:0')
+        args = [markCodecsFileV0]
+    }
+
+    compileJava.dependsOn 'compileGeneratedJava'
+    compileGeneratedJava.dependsOn 'generateCodecs'
+    compileTestJava.dependsOn 'compileGeneratedTestJava'
+    compileGeneratedTestJava.dependsOn 'generateTestCodecsMarkFileV0'
 
     jar {
         from sourceSets.generated.output
 
-        bnd """
-            Automatic-Module-Name:  io.aeron.cluster
-            Bundle-Name:            io.aeron.cluster
-            Bundle-SymbolicName:    io.aeron.cluster
-            Implementation-Title:   Aeron
-            Implementation-Vendor:  Real Logic Limited
-            Implementation-Version: ${aeronVersion}
-
-            -exportcontents: io.aeron.cluster, io.aeron.cluster.*
-
-            # Suppress headers that reduce reproducibility.
-            -reproducible: true
-            -noextraheaders: true
-        """
+        bundle {
+            bnd """
+                Automatic-Module-Name:  io.aeron.cluster
+                Bundle-Name:            io.aeron.cluster
+                Bundle-SymbolicName:    io.aeron.cluster
+                Implementation-Title:   Aeron
+                Implementation-Vendor:  Real Logic Limited
+                Implementation-Version: ${aeronVersion}
+    
+                -exportcontents: io.aeron.cluster, io.aeron.cluster.*
+    
+                # Suppress headers that reduce reproducibility.
+                -reproducible: true
+                -noextraheaders: true
+            """
+        }
     }
 
     tasks.register('sourcesJar', Jar) {
@@ -675,6 +941,7 @@ project(':aeron-cluster') {
 
     javadoc {
         source += sourceSets.generated.allJava
+        source += project(':aeron-annotations').sourceSets.main.allJava
         source += project(':aeron-client').sourceSets.main.allJava
         source += project(':aeron-driver').sourceSets.main.allJava
         source += project(':aeron-archive').sourceSets.main.allJava
@@ -708,14 +975,29 @@ project(':aeron-cluster') {
     }
 
     signing {
+        if (signingKey != null) {
+            useInMemoryPgpKeys(signingKey, signingPassword)
+        }
         sign publishing.publications.aeronCluster
+    }
+
+    tasks.register('generateConfigDoc', JavaExec) {
+        def configInfoFile = "${layout.buildDirectory.get()}/generated/sources/headers/java/main/config-info.dat"
+        def generatedDocFile = "${layout.buildDirectory.get()}/generated-doc/out.md"
+
+        inputs.files(configInfoFile)
+        outputs.files(generatedDocFile)
+
+        mainClass.set('io.aeron.config.docgen.GenerateConfigDocTask')
+        classpath project(':aeron-annotations').sourceSets.main.runtimeClasspath
+        args = [configInfoFile, generatedDocFile]
     }
 }
 
 project(':aeron-agent') {
     apply plugin: 'maven-publish'
     apply plugin: 'signing'
-    apply plugin: 'com.github.johnrengelman.shadow'
+    apply plugin: 'com.gradleup.shadow'
 
     def aeronClientProject = project(':aeron-client')
     def aeronDriverProject = project(':aeron-driver')
@@ -724,10 +1006,10 @@ project(':aeron-agent') {
 
     dependencies {
         implementation aeronClusterProject
-        implementation "net.bytebuddy:byte-buddy:${byteBuddyVersion}"
-        implementation "net.bytebuddy:byte-buddy-agent:${byteBuddyVersion}"
-        compileOnly "com.google.code.findbugs:findbugs-annotations:${findbugsAnnotationsVersion}"
-        testCompileOnly "com.google.code.findbugs:findbugs-annotations:${findbugsAnnotationsVersion}"
+        implementation libs.byteBuddy
+        implementation libs.byteBuddy.agent
+        compileOnly libs.findbugs.annotations
+        testCompileOnly libs.findbugs.annotations
         testImplementation project(':aeron-test-support')
     }
 
@@ -750,6 +1032,12 @@ project(':aeron-agent') {
 
     jar.finalizedBy shadowJar
 
+    tasks.register('dedupJar', io.aeron.build.DeduplicateTask) {
+        source shadowJar.outputs.files.singleFile
+    }
+
+    shadowJar.finalizedBy dedupJar
+
     tasks.register('sourcesJar', Jar) {
         dependsOn ':aeron-archive:generateCodecs', ':aeron-cluster:generateCodecs'
         archiveClassifier.set('sources')
@@ -763,6 +1051,7 @@ project(':aeron-agent') {
     }
 
     javadoc {
+        source += project(':aeron-annotations').sourceSets.main.allJava
         source += aeronClientProject.sourceSets.main.allJava
         source += aeronDriverProject.sourceSets.main.allJava
         source += aeronArchiveProject.sourceSets.main.allJava
@@ -800,6 +1089,9 @@ project(':aeron-agent') {
     }
 
     signing {
+        if (signingKey != null) {
+            useInMemoryPgpKeys(signingKey, signingPassword)
+        }
         sign publishing.publications.aeronAgent
     }
 }
@@ -810,7 +1102,7 @@ project(':aeron-samples') {
 
     dependencies {
         api project(':aeron-cluster')
-        implementation "org.hdrhistogram:HdrHistogram:${hdrHistogramVersion}"
+        implementation libs.hdrHistogram
         testImplementation project(':aeron-test-support')
     }
 
@@ -839,6 +1131,7 @@ project(':aeron-samples') {
     }
 
     javadoc {
+        source += project(':aeron-annotations').sourceSets.main.allJava
         source += project(':aeron-client').sourceSets.main.allJava
         source += project(':aeron-driver').sourceSets.main.allJava
         source += project(':aeron-archive').sourceSets.main.allJava
@@ -846,6 +1139,9 @@ project(':aeron-samples') {
     }
 
     signing {
+        if (signingKey != null) {
+            useInMemoryPgpKeys(signingKey, signingPassword)
+        }
         sign publishing.publications.aeronSamples
     }
 
@@ -871,7 +1167,7 @@ project(':aeron-samples') {
     }
 
     tasks.register('removeWikiDirectory', Delete) {
-        delete "${buildDir}/tmp/tutorialPublish"
+        delete "${layout.buildDirectory.get()}/tmp/tutorialPublish"
     }
 
     tasks.register('tutorialPublish', io.aeron.build.TutorialPublishTask) {
@@ -883,7 +1179,7 @@ project(':aeron-samples') {
 }
 
 project(':aeron-system-tests') {
-    apply plugin: 'com.github.johnrengelman.shadow'
+    apply plugin: 'com.gradleup.shadow'
 
     dependencies {
         testImplementation project(':aeron-archive')
@@ -892,28 +1188,26 @@ project(':aeron-system-tests') {
         testImplementation project(path: ':aeron-client', configuration: 'tests')
         testImplementation project(path: ':aeron-archive', configuration: 'tests')
         testImplementation project(path: ':aeron-cluster')
-        testImplementation "net.bytebuddy:byte-buddy-agent:${byteBuddyVersion}"
-        testImplementation "net.bytebuddy:byte-buddy:${byteBuddyVersion}"
-        testImplementation "org.mockito:mockito-inline:${mockitoVersion}"
-        testRuntimeOnly "org.junit.platform:junit-platform-console-standalone:${junitPlatformVersion}"
-        testCompileOnly "com.google.code.findbugs:findbugs-annotations:${findbugsAnnotationsVersion}"
-        if (buildJavaVersion == 8) {
-            def jdkHome = toolchainLauncher.get().metadata.installationPath.asFile.toPath().toAbsolutePath()
-            testImplementation files(jdkHome.resolve("lib/tools.jar").toFile())
-        }
+        testImplementation libs.byteBuddy
+        testImplementation libs.byteBuddy.agent
+        testCompileOnly libs.findbugs.annotations
     }
 
-    tasks.withType(Test).configureEach {
-        systemProperty('java.net.preferIPv4Stack', 'true')
-        systemProperty('aeron.fallback.logger', 'no_op')
-        systemProperty('aeron.test.system.aeronmd.path', System.getProperty('aeron.test.system.aeronmd.path'))
-        systemProperty('aeron.test.system.binding.remote.host', System.getProperty('aeron.test.system.binding.remote.host'))
-        systemProperty('aeron.test.system.binding.local.host', System.getProperty('aeron.test.system.binding.local.host'))
-        systemProperty('aeron.test.system.aeron.dir', System.getProperty('aeron.test.system.aeron.dir'))
-        systemProperty('aeron.test.system.ats.path', System.getProperty('aeron.test.system.ats.path'))
-        systemProperty('aeron.test.system.ats.conf.dir', System.getProperty('aeron.test.system.ats.conf.dir'))
-        systemProperty('aeron.test.system.ats.conf.file', System.getProperty('aeron.test.system.ats.conf.file'))
-        systemProperty('aeron.test.system.driver.await.counters', System.getProperty('aeron.test.system.driver.await.counters'))
+    tasks.named('test').configure {
+        dependsOn ':aeron-agent:jar'
+
+        ext.agentFilename = {
+            project.file("../aeron-agent/build/libs/aeron-agent-${aeronVersion}.jar").absolutePath
+        }
+
+        jvmArgs '-javaagent:' + agentFilename()
+        systemProperty 'aeron.event.cluster.log', 'all'
+        systemProperty 'aeron.event.cluster.log.disable', 'CANVASS_POSITION,APPEND_POSITION,COMMIT_POSITION'
+        systemProperty 'aeron.event.archive.log', 'all'
+        systemProperty 'aeron.event.log', 'admin'
+        systemProperty 'aeron.debug.timeout', '3600s'
+        systemProperty 'aeron.event.log.reader.classname', 'io.aeron.agent.CollectingEventLogReaderAgent'
+        systemProperty 'aeron.fallback.logger', 'no_op'
     }
 
     shadowJar {
@@ -930,12 +1224,13 @@ project(':aeron-test-support') {
     apply plugin: 'signing'
 
     dependencies {
-        api project(':aeron-client')
-        api project(':aeron-cluster')
-        api project(':aeron-samples')
-        api "org.junit.jupiter:junit-jupiter-api:${junitVersion}"
-        api "org.junit.jupiter:junit-jupiter-params:${junitVersion}"
-        implementation "org.mockito:mockito-core:${mockitoVersion}"
+        implementation project(':aeron-client')
+        implementation project(':aeron-cluster')
+        implementation project(':aeron-samples')
+        implementation platform(libs.junit.bom)
+        implementation "org.junit.jupiter:junit-jupiter-api"
+        implementation "org.junit.jupiter:junit-jupiter-params"
+        implementation libs.mockito
     }
 
     java {
@@ -963,6 +1258,9 @@ project(':aeron-test-support') {
     }
 
     signing {
+        if (signingKey != null) {
+            useInMemoryPgpKeys(signingKey, signingPassword)
+        }
         sign publishing.publications.aeronTestSupport
     }
 }
@@ -970,7 +1268,7 @@ project(':aeron-test-support') {
 project(':aeron-all') {
     apply plugin: 'maven-publish'
     apply plugin: 'signing'
-    apply plugin: 'com.github.johnrengelman.shadow'
+    apply plugin: 'com.gradleup.shadow'
 
     def aeronClientProject = project(':aeron-client')
     def aeronDriverProject = project(':aeron-driver')
@@ -981,7 +1279,6 @@ project(':aeron-all') {
     dependencies {
         implementation aeronClusterProject
         implementation aeronSamplesProject
-        implementation "org.hdrhistogram:HdrHistogram:${hdrHistogramVersion}"
     }
 
     shadowJar {
@@ -998,6 +1295,12 @@ project(':aeron-all') {
 
     jar.finalizedBy shadowJar
 
+    tasks.register('dedupJar', io.aeron.build.DeduplicateTask) {
+        source shadowJar.outputs.files.singleFile
+    }
+
+    shadowJar.finalizedBy dedupJar
+
     tasks.register('sourcesJar', Jar) {
         dependsOn ':aeron-archive:generateCodecs', ':aeron-cluster:generateCodecs'
         archiveClassifier.set('sources')
@@ -1012,6 +1315,7 @@ project(':aeron-all') {
     }
 
     javadoc {
+        source += project(':aeron-annotations').sourceSets.main.allJava
         source += aeronClientProject.sourceSets.main.allJava
         source += aeronDriverProject.sourceSets.main.allJava
         source += aeronArchiveProject.sourceSets.main.allJava
@@ -1050,12 +1354,15 @@ project(':aeron-all') {
     }
 
     signing {
+        if (signingKey != null) {
+            useInMemoryPgpKeys(signingKey, signingPassword)
+        }
         sign publishing.publications.aeronAll
     }
 }
 
 tasks.register('testReport', TestReport) {
-    destinationDirectory = file("${buildDir}/reports/allTests")
+    destinationDirectory = file("${layout.buildDirectory.get()}/reports/allTests")
     // Include the results from the `test` task in all sub-projects
     testResults.setFrom(subprojects*.test)
 }
@@ -1063,10 +1370,13 @@ tasks.register('testReport', TestReport) {
 tasks.register('copyTestLogs', Copy) {
     from '.'
     include '**/build/test-output/**'
+    include '**/*.hprof'
+    include '**/*.mdmp'
+    include '/var/coredump/core*'
     include '**/*.log'
     include '**/*.tlog'
     include '**/build/reports/tests/**'
-    include '**/build/test-results/*/TEST*.xml'
+    include '**/build/test-results/**/*'
     include 'LICENSE'
     exclude 'build'
     into 'build/test_logs'
@@ -1095,6 +1405,6 @@ tasks.named('dependencyUpdates').configure {
 }
 
 wrapper {
-    gradleVersion = '8.1.1'
+    gradleVersion = libs.versions.gradle.get()
     distributionType = 'ALL'
 }

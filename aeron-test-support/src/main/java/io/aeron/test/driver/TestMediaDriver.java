@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -51,7 +51,7 @@ public interface TestMediaDriver extends AutoCloseable
             CTestMediaDriver.launch(context, true, driverOutputConsumer) : JavaTestMediaDriver.launch(context);
     }
 
-    static void enableLossGenerationOnReceive(
+    static void enableRandomLoss(
         final MediaDriver.Context context,
         final double rate,
         final long seed,
@@ -60,12 +60,57 @@ public interface TestMediaDriver extends AutoCloseable
     {
         if (shouldRunCMediaDriver())
         {
-            CTestMediaDriver.enableLossGenerationOnReceive(context, rate, seed, loseDataMessages, loseControlMessages);
+            CTestMediaDriver.enableRandomLossOnReceive(context, rate, seed, loseDataMessages, loseControlMessages);
         }
         else
         {
-            JavaTestMediaDriver.enableLossGenerationOnReceive(
+            JavaTestMediaDriver.enableRandomLossOnReceive(
                 context, rate, seed, loseDataMessages, loseControlMessages);
+        }
+    }
+
+    static void enableFixedLoss(
+        final MediaDriver.Context context,
+        final int termId,
+        final int termOffset,
+        final int length)
+    {
+        if (shouldRunCMediaDriver())
+        {
+            CTestMediaDriver.enableFixedLossOnReceive(context, termId, termOffset, length);
+        }
+        else
+        {
+            JavaTestMediaDriver.enableFixedLossOnReceive(context, termId, termOffset, length);
+        }
+    }
+
+    static void enableMultiGapLoss(
+        final MediaDriver.Context context,
+        final int termId,
+        final int gapRadix,
+        final int gapLength,
+        final int totalGaps)
+    {
+        if (shouldRunCMediaDriver())
+        {
+            CTestMediaDriver.enableMultiGapLossOnReceive(context, termId, gapRadix, gapLength, totalGaps);
+        }
+        else
+        {
+            JavaTestMediaDriver.enableMultiGapLossOnReceive(context, termId, gapRadix, gapLength, totalGaps);
+        }
+    }
+
+    static void dontCoalesceNaksOnReceiverByDefault(final MediaDriver.Context context)
+    {
+        if (shouldRunCMediaDriver())
+        {
+            CTestMediaDriver.dontCoalesceNaksOnReceiverByDefault(context);
+        }
+        else
+        {
+            JavaTestMediaDriver.dontCoalesceNaksOnReceiverByDefault(context);
         }
     }
 

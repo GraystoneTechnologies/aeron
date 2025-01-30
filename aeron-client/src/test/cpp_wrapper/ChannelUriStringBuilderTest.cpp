@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -172,3 +172,17 @@ TEST(ChannelUriStringBuilderTest, shouldGenerateRxTimestampOffset)
         "aeron:udp?endpoint=localhost:9999|media-rcv-ts-offset=reserved");
 }
 
+TEST(ChannelUriStringBuilderTest, shouldHandleMaxRetransmits)
+{
+    ChannelUriStringBuilder builder;
+
+    builder
+        .media(UDP_MEDIA)
+        .endpoint("224.10.9.8:777")
+        .maxResend(123);
+
+    const std::string uriString = builder.build();
+
+    std::shared_ptr<ChannelUri> channelUri = ChannelUri::parse(uriString);
+    ASSERT_NE(std::string::npos, channelUri->toString().find("max-resend=123"));
+}

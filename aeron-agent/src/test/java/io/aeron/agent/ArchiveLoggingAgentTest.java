@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,10 +15,12 @@
  */
 package io.aeron.agent;
 
+import io.aeron.ExclusivePublication;
 import io.aeron.archive.Archive;
 import io.aeron.archive.ArchiveThreadingMode;
 import io.aeron.archive.ArchivingMediaDriver;
 import io.aeron.archive.client.AeronArchive;
+import io.aeron.archive.status.RecordingPos;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
 import io.aeron.test.InterruptAfter;
@@ -28,31 +30,33 @@ import org.agrona.IoUtil;
 import org.agrona.MutableDirectBuffer;
 import org.agrona.concurrent.Agent;
 import org.agrona.concurrent.MessageHandler;
+import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.concurrent.status.CountersReader;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 
 import java.io.File;
 import java.nio.file.Paths;
-import java.util.EnumSet;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
+import java.util.concurrent.ThreadLocalRandom;
 
 import static io.aeron.agent.ArchiveEventCode.*;
 import static io.aeron.agent.EventConfiguration.EVENT_READER_FRAME_LIMIT;
 import static io.aeron.agent.EventConfiguration.EVENT_RING_BUFFER;
 import static java.util.Collections.synchronizedSet;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 @ExtendWith(InterruptingTestCallback.class)
-public class ArchiveLoggingAgentTest
+class ArchiveLoggingAgentTest
 {
-    private static final Set<ArchiveEventCode> WAIT_LIST = synchronizedSet(EnumSet.noneOf(ArchiveEventCode.class));
+    private static final Set<ArchiveEventCode> WAIT_LIST = synchronizedSet(new HashSet<>());
 
     private File testDir;
 
     @AfterEach
-    public void after()
+    void after()
     {
         AgentTests.stopLogging();
 
@@ -64,14 +68,16 @@ public class ArchiveLoggingAgentTest
 
     @Test
     @InterruptAfter(10)
-    public void logAll()
+    void logAll()
     {
-        testArchiveLogging("all", EnumSet.of(CMD_OUT_RESPONSE, CMD_IN_AUTH_CONNECT, CMD_IN_KEEP_ALIVE));
+        testArchiveLogging("all", EnumSet.of(
+            CMD_OUT_RESPONSE, CMD_IN_AUTH_CONNECT, CMD_IN_KEEP_ALIVE, CMD_IN_START_RECORDING,
+            CMD_IN_FIND_LAST_MATCHING_RECORD, CMD_IN_MAX_RECORDED_POSITION, CMD_IN_STOP_RECORDING));
     }
 
     @Test
     @InterruptAfter(10)
-    public void logControlSessionDemuxerOnFragment()
+    void logControlSessionAdapterOnFragment()
     {
         testArchiveLogging(CMD_IN_KEEP_ALIVE.name() + "," + CMD_IN_AUTH_CONNECT.id(),
             EnumSet.of(CMD_IN_AUTH_CONNECT, CMD_IN_KEEP_ALIVE));
@@ -79,7 +85,7 @@ public class ArchiveLoggingAgentTest
 
     @Test
     @InterruptAfter(10)
-    public void logControlResponseProxySendResponseHook()
+    void logControlResponseProxySendResponseHook()
     {
         testArchiveLogging(CMD_OUT_RESPONSE.name(), EnumSet.of(CMD_OUT_RESPONSE));
     }
@@ -112,12 +118,35 @@ public class ArchiveLoggingAgentTest
             .recordingEventsChannel(aeronArchiveContext.recordingEventsChannel())
             .threadingMode(ArchiveThreadingMode.SHARED);
 
-        try (ArchivingMediaDriver ignore1 = ArchivingMediaDriver.launch(mediaDriverCtx, archiveCtx))
+        try (ArchivingMediaDriver ignore1 = ArchivingMediaDriver.launch(mediaDriverCtx, archiveCtx);
+            AeronArchive aeronArchive = AeronArchive.connect(aeronArchiveContext))
         {
-            try (AeronArchive ignore2 = AeronArchive.connect(aeronArchiveContext))
+            final String channel = "aeron:ipc?ssc=true";
+            final int streamId = 1000;
+            final ExclusivePublication publication = aeronArchive.addRecordedExclusivePublication(channel, streamId);
+
+            final UnsafeBuffer msg = new UnsafeBuffer(new byte[256]);
+            ThreadLocalRandom.current().nextBytes(msg.byteArray());
+            while (publication.offer(msg) < 0)
             {
-                Tests.await(WAIT_LIST::isEmpty);
+                Tests.yield();
             }
+
+            final CountersReader counters = aeronArchive.context().aeron().countersReader();
+            final int recordingCounterId =
+                Tests.awaitRecordingCounterId(counters, publication.sessionId(), aeronArchive.archiveId());
+            final long recordingId = RecordingPos.getRecordingId(counters, recordingCounterId);
+            assertNotEquals(RecordingPos.NULL_RECORDING_ID, recordingId);
+
+            assertEquals(
+                recordingId,
+                aeronArchive.findLastMatchingRecording(0, "aeron:ipc", streamId, publication.sessionId()));
+
+            Tests.await(() -> publication.position() == aeronArchive.getMaxRecordedPosition(recordingId));
+
+            aeronArchive.stopRecording(publication);
+
+            Tests.await(WAIT_LIST::isEmpty);
         }
     }
 

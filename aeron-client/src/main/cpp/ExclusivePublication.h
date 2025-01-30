@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -167,7 +167,7 @@ public:
     /**
      * Maximum length of a message payload that fits within a message fragment.
      *
-     * This is he MTU length minus the message fragment header length.
+     * This is the MTU length minus the message fragment header length.
      *
      * @return maximum message fragment payload length.
      */
@@ -497,6 +497,7 @@ public:
      * @return The new stream position, otherwise {@link #NOT_CONNECTED}, {@link #BACK_PRESSURED},
      * {@link #ADMIN_ACTION} or {@link #CLOSED}.
      */
+    // codeql[cpp/array-in-interface]
     std::int64_t offer(
         const concurrent::AtomicBuffer buffers[],
         std::size_t length,

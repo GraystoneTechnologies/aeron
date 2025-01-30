@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -108,8 +108,11 @@ typedef struct aeron_driver_name_resolver_stct
     aeron_position_t cache_size_counter;
     aeron_distinct_error_log_t *error_log;
 
-    aeron_driver_name_resolver_on_neighbor_change_func_t neighbor_added_func;
-    aeron_driver_name_resolver_on_neighbor_change_func_t neighbor_removed_func;
+    struct
+    {
+        aeron_driver_name_resolver_on_neighbor_change_func_t neighbor_added;
+        aeron_driver_name_resolver_on_neighbor_change_func_t neighbor_removed;
+    } log;
 
     struct sockaddr_storage received_address;
     uint8_t *aligned_buffer;
@@ -176,7 +179,6 @@ int aeron_driver_name_resolver_init(
     const char *bootstrap_neighbor)
 {
     aeron_driver_name_resolver_t *_driver_resolver = NULL;
-    char *local_hostname = NULL;
 
     if (aeron_alloc((void **)&_driver_resolver, sizeof(aeron_driver_name_resolver_t)) < 0)
     {
@@ -185,27 +187,9 @@ int aeron_driver_name_resolver_init(
     }
     _driver_resolver->saved_bootstrap_neighbor = NULL;
     _driver_resolver->bootstrap_neighbors = NULL;
-
     _driver_resolver->aligned_buffer = aeron_cache_line_align_buffer(_driver_resolver->buffer);
-
     _driver_resolver->name = name;
-    if (NULL == _driver_resolver->name)
-    {
-        if (aeron_alloc((void **)&local_hostname, AERON_MAX_HOSTNAME_LEN) < 0)
-        {
-            AERON_APPEND_ERR("Failed to allocate local_hostname for: %s", name);
-            goto error_cleanup;
-        }
-
-        if (gethostname(local_hostname, AERON_MAX_HOSTNAME_LEN) < 0)
-        {
-            AERON_SET_ERR(errno, "Failed to lookup: %s", local_hostname);
-            goto error_cleanup;
-        }
-
-        _driver_resolver->name = local_hostname;
-    }
-    _driver_resolver->name_length = strlen(_driver_resolver->name);
+    _driver_resolver->name_length = strlen(name);
 
     if (aeron_find_unicast_interface(
         AF_INET, interface_name, &_driver_resolver->local_socket_addr, &_driver_resolver->interface_index) < 0)
@@ -228,8 +212,8 @@ int aeron_driver_name_resolver_init(
         goto error_cleanup;
     }
 
-    _driver_resolver->neighbor_added_func = context->name_resolution_on_neighbor_added_func;
-    _driver_resolver->neighbor_removed_func = context->name_resolution_on_neighbor_removed_func;
+    _driver_resolver->log.neighbor_added = context->log.name_resolution_on_neighbor_added;
+    _driver_resolver->log.neighbor_removed = context->log.name_resolution_on_neighbor_removed;
 
     _driver_resolver->bootstrap_neighbor = bootstrap_neighbor;
     _driver_resolver->bootstrap_neighbors_length = 0;
@@ -288,22 +272,28 @@ int aeron_driver_name_resolver_init(
         goto error_cleanup;
     }
 
+
+    aeron_udp_channel_transport_params_t transport_params = {
+        context->socket_rcvbuf,
+        context->socket_sndbuf,
+        context->mtu_length,
+        _driver_resolver->interface_index,
+        0,
+        false,
+    };
+
     if (_driver_resolver->transport_bindings->init_func(
         &_driver_resolver->transport,
         &_driver_resolver->local_socket_addr,
         NULL, // Unicast only.
         NULL, // No connected
-        _driver_resolver->interface_index,
-        0,
-        context->socket_rcvbuf,
-        context->socket_sndbuf,
-        false,
+        &transport_params,
         context,
         AERON_UDP_CHANNEL_TRANSPORT_AFFINITY_CONDUCTOR) < 0)
     {
         AERON_APPEND_ERR(
             "resolver, name=%s interface_name=%s bootstrap_neighbor=%s",
-            name,
+            _driver_resolver->name,
             interface_name,
             bootstrap_neighbor);
         goto error_cleanup;
@@ -384,7 +374,6 @@ error_cleanup:
     aeron_name_resolver_cache_close(&_driver_resolver->cache);
     aeron_free(_driver_resolver->saved_bootstrap_neighbor);
     aeron_free(_driver_resolver->bootstrap_neighbors);
-    aeron_free((void *)local_hostname);
     aeron_free((void *)_driver_resolver);
 
     return -1;
@@ -518,7 +507,7 @@ static int aeron_driver_name_resolver_add_neighbor(
             return -1;
         }
 
-        resolver->neighbor_added_func(&new_neighbor->socket_addr);
+        resolver->log.neighbor_added(&new_neighbor->socket_addr);
 
         memcpy(&new_neighbor->cache_addr, cache_addr, sizeof(new_neighbor->cache_addr));
         new_neighbor->time_of_last_activity_ms = time_of_last_activity_ms;
@@ -978,7 +967,7 @@ static int aeron_driver_name_resolver_timeout_neighbors(aeron_driver_name_resolv
 
         if ((entry->time_of_last_activity_ms + resolver->neighbor_timeout_ms) <= now_ms)
         {
-            resolver->neighbor_removed_func(&entry->socket_addr);
+            resolver->log.neighbor_removed(&entry->socket_addr);
 
             aeron_array_fast_unordered_remove(
                 (uint8_t *)resolver->neighbors.array, sizeof(aeron_driver_name_resolver_neighbor_t), i, last_index);

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ class NetworkSubscriptionLink extends SubscriptionLink
 {
     private final boolean isReliable;
     private final boolean isRejoin;
+    private final boolean isResponse;
     private final ReceiveChannelEndpoint channelEndpoint;
 
     NetworkSubscriptionLink(
@@ -35,6 +36,7 @@ class NetworkSubscriptionLink extends SubscriptionLink
 
         this.isReliable = params.isReliable;
         this.isRejoin = params.isRejoin;
+        this.isResponse = params.isResponse;
         this.channelEndpoint = channelEndpoint;
     }
 
@@ -46,6 +48,11 @@ class NetworkSubscriptionLink extends SubscriptionLink
     boolean isRejoin()
     {
         return isRejoin;
+    }
+
+    boolean isResponse()
+    {
+        return isResponse;
     }
 
     ReceiveChannelEndpoint channelEndpoint()
@@ -62,12 +69,10 @@ class NetworkSubscriptionLink extends SubscriptionLink
 
     boolean matches(final ReceiveChannelEndpoint channelEndpoint, final int streamId, final SubscriptionParams params)
     {
-        final boolean isExactWildcardOrSessionIdMatch =
-            hasSessionId == params.hasSessionId && (!hasSessionId || this.sessionId == params.sessionId);
-
         return channelEndpoint == this.channelEndpoint &&
             streamId == this.streamId &&
-            isExactWildcardOrSessionIdMatch;
+            hasSessionId == params.hasSessionId &&
+            isWildcardOrSessionIdMatch(params.sessionId);
     }
 
     boolean matches(final ReceiveChannelEndpoint channelEndpoint, final int streamId, final int sessionId)

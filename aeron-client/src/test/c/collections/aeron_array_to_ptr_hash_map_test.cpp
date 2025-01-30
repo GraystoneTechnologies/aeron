@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -72,6 +72,18 @@ TEST_F(ArrToPtrHashMapTest, shouldReplaceExistingValueForTheSameKey)
     EXPECT_EQ(aeron_array_to_ptr_hash_map_put(&m_map, key, 3, (void *)&new_value), 0);
     EXPECT_EQ(aeron_array_to_ptr_hash_map_get(&m_map, key, 3), &new_value);
     EXPECT_EQ(m_map.size, 1u);
+}
+
+TEST_F(ArrToPtrHashMapTest, shouldReplaceKeyWhenReplacingValue)
+{
+    int key1 = 100, key2 = 100;
+    int value = 42, new_value = 43;
+    ASSERT_EQ(aeron_array_to_ptr_hash_map_init(&m_map, 8, AERON_MAP_DEFAULT_LOAD_FACTOR), 0);
+
+    EXPECT_EQ(aeron_array_to_ptr_hash_map_put(&m_map, (uint8_t *)&key1, 4, (void *)&value), 0);
+    EXPECT_EQ(aeron_array_to_ptr_hash_map_put(&m_map, (uint8_t *)&key2, 4, (void *)&new_value), 0);
+    key1 = 200;
+    EXPECT_EQ(aeron_array_to_ptr_hash_map_get(&m_map, (uint8_t *)&key2, 4), &new_value);
 }
 
 TEST_F(ArrToPtrHashMapTest, shouldGrowWhenThresholdExceeded)

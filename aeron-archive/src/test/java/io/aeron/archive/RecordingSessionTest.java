@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -60,7 +60,7 @@ class RecordingSessionTest
     private static final int MTU_LENGTH = 1024;
     private static final long START_POSITION = TERM_OFFSET;
     private static final int INITIAL_TERM_ID = 0;
-    private static final ControlSession CONTROL_SESSION = null;
+    private static final ControlSession CONTROL_SESSION = mock(ControlSession.class);
 
     private final RecordingEventsProxy recordingEventsProxy = mock(RecordingEventsProxy.class);
     private final Counter mockPosition = mock(Counter.class);
@@ -116,6 +116,8 @@ class RecordingSessionTest
             .archiveDir(archiveDir)
             .epochClock(epochClock)
             .nanoClock(nanoClock);
+
+        when(CONTROL_SESSION.sessionId()).thenReturn(123L);
     }
 
     @AfterEach

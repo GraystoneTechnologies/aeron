@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package io.aeron;
 
 import io.aeron.logbuffer.LogBufferDescriptor;
 import org.agrona.AsciiEncoding;
+import org.agrona.Strings;
 import org.agrona.collections.ArrayUtil;
 import org.agrona.collections.Object2ObjectHashMap;
 
@@ -24,6 +25,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.BiConsumer;
 
 import static io.aeron.CommonContext.*;
 import static io.aeron.logbuffer.FrameDescriptor.FRAME_ALIGNMENT;
@@ -64,6 +66,11 @@ public final class ChannelUri
      * Invalid tag value returned when calling {@link #getTag(String)} and the channel is not tagged.
      */
     public static final long INVALID_TAG = Aeron.NULL_VALUE;
+
+    /**
+     * Max length in characters for the URI string.
+     */
+    public static final int MAX_URI_LENGTH = 4095;
 
     private static final int CHANNEL_TAG_INDEX = 0;
     private static final int ENTITY_TAG_INDEX = 1;
@@ -313,7 +320,7 @@ public final class ChannelUri
 
         sb.append(AERON_PREFIX).append(media);
 
-        if (params.size() > 0)
+        if (!params.isEmpty())
         {
             sb.append('?');
 
@@ -355,15 +362,22 @@ public final class ChannelUri
     /**
      * Parse a {@link CharSequence} which contains an Aeron URI.
      *
-     * @param cs to be parsed.
+     * @param uri to be parsed.
      * @return a new {@link ChannelUri} representing the URI string.
      */
     @SuppressWarnings("MethodLength")
-    public static ChannelUri parse(final CharSequence cs)
+    public static ChannelUri parse(final CharSequence uri)
     {
+        final int length = uri.length();
+        if (length > MAX_URI_LENGTH)
+        {
+            throw new IllegalArgumentException("URI length (" + length + ") exceeds max supported length (" +
+                MAX_URI_LENGTH + "): " + uri.subSequence(0, MAX_URI_LENGTH));
+        }
+
         int position = 0;
         final String prefix;
-        if (startsWith(cs, 0, SPY_PREFIX))
+        if (startsWith(uri, 0, SPY_PREFIX))
         {
             prefix = SPY_QUALIFIER;
             position = SPY_PREFIX.length();
@@ -373,9 +387,9 @@ public final class ChannelUri
             prefix = "";
         }
 
-        if (!startsWith(cs, position, AERON_PREFIX))
+        if (!startsWith(uri, position, AERON_PREFIX))
         {
-            throw new IllegalArgumentException("Aeron URIs must start with 'aeron:', found: " + cs);
+            throw new IllegalArgumentException("Aeron URIs must start with 'aeron:', found: " + uri);
         }
         else
         {
@@ -388,9 +402,9 @@ public final class ChannelUri
         String key = null;
 
         State state = State.MEDIA;
-        for (int i = position, length = cs.length(); i < length; i++)
+        for (int i = position; i < length; i++)
         {
-            final char c = cs.charAt(i);
+            final char c = uri.charAt(i);
             switch (state)
             {
                 case MEDIA:
@@ -406,7 +420,7 @@ public final class ChannelUri
                         case '|':
                         case '=':
                             throw new IllegalArgumentException(
-                                "encountered '" + c + "' within media definition at index " + i + " in " + cs);
+                                "encountered '" + c + "' within media definition at index " + i + " in " + uri);
 
                         default:
                             builder.append(c);
@@ -416,9 +430,9 @@ public final class ChannelUri
                 case PARAMS_KEY:
                     if (c == '=')
                     {
-                        if (0 == builder.length())
+                        if (builder.isEmpty())
                         {
-                            throw new IllegalStateException("empty key not allowed at index " + i + " in " + cs);
+                            throw new IllegalStateException("empty key not allowed at index " + i + " in " + uri);
                         }
                         key = builder.toString();
                         builder.setLength(0);
@@ -428,7 +442,7 @@ public final class ChannelUri
                     {
                         if (c == '|')
                         {
-                            throw new IllegalStateException("invalid end of key at index " + i + " in " + cs);
+                            throw new IllegalStateException("invalid end of key at index " + i + " in " + uri);
                         }
                         builder.append(c);
                     }
@@ -448,7 +462,7 @@ public final class ChannelUri
                     break;
 
                 default:
-                    throw new IllegalStateException("unexpected state=" + state + " in " + cs);
+                    throw new IllegalStateException("unexpected state=" + state + " in " + uri);
             }
         }
 
@@ -464,7 +478,7 @@ public final class ChannelUri
                 break;
 
             default:
-                throw new IllegalStateException("no more input found, state=" + state + " in " + cs);
+                throw new IllegalStateException("no more input found, state=" + state + " in " + uri);
         }
 
         return new ChannelUri(prefix, media, params);
@@ -483,6 +497,27 @@ public final class ChannelUri
         channelUri.put(CommonContext.SESSION_ID_PARAM_NAME, Integer.toString(sessionId));
 
         return channelUri.toString();
+    }
+
+    /**
+     * Add alias to the uri if none exists.
+     *
+     * @param uri   to add alias to.
+     * @param alias to add to the uri.
+     * @return original uri if alias is empty or one is already defined, otherwise new uri with an alias.
+     */
+    public static String addAliasIfAbsent(final String uri, final String alias)
+    {
+        if (!Strings.isEmpty(alias))
+        {
+            final ChannelUri channelUri = ChannelUri.parse(uri);
+            if (!channelUri.containsKey(CommonContext.ALIAS_PARAM_NAME))
+            {
+                channelUri.put(CommonContext.ALIAS_PARAM_NAME, alias);
+                return channelUri.toString();
+            }
+        }
+        return uri;
     }
 
     /**
@@ -544,7 +579,7 @@ public final class ChannelUri
      *
      * @param resolvedEndpoint The endpoint to supply a resolved endpoint port.
      * @throws IllegalArgumentException if the supplied resolvedEndpoint does not have a port or the port is zero.
-     * @throws NullPointerException if the supplied resolvedEndpoint is null
+     * @throws NullPointerException     if the supplied resolvedEndpoint is null
      */
     public void replaceEndpointWildcardPort(final String resolvedEndpoint)
     {
@@ -571,6 +606,36 @@ public final class ChannelUri
         }
     }
 
+    /**
+     * Call consumer for each parameter defined in the URI.
+     *
+     * @param consumer to be invoked for each parameter.
+     */
+    public void forEachParameter(final BiConsumer<String, String> consumer)
+    {
+        params.forEach(consumer);
+    }
+
+    /**
+     * Determines if this channel has specified <code>control-mode=response</code>.
+     *
+     * @return true if this channel has specified <code>control-mode=response</code>.
+     */
+    public boolean hasControlModeResponse()
+    {
+        return CONTROL_MODE_RESPONSE.equals(get(MDC_CONTROL_MODE_PARAM_NAME));
+    }
+
+    /**
+     * Determines if the supplied channel has specified <code>control-mode=response</code>.
+     *
+     * @param channelUri to check if the control mode is response
+     * @return true if the supplied channel has specified <code>control-mode=response</code>.
+     */
+    public static boolean isControlModeResponse(final String channelUri)
+    {
+        return parse(channelUri).hasControlModeResponse();
+    }
 
     private static void validateMedia(final String media)
     {

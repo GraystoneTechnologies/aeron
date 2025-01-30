@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,11 +15,14 @@
  */
 package io.aeron;
 
+import io.aeron.config.Config;
+import io.aeron.config.DefaultType;
 import io.aeron.exceptions.AeronException;
 import io.aeron.exceptions.ConcurrentConcludeException;
 import io.aeron.exceptions.ConfigurationException;
 import io.aeron.exceptions.DriverTimeoutException;
 import io.aeron.logbuffer.FragmentHandler;
+import io.aeron.version.Versioned;
 import org.agrona.*;
 import org.agrona.concurrent.*;
 import org.agrona.concurrent.broadcast.BroadcastReceiver;
@@ -31,20 +34,25 @@ import org.agrona.concurrent.status.CountersReader;
 import java.io.File;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.AccessDeniedException;
+import java.nio.file.FileSystemException;
 import java.nio.file.NoSuchFileException;
+import java.util.Objects;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
+import static io.aeron.Aeron.Configuration.MAX_CLIENT_NAME_LENGTH;
 import static java.nio.channels.FileChannel.MapMode.READ_WRITE;
 import static java.nio.file.StandardOpenOption.READ;
 import static java.nio.file.StandardOpenOption.WRITE;
-import static java.util.concurrent.atomic.AtomicIntegerFieldUpdater.newUpdater;
 import static org.agrona.SystemUtil.getDurationInNanos;
+import static org.agrona.SystemUtil.getProperty;
 
 /**
  * Aeron entry point for communicating to the Media Driver for creating {@link Publication}s and {@link Subscription}s.
@@ -56,6 +64,7 @@ import static org.agrona.SystemUtil.getDurationInNanos;
  * occurs then the process will face the wrath of {@link System#exit(int)}.
  * See {@link Aeron.Configuration#DEFAULT_ERROR_HANDLER}.
  */
+@Versioned
 public class Aeron implements AutoCloseable
 {
     /**
@@ -63,12 +72,20 @@ public class Aeron implements AutoCloseable
      */
     public static final int NULL_VALUE = -1;
 
-    /**
-     * Using an integer because there is no support for boolean. 1 is closed, 0 is not closed.
-     */
-    private static final AtomicIntegerFieldUpdater<Aeron> IS_CLOSED_UPDATER = newUpdater(Aeron.class, "isClosed");
+    private static final VarHandle IS_CLOSED_VH;
+    static
+    {
+        try
+        {
+            IS_CLOSED_VH = MethodHandles.lookup().findVarHandle(Aeron.class, "isClosed", boolean.class);
+        }
+        catch (final ReflectiveOperationException ex)
+        {
+            throw new ExceptionInInitializerError(ex);
+        }
+    }
 
-    private volatile int isClosed;
+    private volatile boolean isClosed;
     private final long clientId;
     private final ClientConductor conductor;
     private final RingBuffer commandBuffer;
@@ -178,7 +195,7 @@ public class Aeron implements AutoCloseable
      */
     public boolean isClosed()
     {
-        return 1 == isClosed;
+        return isClosed;
     }
 
     /**
@@ -248,7 +265,7 @@ public class Aeron implements AutoCloseable
      */
     public void close()
     {
-        if (IS_CLOSED_UPDATER.compareAndSet(this, 0, 1))
+        if (IS_CLOSED_VH.compareAndSet(this, false, true))
         {
             final ErrorHandler errorHandler = ctx.errorHandler();
             if (null != conductorRunner)
@@ -427,13 +444,26 @@ public class Aeron implements AutoCloseable
     }
 
     /**
+     * Asynchronously remove a {@link Subscription}.
+     *
+     * @param registrationId to be of the subscription removed.
+     * @see #asyncAddSubscription(String, int)
+     * @see #asyncAddSubscription(String, int, AvailableImageHandler, UnavailableImageHandler)
+     */
+    public void asyncRemoveSubscription(final long registrationId)
+    {
+        conductor.removeSubscription(registrationId);
+    }
+
+    /**
      * Get a {@link Subscription} for subscribing to messages from publishers.
      *
      * @param registrationId returned from
      *                       {@link #asyncAddSubscription(String, int, AvailableImageHandler, UnavailableImageHandler)}
-     *                       or  {@link #asyncAddSubscription(String, int)}
-     * @return a new {@link ConcurrentPublication} when available otherwise null.
-     * @see #asyncAddPublication(String, int)
+     *                       or {@link #asyncAddSubscription(String, int)}
+     * @return a new {@link Subscription} when available otherwise null.
+     * @see #asyncAddSubscription(String, int)
+     * @see #asyncAddSubscription(String, int, AvailableImageHandler, UnavailableImageHandler)
      */
     public Subscription getSubscription(final long registrationId)
     {
@@ -452,7 +482,7 @@ public class Aeron implements AutoCloseable
      */
     public long nextCorrelationId()
     {
-        if (1 == isClosed)
+        if (isClosed)
         {
             throw new AeronException("client is closed");
         }
@@ -467,7 +497,7 @@ public class Aeron implements AutoCloseable
      */
     public CountersReader countersReader()
     {
-        if (1 == isClosed)
+        if (isClosed)
         {
             throw new AeronException("client is closed");
         }
@@ -515,6 +545,61 @@ public class Aeron implements AutoCloseable
     public Counter addCounter(final int typeId, final String label)
     {
         return conductor.addCounter(typeId, label);
+    }
+
+
+    /**
+     * Allocates or returns an existing static counter instance using specified {@code typeId} and
+     * {@code registrationId} pair. Such counter cannot be deleted and its lifecycle is decoupled from this
+     * {@link Aeron} instance, i.e. won't be closed when this instance is closed or times out.
+     * <p>
+     * <em><strong>Note:</strong> calling {@link Counter#close()} will only close the counter instance itself but will
+     * not free the counter in the CnC file.</em>
+     *
+     * @param typeId         for the counter.
+     * @param keyBuffer      containing the optional key for the counter.
+     * @param keyOffset      within the keyBuffer at which the key begins.
+     * @param keyLength      of the key in the keyBuffer.
+     * @param labelBuffer    containing the mandatory label for the counter. The label should not be length prefixed.
+     * @param labelOffset    within the labelBuffer at which the label begins.
+     * @param labelLength    of the label in the labelBuffer.
+     * @param registrationId that uniquely identifies the static counter for a given {@code typeId}.
+     * @return the static counter instance.
+     * @see org.agrona.concurrent.status.CountersManager#allocate(int, DirectBuffer, int, int, DirectBuffer, int, int)
+     * @since 1.45.0
+     */
+    public Counter addStaticCounter(
+        final int typeId,
+        final DirectBuffer keyBuffer,
+        final int keyOffset,
+        final int keyLength,
+        final DirectBuffer labelBuffer,
+        final int labelOffset,
+        final int labelLength,
+        final long registrationId)
+    {
+        return conductor.addStaticCounter(
+            typeId, keyBuffer, keyOffset, keyLength, labelBuffer, labelOffset, labelLength, registrationId);
+    }
+
+    /**
+     * Allocates or returns an existing static counter instance using specified {@code typeId} and
+     * {@code registrationId} pair. Such counter cannot be deleted and its lifecycle is decoupled from this
+     * {@link Aeron} instance, i.e. won't be closed when this instance is closed or times out.
+     * <p>
+     * <em><strong>Note:</strong> calling {@link Counter#close()} will only close the counter instance itself but will
+     * not free the counter in the CnC file.</em>
+     *
+     * @param typeId         for the counter.
+     * @param label          for the counter. It should be US-ASCII.
+     * @param registrationId that uniquely identifies the static counter for a given {@code typeId}.
+     * @return the static counter.
+     * @see org.agrona.concurrent.status.CountersManager#allocate(String, int)
+     * @since 1.45.0
+     */
+    public Counter addStaticCounter(final int typeId, final String label, final long registrationId)
+    {
+        return conductor.addStaticCounter(typeId, label, registrationId);
     }
 
     /**
@@ -638,7 +723,7 @@ public class Aeron implements AutoCloseable
      */
     void internalClose()
     {
-        isClosed = 1;
+        isClosed = true;
     }
 
     /**
@@ -649,7 +734,7 @@ public class Aeron implements AutoCloseable
         /**
          * Duration in milliseconds for which the client conductor will sleep between duty cycles.
          */
-        static final long IDLE_SLEEP_MS = 16;
+        static final long IDLE_SLEEP_DEFAULT_MS = 16;
 
         /**
          * Duration in milliseconds for which the client will sleep when awaiting a response from the driver.
@@ -657,9 +742,16 @@ public class Aeron implements AutoCloseable
         static final long AWAITING_IDLE_SLEEP_MS = 1;
 
         /**
-         * Duration in nanoseconds for which the client conductor will sleep between duty cycles.
+         * Duration to sleep when idle.
          */
-        static final long IDLE_SLEEP_NS = TimeUnit.MILLISECONDS.toNanos(IDLE_SLEEP_MS);
+        @Config(expectedCDefaultFieldName = "AERON_CONTEXT_IDLE_SLEEP_DURATION_NS_DEFAULT")
+        public static final String IDLE_SLEEP_DURATION_PROP_NAME = "aeron.client.idle.sleep.duration";
+
+        /**
+         * Duration in nanoseconds for which the client conductor will sleep between work cycles when idle.
+         */
+        @Config(id = "IDLE_SLEEP_DURATION", defaultType = DefaultType.LONG, defaultLong = 16_000_000)
+        static final long IDLE_SLEEP_DEFAULT_NS = TimeUnit.MILLISECONDS.toNanos(IDLE_SLEEP_DEFAULT_MS);
 
         /**
          * Default interval between sending keepalive control messages to the driver.
@@ -670,11 +762,13 @@ public class Aeron implements AutoCloseable
          * Duration to wait while lingering an entity such as an {@link Image} before deleting underlying resources
          * such as memory mapped files.
          */
+        @Config(expectedCDefaultFieldName = "AERON_CONTEXT_RESOURCE_LINGER_DURATION_NS_DEFAULT")
         public static final String RESOURCE_LINGER_DURATION_PROP_NAME = "aeron.client.resource.linger.duration";
 
         /**
          * Default duration a resource should linger before deletion.
          */
+        @Config(defaultType = DefaultType.LONG, defaultLong = 3_000_000_000L)
         public static final long RESOURCE_LINGER_DURATION_DEFAULT_NS = TimeUnit.SECONDS.toNanos(3);
 
         /**
@@ -682,11 +776,13 @@ public class Aeron implements AutoCloseable
          * This value can be set to a few seconds if the application is likely to experience CPU starvation or
          * long GC pauses.
          */
+        @Config(existsInC = false)
         public static final String CLOSE_LINGER_DURATION_PROP_NAME = "aeron.client.close.linger.duration";
 
         /**
          * Default duration to linger on close so that publishers subscribers have time to notice closed resources.
          */
+        @Config
         public static final long CLOSE_LINGER_DURATION_DEFAULT_NS = 0;
 
         /**
@@ -695,12 +791,25 @@ public class Aeron implements AutoCloseable
          * Pre-touching files can result in it taking longer for resources to become available in
          * return for avoiding later pauses due to page faults.
          */
+        @Config(
+            expectedCEnvVarFieldName = "AERON_CLIENT_PRE_TOUCH_MAPPED_MEMORY_ENV_VAR",
+            expectedCEnvVar = "AERON_CLIENT_PRE_TOUCH_MAPPED_MEMORY",
+            expectedCDefaultFieldName = "AERON_CONTEXT_PRE_TOUCH_MAPPED_MEMORY_DEFAULT")
         public static final String PRE_TOUCH_MAPPED_MEMORY_PROP_NAME = "aeron.pre.touch.mapped.memory";
 
         /**
          * Default for if a memory-mapped filed should be pre-touched to fault it into a process.
          */
+        @Config
         public static final boolean PRE_TOUCH_MAPPED_MEMORY_DEFAULT = false;
+
+        /**
+         * System property to name Aeron client. Default to empty string.
+         *
+         * @since 1.44.0
+         */
+        @Config(defaultType = DefaultType.STRING, defaultString = "", skipCDefaultValidation = true)
+        public static final String CLIENT_NAME_PROP_NAME = "aeron.client.name";
 
         /**
          * The Default handler for Aeron runtime exceptions.
@@ -732,12 +841,25 @@ public class Aeron implements AutoCloseable
             };
 
         /**
+         * Duration in nanoseconds for which the client conductor will sleep between work cycles when idle.
+         *
+         * @return duration in nanoseconds to wait when idle in client conductor.
+         * @see #IDLE_SLEEP_DURATION_PROP_NAME
+         */
+        @Config
+        public static long idleSleepDurationNs()
+        {
+            return getDurationInNanos(IDLE_SLEEP_DURATION_PROP_NAME, IDLE_SLEEP_DEFAULT_NS);
+        }
+
+        /**
          * Duration to wait while lingering an entity such as an {@link Image} before deleting underlying resources
          * such as memory mapped files.
          *
          * @return duration in nanoseconds to wait before deleting an expired resource.
          * @see #RESOURCE_LINGER_DURATION_PROP_NAME
          */
+        @Config
         public static long resourceLingerDurationNs()
         {
             return getDurationInNanos(RESOURCE_LINGER_DURATION_PROP_NAME, RESOURCE_LINGER_DURATION_DEFAULT_NS);
@@ -750,6 +872,7 @@ public class Aeron implements AutoCloseable
          * @return duration in nanoseconds to wait before deleting an expired resource.
          * @see #RESOURCE_LINGER_DURATION_PROP_NAME
          */
+        @Config
         public static long closeLingerDurationNs()
         {
             return getDurationInNanos(CLOSE_LINGER_DURATION_PROP_NAME, CLOSE_LINGER_DURATION_DEFAULT_NS);
@@ -761,6 +884,7 @@ public class Aeron implements AutoCloseable
          * @return true if memory mappings should be pre-touched, otherwise false.
          * @see #PRE_TOUCH_MAPPED_MEMORY_PROP_NAME
          */
+        @Config
         public static boolean preTouchMappedMemory()
         {
             final String value = System.getProperty(PRE_TOUCH_MAPPED_MEMORY_PROP_NAME);
@@ -771,6 +895,23 @@ public class Aeron implements AutoCloseable
 
             return PRE_TOUCH_MAPPED_MEMORY_DEFAULT;
         }
+
+        /**
+         * Get the configured client name.
+         *
+         * @return specified client name or empty string if not set.
+         * @see #CLIENT_NAME_PROP_NAME
+         */
+        @Config
+        public static String clientName()
+        {
+            return getProperty(CLIENT_NAME_PROP_NAME, "");
+        }
+
+        /**
+         * Limit to the number of characters allowed in the client name.
+         */
+        public static final int MAX_CLIENT_NAME_LENGTH = 100;
     }
 
     /**
@@ -789,6 +930,7 @@ public class Aeron implements AutoCloseable
     public static class Context extends CommonContext
     {
         private long clientId;
+        private String clientName = Configuration.clientName();
         private boolean useConductorAgentInvoker = false;
         private boolean preTouchMappedMemory = Configuration.preTouchMappedMemory();
         private AgentInvoker driverAgentInvoker;
@@ -809,9 +951,11 @@ public class Aeron implements AutoCloseable
         private UnavailableImageHandler unavailableImageHandler;
         private AvailableCounterHandler availableCounterHandler;
         private UnavailableCounterHandler unavailableCounterHandler;
+        private PublicationErrorFrameHandler publicationErrorFrameHandler = PublicationErrorFrameHandler.NO_OP;
         private Runnable closeHandler;
         private long keepAliveIntervalNs = Configuration.KEEPALIVE_INTERVAL_NS;
         private long interServiceTimeoutNs = 0;
+        private long idleSleepDurationNs = Configuration.idleSleepDurationNs();
         private long resourceLingerDurationNs = Configuration.resourceLingerDurationNs();
         private long closeLingerDurationNs = Configuration.closeLingerDurationNs();
 
@@ -834,6 +978,7 @@ public class Aeron implements AutoCloseable
          *
          * @return this for a fluent API.
          */
+        @SuppressWarnings("checkstyle:methodlength")
         public Context conclude()
         {
             super.conclude();
@@ -849,6 +994,11 @@ public class Aeron implements AutoCloseable
                     "is using a NoOpLock");
             }
 
+            if (null != clientName && clientName.length() > MAX_CLIENT_NAME_LENGTH)
+            {
+                throw new AeronException("clientName length must <= " + MAX_CLIENT_NAME_LENGTH);
+            }
+
             if (null == epochClock)
             {
                 epochClock = SystemEpochClock.INSTANCE;
@@ -859,9 +1009,14 @@ public class Aeron implements AutoCloseable
                 nanoClock = SystemNanoClock.INSTANCE;
             }
 
+            if (idleSleepDurationNs < 0 || idleSleepDurationNs > TimeUnit.SECONDS.toNanos(1))
+            {
+                throw new ConfigurationException("Invalid idle sleep duration: " + idleSleepDurationNs + "ns");
+            }
+
             if (null == idleStrategy)
             {
-                idleStrategy = new SleepingMillisIdleStrategy(Configuration.IDLE_SLEEP_MS);
+                idleStrategy = new SleepingMillisIdleStrategy(TimeUnit.NANOSECONDS.toMillis(idleSleepDurationNs));
             }
 
             if (null == awaitingIdleStrategy)
@@ -890,7 +1045,8 @@ public class Aeron implements AutoCloseable
             if (null == toClientBuffer)
             {
                 toClientBuffer = new CopyBroadcastReceiver(new BroadcastReceiver(
-                    CncFileDescriptor.createToClientsBuffer(cncByteBuffer, cncMetaDataBuffer)));
+                    CncFileDescriptor.createToClientsBuffer(cncByteBuffer, cncMetaDataBuffer)),
+                    new ExpandableArrayBuffer(CopyBroadcastReceiver.SCRATCH_BUFFER_LENGTH));
             }
 
             if (countersMetaDataBuffer() == null)
@@ -936,6 +1092,32 @@ public class Aeron implements AutoCloseable
         public long clientId()
         {
             return clientId;
+        }
+
+        /**
+         * Sets the name used to identify this client among other clients connected to the media driver.
+         *
+         * @param clientName to use.
+         * @return this for a fluent API.
+         * @see Configuration#CLIENT_NAME_PROP_NAME
+         * @since 1.44.0
+         */
+        public Context clientName(final String clientName)
+        {
+            this.clientName = Strings.isEmpty(clientName) ? "" : clientName;
+            return this;
+        }
+
+        /**
+         * Returns the name of this client.
+         *
+         * @return name of this client or empty String if not configured.
+         * @see Configuration#CLIENT_NAME_PROP_NAME
+         * @since 1.44.0
+         */
+        public String clientName()
+        {
+            return clientName;
         }
 
         /**
@@ -1197,7 +1379,7 @@ public class Aeron implements AutoCloseable
          *
          * @return the factory for making log buffers.
          */
-        public LogBuffersFactory logBuffersFactory()
+        LogBuffersFactory logBuffersFactory()
         {
             return logBuffersFactory;
         }
@@ -1446,6 +1628,30 @@ public class Aeron implements AutoCloseable
         }
 
         /**
+         * Duration to sleep when conductor is idle.
+         *
+         * @param idleSleepDurationNs to sleep when conductor is idle.
+         * @return this for a fluent API.
+         * @see Configuration#IDLE_SLEEP_DURATION_PROP_NAME
+         */
+        public Context idleSleepDurationNs(final long idleSleepDurationNs)
+        {
+            this.idleSleepDurationNs = idleSleepDurationNs;
+            return this;
+        }
+
+        /**
+         * Duration to sleep when conductor is idle.
+         *
+         * @return duration in nanoseconds to sleep when conductor is idle.
+         * @see Configuration#IDLE_SLEEP_DURATION_PROP_NAME
+         */
+        public long idleSleepDurationNs()
+        {
+            return idleSleepDurationNs;
+        }
+
+        /**
          * Duration to wait while lingering an entity such as an {@link Image} before deleting underlying resources
          * such as memory mapped files.
          *
@@ -1535,6 +1741,33 @@ public class Aeron implements AutoCloseable
         }
 
         /**
+         * Set the handler to receive error frames that have been received by the local driver for publications added by
+         * this client.
+         *
+         * @param publicationErrorFrameHandler to be called back when an error frame is received.
+         * @return this for a fluent API.
+         * @since 1.47.0
+         */
+        public Context publicationErrorFrameHandler(
+            final PublicationErrorFrameHandler publicationErrorFrameHandler)
+        {
+            this.publicationErrorFrameHandler = Objects.requireNonNull(publicationErrorFrameHandler);
+            return this;
+        }
+
+        /**
+         * Get the handler to receive error frames that have been received by the local driver for publications added by
+         * this client.
+         *
+         * @return the {@link PublicationErrorFrameHandler} to call back on to.
+         * @since 1.47.0
+         */
+        public PublicationErrorFrameHandler publicationErrorFrameHandler()
+        {
+            return this.publicationErrorFrameHandler;
+        }
+
+        /**
          * Clean up all resources that the client uses to communicate with the Media Driver.
          */
         public void close()
@@ -1559,6 +1792,7 @@ public class Aeron implements AutoCloseable
                 "\n    countersValuesBuffer=" + countersValuesBuffer() +
                 "\n    driverTimeoutMs=" + driverTimeoutMs() +
                 "\n    clientId=" + clientId +
+                "\n    clientName=" + clientName +
                 "\n    useConductorAgentInvoker=" + useConductorAgentInvoker +
                 "\n    preTouchMappedMemory=" + preTouchMappedMemory +
                 "\n    driverAgentInvoker=" + driverAgentInvoker +
@@ -1674,7 +1908,7 @@ public class Aeron implements AutoCloseable
                         throw new DriverTimeoutException("CnC file not created: " + file.getAbsolutePath());
                     }
 
-                    sleep(Configuration.IDLE_SLEEP_MS);
+                    sleep(Configuration.IDLE_SLEEP_DEFAULT_MS);
                 }
 
                 try (FileChannel fileChannel = FileChannel.open(file.toPath(), READ, WRITE))
@@ -1684,25 +1918,44 @@ public class Aeron implements AutoCloseable
                     {
                         if (clock.time() > deadlineMs)
                         {
-                            throw new DriverTimeoutException("CnC file is created but not populated: " +
-                                file.getAbsolutePath());
+                            throw new DriverTimeoutException(
+                                "CnC file is created but not populated: " + file.getAbsolutePath());
                         }
 
                         fileChannel.close();
-                        sleep(Configuration.IDLE_SLEEP_MS);
+                        sleep(Configuration.IDLE_SLEEP_DEFAULT_MS);
                         continue;
                     }
 
                     return fileChannel.map(READ_WRITE, 0, fileSize);
                 }
-                catch (final NoSuchFileException ignore)
+                catch (final NoSuchFileException | AccessDeniedException ignore)
                 {
+                }
+                catch (final FileSystemException ex)
+                {
+                    // JDK exception translation does not handle `ERROR_SHARING_VIOLATION (32)` and returns
+                    // FileSystemException with the error "The process cannot access the file because it is being
+                    // used by another process.". Our current thinking is that matching by text is too brittle due
+                    // to error message being locale-sensitive on Windows. Therefore, we are going to retry on any
+                    // FileSystemException when running on Windows.
+                    if (SystemUtil.isWindows())
+                    {
+                        continue;
+                    }
+
+                    throw new AeronException(cncFileErrorMessage(file, ex), ex);
                 }
                 catch (final IOException ex)
                 {
-                    throw new AeronException("cannot open CnC file: " + file.getAbsolutePath(), ex);
+                    throw new AeronException(cncFileErrorMessage(file, ex), ex);
                 }
             }
+        }
+
+        private static String cncFileErrorMessage(final File file, final Exception ex)
+        {
+            return "cannot open CnC file: " + file.getAbsolutePath() + " reason=" + ex;
         }
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -112,7 +112,8 @@ public class DebugReceiveChannelEndpoint extends ReceiveChannelEndpoint
     {
         int result = 0;
 
-        if (!dataLossGenerator.shouldDropFrame(srcAddress, buffer, length))
+        if (!dataLossGenerator.shouldDropFrame(
+            srcAddress, buffer, header.streamId(), header.sessionId(), header.termId(), header.termOffset(), length))
         {
             result = super.onDataPacket(header, buffer, length, srcAddress, transportIndex);
         }

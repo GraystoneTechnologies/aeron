@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -51,6 +51,19 @@ TEST_F(BroadcastReceiverTest, shouldCalculateCapacityForBuffer)
 
     ASSERT_EQ(aeron_broadcast_receiver_init(&receiver, m_buffer.data(), m_buffer.size()), 0);
     EXPECT_EQ(receiver.capacity, BUFFER_SZ - AERON_BROADCAST_BUFFER_TRAILER_LENGTH);
+    EXPECT_EQ(receiver.scratch_buffer_capacity, AERON_BROADCAST_SCRATCH_BUFFER_LENGTH_DEFAULT);
+
+    EXPECT_EQ(0, aeron_broadcast_receiver_close(&receiver));
+}
+
+TEST_F(BroadcastReceiverTest, shouldFreeScratchBuffer)
+{
+    aeron_broadcast_receiver_t receiver;
+
+    ASSERT_EQ(aeron_broadcast_receiver_init(&receiver, m_buffer.data(), m_buffer.size()), 0);
+    ASSERT_EQ(aeron_broadcast_receiver_close(&receiver), 0);
+    EXPECT_EQ(receiver.scratch_buffer, nullptr);
+    EXPECT_EQ(receiver.scratch_buffer_capacity, 0);
 }
 
 TEST_F(BroadcastReceiverTest, shouldErrorForCapacityNotPowerOfTwo)
@@ -58,6 +71,9 @@ TEST_F(BroadcastReceiverTest, shouldErrorForCapacityNotPowerOfTwo)
     aeron_broadcast_receiver_t receiver;
 
     ASSERT_EQ(aeron_broadcast_receiver_init(&receiver, m_buffer.data(), m_buffer.size() - 1), -1);
+
+    EXPECT_EQ(receiver.scratch_buffer, nullptr);
+    EXPECT_EQ(receiver.scratch_buffer_capacity, 0);
 }
 
 TEST_F(BroadcastReceiverTest, shouldNotBeLappedBeforeReception)
@@ -67,6 +83,8 @@ TEST_F(BroadcastReceiverTest, shouldNotBeLappedBeforeReception)
     ASSERT_EQ(aeron_broadcast_receiver_init(&receiver, m_buffer.data(), m_buffer.size()), 0);
 
     EXPECT_EQ(receiver.lapped_count, 0);
+
+    EXPECT_EQ(0, aeron_broadcast_receiver_close(&receiver));
 }
 
 TEST_F(BroadcastReceiverTest, shouldNotReceiveFromEmptyBuffer)
@@ -78,6 +96,8 @@ TEST_F(BroadcastReceiverTest, shouldNotReceiveFromEmptyBuffer)
     receiver.descriptor->tail_counter = 0;
 
     EXPECT_FALSE(aeron_broadcast_receiver_receive_next(&receiver));
+
+    EXPECT_EQ(0, aeron_broadcast_receiver_close(&receiver));
 }
 
 TEST_F(BroadcastReceiverTest, shouldReceiveFirstMessageFromBuffer)
@@ -92,8 +112,8 @@ TEST_F(BroadcastReceiverTest, shouldReceiveFirstMessageFromBuffer)
 
     ASSERT_EQ(aeron_broadcast_receiver_init(&receiver, m_buffer.data(), m_buffer.size()), 0);
 
-    receiver.descriptor->tail_counter = tail;
-    receiver.descriptor->tail_intent_counter = tail;
+    receiver.descriptor->tail_counter = static_cast<int64_t>(tail);
+    receiver.descriptor->tail_intent_counter = static_cast<int64_t>(tail);
 
     auto *record = (aeron_broadcast_record_descriptor_t *)(m_buffer.data() + record_offset);
 
@@ -107,6 +127,8 @@ TEST_F(BroadcastReceiverTest, shouldReceiveFirstMessageFromBuffer)
     EXPECT_EQ(record->msg_type_id, MSG_TYPE_ID);
     EXPECT_EQ(receiver.record_offset, record_offset);
     EXPECT_TRUE(aeron_broadcast_receiver_validate(&receiver));
+
+    EXPECT_EQ(0, aeron_broadcast_receiver_close(&receiver));
 }
 
 TEST_F(BroadcastReceiverTest, shouldReceiveTwoMessagesFromBuffer)
@@ -122,8 +144,8 @@ TEST_F(BroadcastReceiverTest, shouldReceiveTwoMessagesFromBuffer)
 
     ASSERT_EQ(aeron_broadcast_receiver_init(&receiver, m_buffer.data(), m_buffer.size()), 0);
 
-    receiver.descriptor->tail_counter = tail;
-    receiver.descriptor->tail_intent_counter = tail;
+    receiver.descriptor->tail_counter = static_cast<int64_t>(tail);
+    receiver.descriptor->tail_intent_counter = static_cast<int64_t>(tail);
 
     auto *record = (aeron_broadcast_record_descriptor_t *)(m_buffer.data() + record_offset_one);
 
@@ -150,6 +172,8 @@ TEST_F(BroadcastReceiverTest, shouldReceiveTwoMessagesFromBuffer)
     EXPECT_EQ(record->msg_type_id, MSG_TYPE_ID);
     EXPECT_EQ(receiver.record_offset, record_offset_two);
     EXPECT_TRUE(aeron_broadcast_receiver_validate(&receiver));
+
+    EXPECT_EQ(0, aeron_broadcast_receiver_close(&receiver));
 }
 
 TEST_F(BroadcastReceiverTest, shouldLateJoinTransmission)
@@ -164,9 +188,9 @@ TEST_F(BroadcastReceiverTest, shouldLateJoinTransmission)
 
     ASSERT_EQ(aeron_broadcast_receiver_init(&receiver, m_buffer.data(), m_buffer.size()), 0);
 
-    receiver.descriptor->tail_counter = tail;
-    receiver.descriptor->tail_intent_counter = tail;
-    receiver.descriptor->latest_counter = latest_record;
+    receiver.descriptor->tail_counter = static_cast<int64_t>(tail);
+    receiver.descriptor->tail_intent_counter = static_cast<int64_t>(tail);
+    receiver.descriptor->latest_counter = static_cast<int64_t>(latest_record);
 
     auto *record = (aeron_broadcast_record_descriptor_t *)(m_buffer.data() + record_offset);
 
@@ -181,6 +205,8 @@ TEST_F(BroadcastReceiverTest, shouldLateJoinTransmission)
     EXPECT_EQ(receiver.record_offset, record_offset);
     EXPECT_TRUE(aeron_broadcast_receiver_validate(&receiver));
     EXPECT_GT(receiver.lapped_count, 0);
+
+    EXPECT_EQ(0, aeron_broadcast_receiver_close(&receiver));
 }
 
 TEST_F(BroadcastReceiverTest, shouldCopeWithPaddingRecordAndWrapOfBufferToNextRecord)
@@ -196,9 +222,9 @@ TEST_F(BroadcastReceiverTest, shouldCopeWithPaddingRecordAndWrapOfBufferToNextRe
 
     ASSERT_EQ(aeron_broadcast_receiver_init(&receiver, m_buffer.data(), m_buffer.size()), 0);
 
-    receiver.descriptor->tail_counter = catchup_tail;
-    receiver.descriptor->tail_intent_counter = catchup_tail;
-    receiver.descriptor->latest_counter = latest_record;
+    receiver.descriptor->tail_counter = static_cast<int64_t>(catchup_tail);
+    receiver.descriptor->tail_intent_counter = static_cast<int64_t>(catchup_tail);
+    receiver.descriptor->latest_counter = static_cast<int64_t>(latest_record);
 
     auto *record = (aeron_broadcast_record_descriptor_t *)(m_buffer.data() + catchup_offset);
 
@@ -218,14 +244,16 @@ TEST_F(BroadcastReceiverTest, shouldCopeWithPaddingRecordAndWrapOfBufferToNextRe
 
     EXPECT_TRUE(aeron_broadcast_receiver_receive_next(&receiver));
 
-    receiver.descriptor->tail_counter = post_padding_tail;
-    receiver.descriptor->tail_intent_counter = post_padding_tail;
+    receiver.descriptor->tail_counter = static_cast<int64_t>(post_padding_tail);
+    receiver.descriptor->tail_intent_counter = static_cast<int64_t>(post_padding_tail);
 
     EXPECT_TRUE(aeron_broadcast_receiver_receive_next(&receiver));
 
     EXPECT_EQ(record->msg_type_id, MSG_TYPE_ID);
     EXPECT_EQ(receiver.record_offset, record_offset);
     EXPECT_TRUE(aeron_broadcast_receiver_validate(&receiver));
+
+    EXPECT_EQ(0, aeron_broadcast_receiver_close(&receiver));
 }
 
 TEST_F(BroadcastReceiverTest, shouldDealWithRecordBecomingInvalidDueToOverwrite)
@@ -240,8 +268,8 @@ TEST_F(BroadcastReceiverTest, shouldDealWithRecordBecomingInvalidDueToOverwrite)
 
     ASSERT_EQ(aeron_broadcast_receiver_init(&receiver, m_buffer.data(), m_buffer.size()), 0);
 
-    receiver.descriptor->tail_counter = tail;
-    receiver.descriptor->tail_intent_counter = tail;
+    receiver.descriptor->tail_counter = static_cast<int64_t>(tail);
+    receiver.descriptor->tail_intent_counter = static_cast<int64_t>(tail);
 
     auto *record = (aeron_broadcast_record_descriptor_t *)(m_buffer.data() + record_offset);
 
@@ -255,7 +283,9 @@ TEST_F(BroadcastReceiverTest, shouldDealWithRecordBecomingInvalidDueToOverwrite)
     EXPECT_EQ(record->msg_type_id, MSG_TYPE_ID);
     EXPECT_EQ(receiver.record_offset, record_offset);
 
-    receiver.descriptor->tail_intent_counter = tail + (CAPACITY - aligned_record_length);
+    receiver.descriptor->tail_intent_counter = static_cast<int64_t>(tail + (CAPACITY - aligned_record_length));
 
     EXPECT_FALSE(aeron_broadcast_receiver_validate(&receiver));
+
+    EXPECT_EQ(0, aeron_broadcast_receiver_close(&receiver));
 }

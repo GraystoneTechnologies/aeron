@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,12 +15,16 @@
  */
 package io.aeron.archive;
 
+import io.aeron.Aeron;
 import io.aeron.CommonContext;
 import io.aeron.archive.client.ArchiveException;
 import io.aeron.archive.codecs.mark.MarkFileHeaderDecoder;
 import io.aeron.archive.codecs.mark.MarkFileHeaderEncoder;
+import io.aeron.archive.codecs.mark.MessageHeaderDecoder;
+import io.aeron.archive.codecs.mark.MessageHeaderEncoder;
 import io.aeron.archive.codecs.mark.VarAsciiEncodingEncoder;
 import org.agrona.CloseHelper;
+import org.agrona.IoUtil;
 import org.agrona.MarkFile;
 import org.agrona.SemanticVersion;
 import org.agrona.SystemUtil;
@@ -30,6 +34,7 @@ import org.agrona.concurrent.UnsafeBuffer;
 
 import java.io.File;
 import java.io.PrintStream;
+import java.nio.MappedByteBuffer;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.function.Consumer;
@@ -79,6 +84,8 @@ public class ArchiveMarkFile implements AutoCloseable
      */
     public static final String LINK_FILENAME = "archive-mark.lnk";
 
+    private static final int HEADER_OFFSET = MessageHeaderDecoder.ENCODED_LENGTH;
+
     private final MarkFileHeaderDecoder headerDecoder = new MarkFileHeaderDecoder();
     private final MarkFileHeaderEncoder headerEncoder = new MarkFileHeaderEncoder();
     private final MarkFile markFile;
@@ -95,7 +102,6 @@ public class ArchiveMarkFile implements AutoCloseable
             LIVENESS_TIMEOUT_MS);
 
         encode(ctx);
-        updateActivityTimestamp(ctx.epochClock().time());
     }
 
     ArchiveMarkFile(
@@ -105,33 +111,38 @@ public class ArchiveMarkFile implements AutoCloseable
         final EpochClock epochClock,
         final long timeoutMs)
     {
-        final boolean markFileExists = file.exists();
+        final MessageHeaderDecoder messageHeaderDecoder = new MessageHeaderDecoder();
 
-        markFile = new MarkFile(
-            file,
-            markFileExists,
-            MarkFileHeaderDecoder.versionEncodingOffset(),
-            MarkFileHeaderDecoder.activityTimestampEncodingOffset(),
-            totalFileLength,
-            timeoutMs,
-            epochClock,
-            ArchiveMarkFile::validateVersion,
-            null);
-
-        buffer = markFile.buffer();
-
-        errorBuffer = errorBufferLength > 0 ?
-            new UnsafeBuffer(buffer, HEADER_LENGTH, errorBufferLength) : new UnsafeBuffer(buffer, 0, 0);
-
-        headerEncoder.wrap(buffer, 0);
-        headerDecoder.wrap(buffer, 0, MarkFileHeaderDecoder.BLOCK_LENGTH, MarkFileHeaderDecoder.SCHEMA_VERSION);
-
-        if (markFileExists)
+        if (file.exists())
         {
+            final int headerOffset = headerOffset(file);
+
+            final MarkFile markFile = new MarkFile(
+                file,
+                true,
+                headerOffset + MarkFileHeaderDecoder.versionEncodingOffset(),
+                headerOffset + MarkFileHeaderDecoder.activityTimestampEncodingOffset(),
+                totalFileLength,
+                timeoutMs,
+                epochClock,
+                (version) -> validateVersion(file, version),
+                null);
+
+            final UnsafeBuffer buffer = markFile.buffer();
+
             if (buffer.capacity() != totalFileLength)
             {
                 throw new ArchiveException(
                     "ArchiveMarkFile capacity=" + buffer.capacity() + " < expectedCapacity=" + totalFileLength);
+            }
+
+            if (0 != headerOffset)
+            {
+                headerDecoder.wrapAndApplyHeader(buffer, 0, messageHeaderDecoder);
+            }
+            else
+            {
+                headerDecoder.wrap(buffer, 0, MarkFileHeaderDecoder.BLOCK_LENGTH, MarkFileHeaderDecoder.SCHEMA_VERSION);
             }
 
             final int existingErrorBufferLength = headerDecoder.errorBufferLength();
@@ -143,9 +154,51 @@ public class ArchiveMarkFile implements AutoCloseable
                 saveExistingErrors(file, existingErrorBuffer, CommonContext.fallbackLogger());
                 existingErrorBuffer.setMemory(0, existingErrorBufferLength, (byte)0);
             }
+
+            if (0 != headerOffset)
+            {
+                this.markFile = markFile;
+                this.buffer = buffer;
+            }
+            else
+            {
+                CloseHelper.close(markFile);
+                this.markFile = new MarkFile(
+                    file,
+                    false,
+                    HEADER_OFFSET + MarkFileHeaderDecoder.versionEncodingOffset(),
+                    HEADER_OFFSET + MarkFileHeaderDecoder.activityTimestampEncodingOffset(),
+                    totalFileLength,
+                    timeoutMs,
+                    epochClock,
+                    null,
+                    null);
+                this.buffer = markFile.buffer();
+                this.buffer.setMemory(0, this.buffer.capacity(), (byte)0);
+            }
+        }
+        else
+        {
+            markFile = new MarkFile(
+                file,
+                false,
+                HEADER_OFFSET + MarkFileHeaderDecoder.versionEncodingOffset(),
+                HEADER_OFFSET + MarkFileHeaderDecoder.activityTimestampEncodingOffset(),
+                totalFileLength,
+                timeoutMs,
+                epochClock,
+                null,
+                null);
+            buffer = markFile.buffer();
         }
 
-        headerEncoder.pid(SystemUtil.getPid());
+        headerEncoder
+            .wrapAndApplyHeader(buffer, 0, new MessageHeaderEncoder())
+            .pid(SystemUtil.getPid());
+
+        headerDecoder.wrapAndApplyHeader(buffer, 0, messageHeaderDecoder);
+
+        errorBuffer = new UnsafeBuffer(buffer, HEADER_LENGTH, errorBufferLength);
     }
 
     /**
@@ -169,7 +222,7 @@ public class ArchiveMarkFile implements AutoCloseable
             filename,
             epochClock,
             timeoutMs,
-            ArchiveMarkFile::validateVersion,
+            (version) -> validateVersion(new File(directory, filename), version),
             logger);
     }
 
@@ -191,21 +244,32 @@ public class ArchiveMarkFile implements AutoCloseable
         final IntConsumer versionCheck,
         final Consumer<String> logger)
     {
-        markFile = new MarkFile(
-            directory,
-            filename,
-            MarkFileHeaderDecoder.versionEncodingOffset(),
-            MarkFileHeaderDecoder.activityTimestampEncodingOffset(),
-            timeoutMs,
-            epochClock,
-            versionCheck,
-            logger);
+        this(openExistingMarkFile(directory, filename, epochClock, timeoutMs, versionCheck, logger));
+    }
+
+    ArchiveMarkFile(final MarkFile markFile)
+    {
+        this.markFile = markFile;
 
         buffer = markFile.buffer();
-        headerEncoder.wrap(buffer, 0);
-        headerDecoder.wrap(buffer, 0, MarkFileHeaderDecoder.BLOCK_LENGTH, MarkFileHeaderDecoder.SCHEMA_VERSION);
 
-        errorBuffer = headerDecoder.errorBufferLength() > 0 ?
+        if (0 != headerOffset(buffer))
+        {
+            headerEncoder.wrap(buffer, HEADER_OFFSET);
+            headerDecoder.wrapAndApplyHeader(buffer, 0, new MessageHeaderDecoder());
+        }
+        else
+        {
+            headerDecoder.wrap(buffer, 0, MarkFileHeaderDecoder.BLOCK_LENGTH, MarkFileHeaderDecoder.SCHEMA_VERSION);
+
+            // determine the actual sbe schema version used
+            final int actingBlockLength = 128;
+            final int actingVersion = headerDecoder.headerLength() > 0 ? 1 : 0;
+            headerDecoder.wrap(buffer, 0, actingBlockLength, actingVersion);
+            headerEncoder.wrap(buffer, 0);
+        }
+
+        errorBuffer = headerDecoder.headerLength() > 0 ?
             new UnsafeBuffer(buffer, headerDecoder.headerLength(), headerDecoder.errorBufferLength()) :
             new UnsafeBuffer(buffer, 0, 0);
     }
@@ -215,7 +279,25 @@ public class ArchiveMarkFile implements AutoCloseable
      */
     public void close()
     {
-        CloseHelper.close(markFile);
+        if (!markFile.isClosed())
+        {
+            CloseHelper.close(markFile);
+            final UnsafeBuffer emptyBuffer = new UnsafeBuffer();
+            headerEncoder.wrap(emptyBuffer, 0);
+            headerDecoder.wrap(emptyBuffer, 0, 0, 0);
+            errorBuffer.wrap(emptyBuffer, 0, 0);
+        }
+    }
+
+    /**
+     * Get archive id that is stored in the mark file.
+     *
+     * @return archive id or {@link io.aeron.Aeron#NULL_VALUE} if mark file does not contain this information.
+     * @since 1.47.0
+     */
+    public long archiveId()
+    {
+        return markFile.isClosed() ? Aeron.NULL_VALUE : headerDecoder.archiveId();
     }
 
     /**
@@ -223,7 +305,10 @@ public class ArchiveMarkFile implements AutoCloseable
      */
     public void signalReady()
     {
-        markFile.signalReady(SEMANTIC_VERSION);
+        if (!markFile.isClosed())
+        {
+            markFile.signalReady(SEMANTIC_VERSION);
+        }
     }
 
     /**
@@ -246,7 +331,7 @@ public class ArchiveMarkFile implements AutoCloseable
      */
     public long activityTimestampVolatile()
     {
-        return markFile.timestampVolatile();
+        return markFile.isClosed() ? Aeron.NULL_VALUE : markFile.timestampVolatile();
     }
 
     /**
@@ -300,7 +385,7 @@ public class ArchiveMarkFile implements AutoCloseable
      */
     public static boolean isArchiveMarkFile(final Path path, final BasicFileAttributes attributes)
     {
-        return path.getFileName().toString().equals(FILENAME);
+        return FILENAME.equals(path.getFileName().toString());
     }
 
     /**
@@ -314,9 +399,24 @@ public class ArchiveMarkFile implements AutoCloseable
         return markFile.parentDirectory();
     }
 
+    /**
+     * Forces any changes made to the mark file's content to be written to the storage device containing the mapped
+     * file.
+     *
+     * @since 1.44.0
+     */
+    public void force()
+    {
+        if (!markFile.isClosed())
+        {
+            markFile.mappedByteBuffer().force();
+        }
+    }
+
     private static int alignedTotalFileLength(final Archive.Context ctx)
     {
         final int headerLength =
+            HEADER_OFFSET +
             MarkFileHeaderEncoder.BLOCK_LENGTH +
             (4 * VarAsciiEncodingEncoder.lengthEncodingLength()) +
             (null != ctx.controlChannel() ? ctx.controlChannel().length() : 0) +
@@ -342,6 +442,11 @@ public class ArchiveMarkFile implements AutoCloseable
         return headerDecoder.aeronDirectory();
     }
 
+    UnsafeBuffer buffer()
+    {
+        return buffer;
+    }
+
     private void encode(final Archive.Context ctx)
     {
         headerEncoder
@@ -351,19 +456,64 @@ public class ArchiveMarkFile implements AutoCloseable
             .eventsStreamId(ctx.recordingEventsStreamId())
             .headerLength(HEADER_LENGTH)
             .errorBufferLength(ctx.errorBufferLength())
+            .archiveId(ctx.archiveId())
             .controlChannel(ctx.controlChannel())
             .localControlChannel(ctx.localControlChannel())
             .eventsChannel(ctx.recordingEventsChannel())
             .aeronDirectory(ctx.aeronDirectoryName());
     }
 
-    private static void validateVersion(final int version)
+    private static void validateVersion(final File markFile, final int version)
     {
         if (SemanticVersion.major(version) != MAJOR_VERSION)
         {
-            throw new IllegalArgumentException("mark file major version " + SemanticVersion.major(version) +
+            throw new IllegalArgumentException(
+                "mark file (" + markFile.getAbsolutePath() + ") major version " + SemanticVersion.major(version) +
                 " does not match software: " + MAJOR_VERSION);
         }
+    }
+
+    private static int headerOffset(final File file)
+    {
+        final MappedByteBuffer mappedByteBuffer = IoUtil.mapExistingFile(file, FILENAME);
+        try
+        {
+            final UnsafeBuffer unsafeBuffer =
+                new UnsafeBuffer(mappedByteBuffer, 0, HEADER_OFFSET);
+            return headerOffset(unsafeBuffer);
+        }
+        finally
+        {
+            IoUtil.unmap(mappedByteBuffer);
+        }
+    }
+
+    private static int headerOffset(final UnsafeBuffer headerBuffer)
+    {
+        final MessageHeaderDecoder decoder = new MessageHeaderDecoder();
+        decoder.wrap(headerBuffer, 0);
+        return MarkFileHeaderDecoder.TEMPLATE_ID == decoder.templateId() &&
+            MarkFileHeaderDecoder.SCHEMA_ID == decoder.schemaId() ? HEADER_OFFSET : 0;
+    }
+
+    private static MarkFile openExistingMarkFile(
+        final File directory,
+        final String filename,
+        final EpochClock epochClock,
+        final long timeoutMs,
+        final IntConsumer versionCheck,
+        final Consumer<String> logger)
+    {
+        final int headerOffset = headerOffset(new File(directory, filename));
+        return new MarkFile(
+            directory,
+            filename,
+            headerOffset + MarkFileHeaderDecoder.versionEncodingOffset(),
+            headerOffset + MarkFileHeaderDecoder.activityTimestampEncodingOffset(),
+            timeoutMs,
+            epochClock,
+            versionCheck,
+            logger);
     }
 
     /**

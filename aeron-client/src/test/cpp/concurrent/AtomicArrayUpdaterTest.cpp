@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,42 +36,51 @@ class AtomicArrayUpdaterTest : public testing::Test
 TEST(AtomicArrayUpdaterTest, shouldAddElements)
 {
     AtomicArrayUpdater<int64_t> arrayUpdater;
-    auto pair = arrayUpdater.load();
-    ASSERT_EQ(nullptr, pair.first);
-    ASSERT_EQ(0, pair.second);
 
-    pair = arrayUpdater.addElement(INT64_MAX);
-    ASSERT_EQ(nullptr, pair.first);
-    ASSERT_EQ(0, pair.second);
-    delete[] pair.first;
+    {
+        auto pair = arrayUpdater.load();
+        ASSERT_EQ(nullptr, pair.first);
+        ASSERT_EQ(0, pair.second);
+    }
 
-    pair = arrayUpdater.load();
-    ASSERT_EQ(1, pair.second);
-    ASSERT_EQ(INT64_MAX, pair.first[0]);
+    {
+        auto pair = arrayUpdater.addElement(INT64_MAX);
+        ASSERT_EQ(nullptr, pair.first);
+        ASSERT_EQ(0, pair.second);
+        delete[] pair.first;
+    }
 
-    pair = arrayUpdater.addElement(INT64_MIN);
-    ASSERT_EQ(1, pair.second);
-    ASSERT_EQ(INT64_MAX, pair.first[0]);
-    delete[] pair.first;
+    {
+        auto pair = arrayUpdater.load();
+        ASSERT_EQ(1, pair.second);
+        ASSERT_EQ(INT64_MAX, pair.first[0]);
+    }
 
-    pair = arrayUpdater.load();
-    ASSERT_EQ(2, pair.second);
-    ASSERT_EQ(INT64_MAX, pair.first[0]);
-    ASSERT_EQ(INT64_MIN, pair.first[1]);
-    delete[] pair.first;
+    {
+        auto pair = arrayUpdater.addElement(INT64_MIN);
+        ASSERT_EQ(1, pair.second);
+        ASSERT_EQ(INT64_MAX, pair.first[0]);
+        delete[] pair.first;
+    }
+
+    {
+        auto pair = arrayUpdater.load();
+        ASSERT_EQ(2, pair.second);
+        ASSERT_EQ(INT64_MAX, pair.first[0]);
+        ASSERT_EQ(INT64_MIN, pair.first[1]);
+        delete[] pair.first;
+    }
 }
 
 TEST(AtomicArrayUpdaterTest, shouldRemoveElements)
 {
     AtomicArrayUpdater<int64_t> arrayUpdater;
-    auto pair = arrayUpdater.addElement(1);
-    delete[] pair.first;
-    pair = arrayUpdater.addElement(2);
-    delete[] pair.first;
-    pair = arrayUpdater.addElement(3);
-    delete[] pair.first;
 
-    pair = arrayUpdater.load();
+    delete[] arrayUpdater.addElement(1).first;
+    delete[] arrayUpdater.addElement(2).first;
+    delete[] arrayUpdater.addElement(3).first;
+
+    auto pair = arrayUpdater.load();
     ASSERT_EQ(3, pair.second);
     ASSERT_EQ(1, pair.first[0]);
     ASSERT_EQ(2, pair.first[1]);
@@ -107,11 +116,11 @@ TEST(AtomicArrayUpdaterTest, shouldRemoveElements)
 TEST(AtomicArrayUpdaterTest, shouldStoreAnArray)
 {
     AtomicArrayUpdater<int64_t> arrayUpdater;
-    auto pair = arrayUpdater.addElement(INT64_MAX);
-    delete[] pair.first;
-    pair = arrayUpdater.addElement(INT64_MIN);
-    delete[] pair.first;
-    pair = arrayUpdater.load();
+
+    delete[] arrayUpdater.addElement(INT64_MAX).first;
+    delete[] arrayUpdater.addElement(INT64_MIN).first;
+
+    auto pair = arrayUpdater.load();
     auto originalArray = pair.first;
     ASSERT_EQ(2, pair.second);
 
@@ -132,7 +141,8 @@ TEST(AtomicArrayUpdaterTest, shouldAddElementsConcurrently)
     for (int iter = 0; iter < NUM_ITERATIONS; iter++)
     {
         AtomicArrayUpdater<int64_t> arrayUpdater;
-        arrayUpdater.addElement(INT64_MIN);
+        delete[] arrayUpdater.addElement(INT64_MIN).first;
+
         std::atomic<int> countDown(2);
         std::vector<int64_t *> deleteList;
         const int64_t minElement = 212121 * iter;
@@ -205,11 +215,10 @@ TEST(AtomicArrayUpdaterTest, shouldRemoveElementsConcurrently)
         AtomicArrayUpdater<int64_t> arrayUpdater;
         for (int i = 0; i < NUM_ELEMENTS; i++)
         {
-            auto pair = arrayUpdater.addElement(i);
-            delete[] pair.first;
+            delete[] arrayUpdater.addElement(i).first;
         }
-        auto pair = arrayUpdater.addElement(INT64_MIN);
-        delete[] pair.first;
+
+        delete[] arrayUpdater.addElement(INT64_MIN).first;
 
         std::atomic<int> countDown(2);
         std::vector<int64_t *> deleteList;
@@ -242,7 +251,7 @@ TEST(AtomicArrayUpdaterTest, shouldRemoveElementsConcurrently)
 
         while (true)
         {
-            pair = arrayUpdater.load();
+            auto pair = arrayUpdater.load();
             const int index = static_cast<int>(pair.second) - 1;
             ASSERT_EQ(INT64_MIN, pair.first[index]);
             if (index > 0)
@@ -261,7 +270,7 @@ TEST(AtomicArrayUpdaterTest, shouldRemoveElementsConcurrently)
             mutator.join();
         }
 
-        pair = arrayUpdater.load();
+        auto pair = arrayUpdater.load();
         ASSERT_EQ(2, pair.second);
         ASSERT_EQ(0, pair.first[0]);
         ASSERT_EQ(INT64_MIN, pair.first[1]);
@@ -281,8 +290,7 @@ TEST(AtomicArrayUpdaterTest, shouldAddAndRemoveElementsConcurrently)
         AtomicArrayUpdater<int64_t> arrayUpdater;
         for (int i = 0; i < NUM_ELEMENTS; i++)
         {
-            auto pair = arrayUpdater.addElement(i);
-            delete[] pair.first;
+            delete[] arrayUpdater.addElement(i).first;
         }
 
         std::atomic<int> countDown(2);

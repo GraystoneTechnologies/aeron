@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import org.agrona.MutableDirectBuffer;
 import static io.aeron.agent.ArchiveEventCode.*;
 import static io.aeron.agent.CommonEventDissector.dissectLogHeader;
 import static java.nio.ByteOrder.LITTLE_ENDIAN;
+import static org.agrona.BitUtil.SIZE_OF_BYTE;
 import static org.agrona.BitUtil.SIZE_OF_INT;
 import static org.agrona.BitUtil.SIZE_OF_LONG;
 
@@ -85,6 +86,7 @@ final class ArchiveEventDissector
         new PurgeRecordingRequestDecoder();
     private static final ControlResponseDecoder CONTROL_RESPONSE_DECODER = new ControlResponseDecoder();
     private static final RecordingSignalEventDecoder RECORDING_SIGNAL_EVENT_DECODER = new RecordingSignalEventDecoder();
+    private static final ReplayTokenRequestDecoder REPLAY_TOKEN_REQUEST_DECODER = new ReplayTokenRequestDecoder();
 
     private ArchiveEventDissector()
     {
@@ -410,6 +412,15 @@ final class ArchiveEventDissector
                 appendReplicate2(builder);
                 break;
 
+            case CMD_IN_REQUEST_REPLAY_TOKEN:
+                REPLAY_TOKEN_REQUEST_DECODER.wrap(
+                    buffer,
+                    offset + encodedLength,
+                    HEADER_DECODER.blockLength(),
+                    HEADER_DECODER.version());
+                appendReplayToken(builder);
+                break;
+
             default:
                 builder.append(": unknown command");
         }
@@ -459,6 +470,102 @@ final class ArchiveEventDissector
             .append(" signal=").append(RECORDING_SIGNAL_EVENT_DECODER.signal());
     }
 
+    static void dissectReplicationSessionDone(
+        final MutableDirectBuffer buffer,
+        final int offset,
+        final StringBuilder builder)
+    {
+        int absoluteOffset = offset;
+        absoluteOffset += dissectLogHeader(CONTEXT, REPLICATION_SESSION_DONE, buffer, offset, builder);
+
+        final long controlSessionId = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_LONG;
+        final long replicationId = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_LONG;
+        final long srcRecordingId = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_LONG;
+        final long replayPosition = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_LONG;
+        final long srcStopPosition = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_LONG;
+        final long dstRecordingId = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_LONG;
+        final long dstStopPosition = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_LONG;
+        final long position = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_LONG;
+        final boolean isClosed = 1 == buffer.getByte(absoluteOffset);
+        absoluteOffset += SIZE_OF_BYTE;
+        final boolean isEndOfStream = 1 == buffer.getByte(absoluteOffset);
+        absoluteOffset += SIZE_OF_BYTE;
+        final boolean isSynced = 1 == buffer.getByte(absoluteOffset);
+        absoluteOffset += SIZE_OF_BYTE;
+
+        builder
+            .append(": controlSessionId=").append(controlSessionId)
+            .append(" replicationId=").append(replicationId)
+            .append(" srcRecordingId=").append(srcRecordingId)
+            .append(" replayPosition=").append(replayPosition)
+            .append(" srcStopPosition=").append(srcStopPosition)
+            .append(" dstRecordingId=").append(dstRecordingId)
+            .append(" dstStopPosition=").append(dstStopPosition)
+            .append(" position=").append(position)
+            .append(" isClosed=").append(isClosed)
+            .append(" isEndOfStream=").append(isEndOfStream)
+            .append(" isSynced=").append(isSynced);
+    }
+
+    static void dissectReplaySessionStateChange(
+        final MutableDirectBuffer buffer, final int offset, final StringBuilder builder)
+    {
+        int absoluteOffset = offset;
+        absoluteOffset += dissectLogHeader(CONTEXT, REPLAY_SESSION_STATE_CHANGE, buffer, absoluteOffset, builder);
+
+        final long replaySessionId = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_LONG;
+        final long recordingId = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_LONG;
+        final long position = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_LONG;
+
+        builder.append(": replaySessionId=").append(replaySessionId);
+        builder.append(" replayId=").append(replaySessionId >> 32);
+        builder.append(" sessionId=").append((int)replaySessionId);
+        builder.append(" recordingId=").append(recordingId);
+        builder.append(" position=").append(position);
+
+        builder.append(" ");
+        absoluteOffset += buffer.getStringAscii(absoluteOffset, builder, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_INT;
+
+        builder.append(" reason=\"");
+        buffer.getStringAscii(absoluteOffset, builder, LITTLE_ENDIAN);
+        builder.append("\"");
+    }
+
+    static void dissectRecordingSessionStateChange(
+        final MutableDirectBuffer buffer, final int offset, final StringBuilder builder)
+    {
+        int absoluteOffset = offset;
+        absoluteOffset += dissectLogHeader(CONTEXT, RECORDING_SESSION_STATE_CHANGE, buffer, absoluteOffset, builder);
+
+        final long recordingId = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_LONG;
+        final long position = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_LONG;
+
+        builder.append(": recordingId=").append(recordingId);
+        builder.append(" position=").append(position);
+
+        builder.append(" ");
+        absoluteOffset += buffer.getStringAscii(absoluteOffset, builder, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_INT;
+
+        builder.append(" reason=\"");
+        buffer.getStringAscii(absoluteOffset, builder, LITTLE_ENDIAN);
+        builder.append("\"");
+    }
+
     static void dissectReplicationSessionStateChange(
         final MutableDirectBuffer buffer, final int offset, final StringBuilder builder)
     {
@@ -467,13 +574,25 @@ final class ArchiveEventDissector
 
         final long replicationId = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
         absoluteOffset += SIZE_OF_LONG;
+        final long srcRecordingId = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_LONG;
+        final long dstRecordingId = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_LONG;
         final long position = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
         absoluteOffset += SIZE_OF_LONG;
 
         builder.append(": replicationId=").append(replicationId);
+        builder.append(" srcRecordingId=").append(srcRecordingId);
+        builder.append(" dstRecordingId=").append(dstRecordingId);
         builder.append(" position=").append(position);
+
         builder.append(" ");
-        buffer.getStringAscii(absoluteOffset, builder);
+        absoluteOffset += buffer.getStringAscii(absoluteOffset, builder, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_INT;
+
+        builder.append(" reason=\"");
+        buffer.getStringAscii(absoluteOffset, builder, LITTLE_ENDIAN);
+        builder.append("\"");
     }
 
     static void dissectControlSessionStateChange(
@@ -484,12 +603,15 @@ final class ArchiveEventDissector
 
         final long controlSessionId = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
         absoluteOffset += SIZE_OF_LONG;
-        final long ignorePosition = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
-        absoluteOffset += SIZE_OF_LONG;
 
         builder.append(": controlSessionId=").append(controlSessionId);
         builder.append(" ");
-        buffer.getStringAscii(absoluteOffset, builder);
+        absoluteOffset += buffer.getStringAscii(absoluteOffset, builder, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_INT;
+
+        builder.append(" reason=\"");
+        buffer.getStringAscii(absoluteOffset, builder, LITTLE_ENDIAN);
+        builder.append("\"");
     }
 
     static void dissectReplaySessionError(
@@ -507,7 +629,7 @@ final class ArchiveEventDissector
         builder.append(": sessionId=").append(sessionId);
         builder.append(" recordingId=").append(recordingId);
         builder.append(" errorMessage=");
-        buffer.getStringAscii(absoluteOffset, builder);
+        buffer.getStringAscii(absoluteOffset, builder, LITTLE_ENDIAN);
     }
 
     static void dissectCatalogResize(
@@ -860,5 +982,13 @@ final class ArchiveEventDissector
         builder.append(": controlSessionId=").append(PURGE_RECORDING_REQUEST_DECODER.controlSessionId())
             .append(" correlationId=").append(PURGE_RECORDING_REQUEST_DECODER.correlationId())
             .append(" recordingId=").append(PURGE_RECORDING_REQUEST_DECODER.recordingId());
+    }
+
+    private static void appendReplayToken(final StringBuilder builder)
+    {
+        builder
+            .append(": controlSessionId=").append(REPLAY_TOKEN_REQUEST_DECODER.controlSessionId())
+            .append(" correlationId=").append(REPLAY_TOKEN_REQUEST_DECODER.correlationId())
+            .append(" recordingId=").append(REPLAY_TOKEN_REQUEST_DECODER.recordingId());
     }
 }

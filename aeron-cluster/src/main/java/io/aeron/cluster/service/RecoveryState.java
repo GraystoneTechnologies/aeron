@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -68,11 +68,29 @@ public final class RecoveryState
      */
     public static final String NAME = "Cluster recovery: leadershipTermId=";
 
+    /**
+     * Offset of the {@code term-id} field.
+     */
     public static final int LEADERSHIP_TERM_ID_OFFSET = 0;
+    /**
+     * Offset of the {@code log-position} field.
+     */
     public static final int LOG_POSITION_OFFSET = LEADERSHIP_TERM_ID_OFFSET + SIZE_OF_LONG;
+    /**
+     * Offset of the {@code timestamp} field.
+     */
     public static final int TIMESTAMP_OFFSET = LOG_POSITION_OFFSET + SIZE_OF_LONG;
+    /**
+     * Offset of the {@code cluster-id} field.
+     */
     public static final int CLUSTER_ID_OFFSET = TIMESTAMP_OFFSET + SIZE_OF_LONG;
+    /**
+     * Offset of the {@code service-count} field.
+     */
     public static final int SERVICE_COUNT_OFFSET = CLUSTER_ID_OFFSET + SIZE_OF_INT;
+    /**
+     * Offset of the {@code snapshot-recording-ids} field.
+     */
     public static final int SNAPSHOT_RECORDING_IDS_OFFSET = SERVICE_COUNT_OFFSET + SIZE_OF_INT;
 
     private RecoveryState()

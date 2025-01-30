@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@
 #include <signal.h>
 #include <inttypes.h>
 #include <errno.h>
+#include <string.h>
 
 #ifndef _MSC_VER
 #include <unistd.h>
@@ -34,7 +35,7 @@ volatile bool running = true;
 
 void sigint_handler(int signal)
 {
-    AERON_PUT_ORDERED(running, false);
+    AERON_SET_RELEASE(running, false);
 }
 
 static const char *aeron_stat_usage(void)
@@ -43,7 +44,8 @@ static const char *aeron_stat_usage(void)
         "    -h               Displays help information.\n"
         "    -d basePath      Base Path to shared memory. Default: /dev/shm/aeron-[user]\n"
         "    -u update period Update period in milliseconds. Default: 1000\n"
-        "    -t timeout       Number of milliseconds to wait to see if the driver metadata is available. Default: 1000\n";
+        "    -t timeout       Number of milliseconds to wait to see if the driver metadata is available. Default: 1000\n"
+        "    -w watch         Set to 'false' to print stats and exit immediately. Default: true\n";
 }
 
 static void aeron_stat_print_error_and_usage(const char *message)
@@ -56,6 +58,7 @@ typedef struct aeron_stat_settings_stct
     const char *base_path;
     int64_t update_interval_ms;
     int64_t timeout_ms;
+    bool watch;
 }
 aeron_stat_settings_t;
 
@@ -77,21 +80,44 @@ static void aeron_stat_print_counter(
         (int)label_length, label);
 }
 
+static void printStats(
+    aeron_cnc_t *aeron_cnc,
+    aeron_cnc_constants_t *cnc_constants,
+    aeron_counters_reader_t *counters_reader,
+    const char *cnc_version)
+{
+    int64_t now_ms = aeron_epoch_clock();
+    char currentTime[AERON_FORMAT_DATE_MAX_LENGTH];
+    aeron_format_date(currentTime, sizeof(currentTime) - 1, now_ms);
+    const int64_t heartbeat_ms = aeron_cnc_to_driver_heartbeat(aeron_cnc);
+
+    printf(
+        "%s - Aeron Stat (CnC v%s), pid %" PRId64 ", heartbeat age %" PRId64 "ms\n",
+        currentTime,
+        cnc_version,
+        (*cnc_constants).pid,
+        now_ms - heartbeat_ms);
+    printf("===========================\n");
+
+    aeron_counters_reader_foreach_counter(counters_reader, aeron_stat_print_counter, NULL);
+}
+
 int main(int argc, char **argv)
 {
     char default_directory[AERON_MAX_PATH];
-    aeron_default_path(default_directory, AERON_MAX_PATH);
+    aeron_default_path(default_directory, sizeof(default_directory));
     aeron_stat_settings_t settings =
         {
             .base_path = default_directory,
             .update_interval_ms = 1000,
-            .timeout_ms = 1000
+            .timeout_ms = 1000,
+            .watch = true
         };
 
 
     int opt;
 
-    while ((opt = getopt(argc, argv, "d:u:t:h")) != -1)
+    while ((opt = getopt(argc, argv, "d:u:t:w:h")) != -1)
     {
         switch (opt)
         {
@@ -119,8 +145,17 @@ int main(int argc, char **argv)
                 settings.update_interval_ms = strtoll(optarg, &endptr, 10);
                 if (0 != errno || '\0' != endptr[0])
                 {
-                    aeron_stat_print_error_and_usage("Invalid timeout");
+                    aeron_stat_print_error_and_usage("Invalid update interval");
                     return EXIT_FAILURE;
+                }
+                break;
+            }
+
+            case 'w':
+            {
+                if (strcmp(optarg, "false") == 0)
+                {
+                    settings.watch = false;
                 }
                 break;
             }
@@ -148,27 +183,25 @@ int main(int argc, char **argv)
     aeron_cnc_constants(aeron_cnc, &cnc_constants);
     aeron_counters_reader_t *counters_reader = aeron_cnc_counters_reader(aeron_cnc);
 
-    while (running)
+    char cnc_version[12];
+    snprintf(cnc_version, sizeof(cnc_version), "%" PRIu8 ".%" PRIu8 ".%" PRIu8,
+        aeron_semantic_version_major(cnc_constants.cnc_version),
+        aeron_semantic_version_minor(cnc_constants.cnc_version),
+        aeron_semantic_version_patch(cnc_constants.cnc_version));
+
+    if (settings.watch)
     {
-        int64_t now_ms = aeron_epoch_clock();
-        char currentTime[AERON_MAX_PATH];
-        char client_liveness_str[AERON_FORMAT_NUMBER_TO_LOCALE_STR_LEN];
-        aeron_format_date(currentTime, sizeof(currentTime) - 1, now_ms);
 
-        printf("\033[H\033[2J");
-
-        printf(
-            "%s - Aeron Stat (CnC v%s), pid %" PRId64 ", client liveness %s ns\n",
-            currentTime,
-            aeron_version_full(),
-            cnc_constants.pid,
-            aeron_format_number_to_locale(
-                cnc_constants.client_liveness_timeout, client_liveness_str, sizeof(client_liveness_str)));
-        printf("===========================\n");
-
-        aeron_counters_reader_foreach_counter(counters_reader, aeron_stat_print_counter, NULL);
-
-        aeron_micro_sleep((unsigned int)(settings.timeout_ms * 1000));
+        while (running)
+        {
+            printf("\033[2J\033[H");
+            printStats(aeron_cnc, &cnc_constants, counters_reader, cnc_version);
+            aeron_micro_sleep((unsigned int)(settings.update_interval_ms * 1000));
+        }
+    }
+    else
+    {
+        printStats(aeron_cnc, &cnc_constants, counters_reader, cnc_version);
     }
 
     aeron_cnc_close(aeron_cnc);

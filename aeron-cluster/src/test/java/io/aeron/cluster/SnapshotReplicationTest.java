@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -82,7 +82,7 @@ class SnapshotReplicationTest
             srcStreamId,
             srcChannel,
             replicationParams);
-        verify(archive, atLeast(0)).context();
+        ignoreArchiveContextLookup();
 
         snapshotReplication.poll(nowNs);
         verifyNoMoreInteractions(archive);
@@ -102,7 +102,7 @@ class SnapshotReplicationTest
             srcStreamId,
             srcChannel,
             replicationParams);
-        verify(archive, atLeast(0)).context();
+        ignoreArchiveContextLookup();
 
         snapshotReplication.poll(nowNs);
         verifyNoMoreInteractions(archive);
@@ -172,12 +172,17 @@ class SnapshotReplicationTest
         snapshotReplication.poll(nowNs);
 
         verify(archive).replicate(anyLong(), anyInt(), any(), any());
+        ignoreArchiveContextLookup();
 
         snapshotReplication.close();
         verify(archive).tryStopReplication(anyLong());
-        verify(archive, atLeast(0)).context();
 
         snapshotReplication.close();
         verifyNoMoreInteractions(archive);
+    }
+
+    private void ignoreArchiveContextLookup()
+    {
+        verify(archive, atLeast(0)).context();
     }
 }

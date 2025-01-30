@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,7 +36,7 @@ void aeron_driver_sender_proxy_offer(aeron_driver_sender_proxy_t *sender_proxy, 
 void aeron_driver_sender_proxy_on_add_endpoint(
     aeron_driver_sender_proxy_t *sender_proxy, aeron_send_channel_endpoint_t *endpoint)
 {
-    sender_proxy->on_add_endpoint_func(endpoint->conductor_fields.udp_channel);
+    sender_proxy->log.on_add_endpoint(endpoint->conductor_fields.udp_channel);
     aeron_command_base_t cmd =
         {
             .func = aeron_driver_sender_on_add_endpoint,
@@ -56,7 +56,7 @@ void aeron_driver_sender_proxy_on_add_endpoint(
 void aeron_driver_sender_proxy_on_remove_endpoint(
     aeron_driver_sender_proxy_t *sender_proxy, aeron_send_channel_endpoint_t *endpoint)
 {
-    sender_proxy->on_remove_endpoint_func(endpoint->conductor_fields.udp_channel);
+    sender_proxy->log.on_remove_endpoint(endpoint->conductor_fields.udp_channel);
     aeron_command_base_t cmd =
         {
             .func = aeron_driver_sender_on_remove_endpoint,
@@ -115,11 +115,13 @@ void aeron_driver_sender_proxy_on_add_destination(
     aeron_driver_sender_proxy_t *sender_proxy,
     aeron_send_channel_endpoint_t *endpoint,
     aeron_uri_t *uri,
-    struct sockaddr_storage *addr)
+    struct sockaddr_storage *addr,
+    int64_t destination_registration_id)
 {
     aeron_command_destination_t cmd =
         {
             .base = { .func = aeron_driver_sender_on_add_destination, .item = NULL },
+            .destination_registration_id = destination_registration_id,
             .endpoint = endpoint,
             .uri = uri
         };
@@ -155,6 +157,28 @@ void aeron_driver_sender_proxy_on_remove_destination(
     }
 }
 
+void aeron_driver_sender_proxy_on_remove_destination_by_id(
+    aeron_driver_sender_proxy_t *sender_proxy,
+    aeron_send_channel_endpoint_t *endpoint,
+    int64_t destination_registration_id)
+{
+    aeron_command_destination_by_id_t cmd =
+        {
+            .base = { .func = aeron_driver_sender_on_remove_destination_by_id, .item = NULL },
+            .endpoint = endpoint,
+            .destination_registration_id = destination_registration_id
+        };
+
+    if (AERON_THREADING_MODE_IS_SHARED_OR_INVOKER(sender_proxy->threading_mode))
+    {
+        aeron_driver_sender_on_remove_destination_by_id(sender_proxy->sender, &cmd);
+    }
+    else
+    {
+        aeron_driver_sender_proxy_offer(sender_proxy, &cmd, sizeof(cmd));
+    }
+}
+
 void aeron_driver_sender_proxy_on_resolution_change(
     aeron_driver_sender_proxy_t *sender_proxy,
     const char *endpoint_name,
@@ -177,8 +201,4 @@ void aeron_driver_sender_proxy_on_resolution_change(
     {
         aeron_driver_sender_proxy_offer(sender_proxy, &cmd, sizeof(cmd));
     }
-}
-
-void aeron_driver_sender_proxy_on_delete_cmd(aeron_driver_sender_proxy_t *sender_proxy, aeron_command_base_t *cmd)
-{
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,9 +17,8 @@ package io.aeron.test.driver;
 
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ReceiveChannelEndpointSupplier;
-import io.aeron.driver.ext.DebugChannelEndpointConfiguration;
-import io.aeron.driver.ext.DebugReceiveChannelEndpoint;
-import io.aeron.driver.ext.LossGenerator;
+import io.aeron.driver.StaticDelayGenerator;
+import io.aeron.driver.ext.*;
 import org.agrona.concurrent.AgentInvoker;
 import org.agrona.concurrent.status.CountersManager;
 
@@ -67,28 +66,57 @@ public final class JavaTestMediaDriver implements TestMediaDriver
         return mediaDriver.context().countersManager();
     }
 
-    public static void enableLossGenerationOnReceive(
+    private static void enableLossOnReceive(
+        final MediaDriver.Context context,
+        final LossGenerator dataLossGenerator,
+        final LossGenerator controlLossGenerator)
+    {
+        final ReceiveChannelEndpointSupplier endpointSupplier =
+            (udpChannel, dispatcher, statusIndicator, ctx) ->
+            {
+                return new DebugReceiveChannelEndpoint(
+                    udpChannel, dispatcher, statusIndicator, ctx,
+                    dataLossGenerator == null ? (address, buffer, length) -> false : dataLossGenerator,
+                    controlLossGenerator == null ? (address, buffer, length) -> false : controlLossGenerator);
+            };
+
+        context.receiveChannelEndpointSupplier(endpointSupplier);
+    }
+
+    public static void enableRandomLossOnReceive(
         final MediaDriver.Context context,
         final double rate,
         final long seed,
         final boolean loseDataMessages,
         final boolean loseControlMessages)
     {
-        final LossGenerator dataLossGenerator = loseDataMessages ?
-            DebugChannelEndpointConfiguration.lossGeneratorSupplier(rate, seed) :
-            DebugChannelEndpointConfiguration.lossGeneratorSupplier(0, 0);
+        enableLossOnReceive(
+            context,
+            loseDataMessages ? DebugChannelEndpointConfiguration.lossGeneratorSupplier(rate, seed) : null,
+            loseControlMessages ? DebugChannelEndpointConfiguration.lossGeneratorSupplier(rate, seed) : null);
+    }
 
-        final LossGenerator controlLossGenerator = loseControlMessages ?
-            DebugChannelEndpointConfiguration.lossGeneratorSupplier(rate, seed) :
-            DebugChannelEndpointConfiguration.lossGeneratorSupplier(0, 0);
+    public static void enableFixedLossOnReceive(
+        final MediaDriver.Context context,
+        final int termId,
+        final int termOffset,
+        final int length)
+    {
+        enableLossOnReceive(context, new FixedLossGenerator(termId, termOffset, length), null);
+    }
 
-        final ReceiveChannelEndpointSupplier endpointSupplier =
-            (udpChannel, dispatcher, statusIndicator, ctx) ->
-            {
-                return new DebugReceiveChannelEndpoint(
-                    udpChannel, dispatcher, statusIndicator, ctx, dataLossGenerator, controlLossGenerator);
-            };
+    public static void enableMultiGapLossOnReceive(
+        final MediaDriver.Context context,
+        final int termId,
+        final int gapRadix,
+        final int gapLength,
+        final int totalGaps)
+    {
+        enableLossOnReceive(context, new MultiGapLossGenerator(termId, gapRadix, gapLength, totalGaps), null);
+    }
 
-        context.receiveChannelEndpointSupplier(endpointSupplier);
+    public static void dontCoalesceNaksOnReceiverByDefault(final MediaDriver.Context context)
+    {
+        context.unicastFeedbackDelayGenerator(new StaticDelayGenerator(0, 0));
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -52,7 +52,6 @@ import static org.junit.jupiter.api.Assertions.*;
 @ExtendWith(InterruptingTestCallback.class)
 abstract class ClusterTimerTest
 {
-    private static final long CATALOG_CAPACITY = 128 * 1024;
     private static final int INTERVAL_MS = 20;
 
     private ClusteredMediaDriver clusteredMediaDriver;
@@ -293,8 +292,10 @@ abstract class ClusterTimerTest
 
     private void connectClient()
     {
-        aeronCluster = AeronCluster.connect(
-            new AeronCluster.Context().ingressChannel("aeron:udp").ingressEndpoints(INGRESS_ENDPOINTS));
+        aeronCluster = AeronCluster.connect(new AeronCluster.Context()
+                .ingressChannel("aeron:udp")
+                .ingressEndpoints(INGRESS_ENDPOINTS)
+                .egressChannel("aeron:udp?endpoint=localhost:0"));
     }
 
     private void launchClusteredMediaDriver(final boolean initialLaunch)
@@ -307,7 +308,7 @@ abstract class ClusterTimerTest
                 .errorHandler(ClusterTests.errorHandler(0))
                 .dirDeleteOnStart(true),
             TestContexts.localhostArchive()
-                .catalogCapacity(CATALOG_CAPACITY)
+                .catalogCapacity(ClusterTestConstants.CATALOG_CAPACITY)
                 .errorHandler(ClusterTests.errorHandler(0))
                 .threadingMode(ArchiveThreadingMode.SHARED)
                 .recordingEventsEnabled(false)

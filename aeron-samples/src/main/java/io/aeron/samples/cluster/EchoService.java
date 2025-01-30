@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ import org.agrona.concurrent.IdleStrategy;
 
 class EchoService implements ClusteredService
 {
+    private static final int SEND_ATTEMPTS = 3;
     protected Cluster cluster;
     protected IdleStrategy idleStrategy;
 
@@ -53,10 +54,17 @@ class EchoService implements ClusteredService
         final Header header)
     {
         idleStrategy.reset();
-        while (session.offer(buffer, offset, length) < 0)
+        int attempts = SEND_ATTEMPTS;
+        do
         {
+            final long result = session.offer(buffer, offset, length);
+            if (result > 0)
+            {
+                return;
+            }
             idleStrategy.idle();
         }
+        while (--attempts > 0);
     }
 
     public void onTimerEvent(final long correlationId, final long timestamp)

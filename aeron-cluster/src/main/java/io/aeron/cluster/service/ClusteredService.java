@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,7 +36,7 @@ import java.util.concurrent.TimeUnit;
 public interface ClusteredService
 {
     /**
-     * Start event for the service where the service can perform any initialisation required and load snapshot state.
+     * Start event where the service can perform any initialisation required and load snapshot state.
      * The snapshot image can be null if no previous snapshot exists.
      * <p>
      * <b>Note:</b> As this is a potentially long-running operation the implementation should use
@@ -92,7 +92,7 @@ public interface ClusteredService
     void onTimerEvent(long correlationId, long timestamp);
 
     /**
-     * The service should take a snapshot and store its state to the provided archive {@link Publication}.
+     * The service should take a snapshot and store its state to the provided archive {@link ExclusivePublication}.
      * <p>
      * <b>Note:</b> As this is a potentially long-running operation the implementation should use
      * {@link Cluster#idleStrategy()} and then occasionally call {@link org.agrona.concurrent.IdleStrategy#idle()} or
@@ -111,7 +111,7 @@ public interface ClusteredService
     void onRoleChange(Cluster.Role newRole);
 
     /**
-     * Called when the container is going to terminate.
+     * Called when the container is going to terminate but only after a successful start.
      *
      * @param cluster with which the service can interact.
      */

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@
 #pragma clang diagnostic ignored "-Wc11-extensions"
 #endif
 
-#define AERON_GET_VOLATILE(dst, src) \
+#define AERON_GET_ACQUIRE(dst, src) \
 do \
 { \
     dst = src; \
@@ -34,20 +34,11 @@ do \
 } \
 while (false) \
 
-#define AERON_PUT_ORDERED(dst, src) \
+#define AERON_SET_RELEASE(dst, src) \
 do \
 { \
     atomic_thread_fence(memory_order_release); \
     dst = src; \
-} \
-while (false) \
-
-#define AERON_PUT_VOLATILE(dst, src) \
-do \
-{ \
-    atomic_thread_fence(memory_order_release); \
-    dst = src; \
-    atomic_thread_fence(memory_order_seq_cst); \
 } \
 while (false) \
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,10 @@
 #include "concurrent/AgentRunner.h"
 #include "concurrent/AgentInvoker.h"
 #include "util/Export.h"
+
+#if !defined(AERON_HIDE_DEPRECATION_MESSAGE)
+#pragma message ( "The C++ API is deprecated, please move to using the C++ Wrapper" )
+#endif
 
 /// Top namespace for Aeron C++ API
 namespace aeron

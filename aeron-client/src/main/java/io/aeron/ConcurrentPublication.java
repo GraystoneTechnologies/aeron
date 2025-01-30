@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -391,7 +391,7 @@ public final class ConcurrentPublication extends Publication
         final int length,
         final ReservedValueSupplier reservedValueSupplier)
     {
-        final int framedLength = computeFramedLength(length, maxPayloadLength);
+        final int framedLength = computeFragmentedFrameLength(length, maxPayloadLength);
         final int termLength = termBuffer.capacity();
 
         final long rawTail = logMetaDataBuffer.getAndAddLong(tailCounterOffset, framedLength);
@@ -503,7 +503,7 @@ public final class ConcurrentPublication extends Publication
         final ReservedValueSupplier reservedValueSupplier)
     {
         final int length = lengthOne + lengthTwo;
-        final int framedLength = computeFramedLength(length, maxPayloadLength);
+        final int framedLength = computeFragmentedFrameLength(length, maxPayloadLength);
         final int termLength = termBuffer.capacity();
 
         final long rawTail = logMetaDataBuffer.getAndAddLong(tailCounterOffset, framedLength);
@@ -634,7 +634,7 @@ public final class ConcurrentPublication extends Publication
         final int length,
         final ReservedValueSupplier reservedValueSupplier)
     {
-        final int framedLength = computeFramedLength(length, maxPayloadLength);
+        final int framedLength = computeFragmentedFrameLength(length, maxPayloadLength);
         final int termLength = termBuffer.capacity();
 
         final long rawTail = logMetaDataBuffer.getAndAddLong(tailCounterOffset, framedLength);

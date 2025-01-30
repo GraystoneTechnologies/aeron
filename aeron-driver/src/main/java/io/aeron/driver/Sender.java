@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,8 +28,7 @@ import org.agrona.concurrent.status.AtomicCounter;
 
 import java.net.InetSocketAddress;
 
-import static io.aeron.driver.status.SystemCounterDescriptor.BYTES_SENT;
-import static io.aeron.driver.status.SystemCounterDescriptor.RESOLUTION_CHANGES;
+import static io.aeron.driver.status.SystemCounterDescriptor.*;
 
 class SenderLhsPadding
 {
@@ -70,6 +69,7 @@ public final class Sender extends SenderRhsPadding implements Agent
     private final OneToOneConcurrentArrayQueue<Runnable> commandQueue;
     private final AtomicCounter totalBytesSent;
     private final AtomicCounter resolutionChanges;
+    private final AtomicCounter shortSends;
     private final NanoClock nanoClock;
     private final CachedNanoClock cachedNanoClock;
     private final DriverConductorProxy conductorProxy;
@@ -77,18 +77,18 @@ public final class Sender extends SenderRhsPadding implements Agent
 
     Sender(final MediaDriver.Context ctx)
     {
-        this.controlTransportPoller = ctx.controlTransportPoller();
-        this.commandQueue = ctx.senderCommandQueue();
-        this.totalBytesSent = ctx.systemCounters().get(BYTES_SENT);
-        this.resolutionChanges = ctx.systemCounters().get(RESOLUTION_CHANGES);
-        this.nanoClock = ctx.nanoClock();
-        this.cachedNanoClock = ctx.senderCachedNanoClock();
-        this.statusMessageReadTimeoutNs = ctx.statusMessageTimeoutNs() >> 1;
-        this.reResolutionCheckIntervalNs = ctx.reResolutionCheckIntervalNs();
-        this.dutyCycleRatio = ctx.sendToStatusMessagePollRatio();
-        this.conductorProxy = ctx.driverConductorProxy();
-
-        this.dutyCycleTracker = ctx.senderDutyCycleTracker();
+        controlTransportPoller = ctx.controlTransportPoller();
+        commandQueue = ctx.senderCommandQueue();
+        totalBytesSent = ctx.systemCounters().get(BYTES_SENT);
+        resolutionChanges = ctx.systemCounters().get(RESOLUTION_CHANGES);
+        shortSends = ctx.systemCounters().get(SHORT_SENDS);
+        nanoClock = ctx.nanoClock();
+        cachedNanoClock = ctx.senderCachedNanoClock();
+        statusMessageReadTimeoutNs = ctx.statusMessageTimeoutNs() >> 1;
+        reResolutionCheckIntervalNs = ctx.reResolutionCheckIntervalNs();
+        dutyCycleRatio = ctx.sendToStatusMessagePollRatio();
+        conductorProxy = ctx.driverConductorProxy();
+        dutyCycleTracker = ctx.senderDutyCycleTracker();
     }
 
     /**
@@ -104,12 +104,11 @@ public final class Sender extends SenderRhsPadding implements Agent
         if (dutyCycleTracker instanceof DutyCycleStallTracker)
         {
             final DutyCycleStallTracker dutyCycleStallTracker = (DutyCycleStallTracker)dutyCycleTracker;
+            final String threadingModeName = conductorProxy.threadingMode().name();
 
-            dutyCycleStallTracker.maxCycleTime().appendToLabel(
-                ": " + conductorProxy.threadingMode().name());
+            dutyCycleStallTracker.maxCycleTime().appendToLabel(": " + threadingModeName);
             dutyCycleStallTracker.cycleTimeThresholdExceededCount().appendToLabel(
-                ": threshold=" + dutyCycleStallTracker.cycleTimeThresholdNs() + "ns " +
-                conductorProxy.threadingMode().name());
+                ": threshold=" + dutyCycleStallTracker.cycleTimeThresholdNs() + "ns " + threadingModeName);
         }
     }
 
@@ -130,11 +129,16 @@ public final class Sender extends SenderRhsPadding implements Agent
         cachedNanoClock.update(nowNs);
         dutyCycleTracker.measureAndUpdate(nowNs);
 
-        final int workCount = commandQueue.drain(Runnable::run, Configuration.COMMAND_DRAIN_LIMIT);
-        final int bytesSent = doSend(nowNs);
+        final int workCount = commandQueue.drain(CommandProxy.RUN_TASK, Configuration.COMMAND_DRAIN_LIMIT);
 
+        final long shortSendsBefore = shortSends.get();
+        final int bytesSent = doSend(nowNs);
         int bytesReceived = 0;
-        if (0 == bytesSent || ++dutyCycleCounter >= dutyCycleRatio || (controlPollDeadlineNs - nowNs < 0))
+
+        if (0 == bytesSent ||
+            ++dutyCycleCounter >= dutyCycleRatio ||
+            (controlPollDeadlineNs - nowNs < 0) ||
+            shortSendsBefore < shortSends.get())
         {
             bytesReceived = controlTransportPoller.pollTransports();
 
@@ -185,15 +189,23 @@ public final class Sender extends SenderRhsPadding implements Agent
     }
 
     void onAddDestination(
-        final SendChannelEndpoint channelEndpoint, final ChannelUri channelUri, final InetSocketAddress address)
+        final SendChannelEndpoint channelEndpoint,
+        final ChannelUri channelUri,
+        final InetSocketAddress address,
+        final long registrationId)
     {
-        channelEndpoint.addDestination(channelUri, address);
+        channelEndpoint.addDestination(channelUri, address, registrationId);
     }
 
     void onRemoveDestination(
         final SendChannelEndpoint channelEndpoint, final ChannelUri channelUri, final InetSocketAddress address)
     {
         channelEndpoint.removeDestination(channelUri, address);
+    }
+
+    void onRemoveDestination(final SendChannelEndpoint channelEndpoint, final long destinationRegistrationId)
+    {
+        channelEndpoint.removeDestination(destinationRegistrationId);
     }
 
     void onResolutionChange(

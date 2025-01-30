@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,5 +16,5 @@
 
 #include "concurrent/aeron_term_scanner.h"
 
-extern size_t aeron_term_scanner_scan_for_availability(
-    const uint8_t *buffer, size_t term_length_left, size_t max_length, size_t *padding);
+extern int32_t aeron_term_scanner_scan_for_availability(
+    const uint8_t *buffer, int32_t term_length_left, int32_t max_length, int32_t *padding);

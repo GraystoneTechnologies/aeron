@@ -1,4 +1,4 @@
-# Copyright 2014-2023 Real Logic Limited.
+# Copyright 2014-2025 Real Logic Limited.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -63,13 +63,16 @@ set(SOURCE
     collections/aeron_int64_counter_map.c
     collections/aeron_int64_to_ptr_hash_map.c
     collections/aeron_int64_to_tagged_ptr_hash_map.c
+    collections/aeron_linked_queue.c
     collections/aeron_map.c
     collections/aeron_str_to_ptr_hash_map.c
     concurrent/aeron_atomic.c
+    concurrent/aeron_blocking_linked_queue.c
     concurrent/aeron_broadcast_receiver.c
     concurrent/aeron_broadcast_transmitter.c
     concurrent/aeron_counters_manager.c
     concurrent/aeron_distinct_error_log.c
+    concurrent/aeron_executor.c
     concurrent/aeron_logbuffer_descriptor.c
     concurrent/aeron_mpsc_concurrent_array_queue.c
     concurrent/aeron_mpsc_rb.c
@@ -100,6 +103,7 @@ set(SOURCE
     util/aeron_strutil.c
     util/aeron_symbol_table.c
     uri/aeron_uri.c
+    uri/aeron_uri_string_builder.c
     aeron_agent.c
     aeron_alloc.c
     aeron_client.c
@@ -115,9 +119,9 @@ set(SOURCE
     aeron_publication.c
     aeron_socket.c
     aeron_subscription.c
-    aeron_version.c
     aeron_windows.c
-    aeronc.c)
+    aeronc.c
+    aeron_version.c)
 
 set(HEADERS
     collections/aeron_array_to_ptr_hash_map.h
@@ -126,6 +130,7 @@ set(HEADERS
     collections/aeron_int64_counter_map.h
     collections/aeron_int64_to_ptr_hash_map.h
     collections/aeron_int64_to_tagged_ptr_hash_map.h
+    collections/aeron_linked_queue.h
     collections/aeron_map.h
     collections/aeron_str_to_ptr_hash_map.h
     command/aeron_control_protocol.h
@@ -133,12 +138,14 @@ set(HEADERS
     concurrent/aeron_atomic64_gcc_x86_64.h
     concurrent/aeron_atomic64_msvc.h
     concurrent/aeron_atomic64_c11.h
+    concurrent/aeron_blocking_linked_queue.h
     concurrent/aeron_broadcast_descriptor.h
     concurrent/aeron_broadcast_receiver.h
     concurrent/aeron_broadcast_transmitter.h
     concurrent/aeron_concurrent_array_queue.h
     concurrent/aeron_counters_manager.h
     concurrent/aeron_distinct_error_log.h
+    concurrent/aeron_executor.h
     concurrent/aeron_logbuffer_descriptor.h
     concurrent/aeron_mpsc_concurrent_array_queue.h
     concurrent/aeron_mpsc_rb.h
@@ -171,6 +178,7 @@ set(HEADERS
     util/aeron_strutil.h
     util/aeron_symbol_table.h
     uri/aeron_uri.h
+    uri/aeron_uri_string_builder.h
     aeron_agent.h
     aeron_alloc.h
     aeron_client.h
@@ -191,12 +199,14 @@ set(HEADERS
     aeronc.h)
 
 add_library(aeron SHARED ${SOURCE} ${HEADERS})
+add_library(aeron::aeron ALIAS aeron)
 target_include_directories(aeron
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>" "$<INSTALL_INTERFACE:include/aeron>")
 
 add_library(aeron_static STATIC ${SOURCE} ${HEADERS})
+add_library(aeron::aeron_static ALIAS aeron_static)
 target_include_directories(aeron_static
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>" "$<INSTALL_INTERFACE:include/aeron>")
 
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -DDISABLE_BOUNDS_CHECKS")
 
@@ -228,8 +238,9 @@ target_link_libraries(
 if (AERON_INSTALL_TARGETS)
     install(
         TARGETS aeron aeron_static
+        EXPORT aeron-targets
         RUNTIME DESTINATION lib
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib)
-    install(DIRECTORY . DESTINATION include/aeron FILES_MATCHING PATTERN "*.h")
+    install(DIRECTORY ./ DESTINATION include/aeron FILES_MATCHING PATTERN "*.h")
 endif ()

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@ package io.aeron.driver.media;
 
 import io.aeron.Aeron;
 import io.aeron.ChannelUri;
-import io.aeron.CommonContext;
 import io.aeron.driver.DefaultNameResolver;
 import io.aeron.driver.NameResolver;
 import io.aeron.driver.exceptions.InvalidChannelException;
@@ -50,8 +49,7 @@ public final class UdpChannel
     private static final InetSocketAddress ANY_IPV4 = new InetSocketAddress("0.0.0.0", 0);
     private static final InetSocketAddress ANY_IPV6 = new InetSocketAddress("::", 0);
 
-    private final boolean isManualControlMode;
-    private final boolean isDynamicControlMode;
+    private final ControlMode controlMode;
     private final boolean hasExplicitControl;
     private final boolean hasExplicitEndpoint;
     private final boolean isMulticast;
@@ -74,11 +72,11 @@ public final class UdpChannel
     private final int channelReceiveTimestampOffset;
     private final int channelSendTimestampOffset;
     private final Long groupTag;
+    private final Long nakDelayNs;
 
     private UdpChannel(final Context context)
     {
-        isManualControlMode = context.isManualControlMode;
-        isDynamicControlMode = context.isDynamicControlMode;
+        controlMode = context.controlMode;
         hasExplicitEndpoint = context.hasExplicitEndpoint;
         hasExplicitControl = context.hasExplicitControl;
         isMulticast = context.isMulticast;
@@ -101,6 +99,7 @@ public final class UdpChannel
         channelReceiveTimestampOffset = context.channelReceiveTimestampOffset;
         channelSendTimestampOffset = context.channelSendTimestampOffset;
         groupTag = context.groupTag;
+        nakDelayNs = context.nakDelayNs;
     }
 
     /**
@@ -150,14 +149,12 @@ public final class UdpChannel
             final InetSocketAddress controlAddress = getExplicitControlAddress(channelUri, nameResolver);
 
             final String tagIdStr = channelUri.channelTag();
-            final String controlMode = channelUri.get(CommonContext.MDC_CONTROL_MODE_PARAM_NAME);
-            final boolean isManualControlMode = CommonContext.MDC_CONTROL_MODE_MANUAL.equals(controlMode);
-            final boolean isDynamicControlMode = CommonContext.MDC_CONTROL_MODE_DYNAMIC.equals(controlMode);
+            final ControlMode controlMode = parseControlMode(channelUri);
 
-            final int socketRcvbufLength = parseBufferLength(channelUri, CommonContext.SOCKET_RCVBUF_PARAM_NAME);
-            final int socketSndbufLength = parseBufferLength(channelUri, CommonContext.SOCKET_SNDBUF_PARAM_NAME);
+            final int socketRcvbufLength = parseBufferLength(channelUri, SOCKET_RCVBUF_PARAM_NAME);
+            final int socketSndbufLength = parseBufferLength(channelUri, SOCKET_SNDBUF_PARAM_NAME);
             final int receiverWindowLength = parseBufferLength(
-                channelUri, CommonContext.RECEIVER_WINDOW_LENGTH_PARAM_NAME);
+                channelUri, RECEIVER_WINDOW_LENGTH_PARAM_NAME);
 
             final boolean requiresAdditionalSuffix = !isDestination &&
                 (null == endpointAddress && null == controlAddress ||
@@ -167,16 +164,17 @@ public final class UdpChannel
             final boolean hasNoDistinguishingCharacteristic =
                 null == endpointAddress && null == controlAddress && null == tagIdStr;
 
-            if (isDynamicControlMode && null == controlAddress)
+            if (ControlMode.DYNAMIC == controlMode && null == controlAddress)
             {
                 throw new IllegalArgumentException(
                     "explicit control expected with dynamic control mode: " + channelUriString);
             }
 
-            if (hasNoDistinguishingCharacteristic && !isManualControlMode)
+            if (hasNoDistinguishingCharacteristic && ControlMode.MANUAL != controlMode &&
+                ControlMode.RESPONSE != controlMode)
             {
                 throw new IllegalArgumentException(
-                    "URIs for UDP must specify an endpoint, control, tags, or control-mode=manual: " +
+                    "URIs for UDP must specify an endpoint, control, tags, or control-mode=manual/response: " +
                     channelUriString);
             }
 
@@ -205,13 +203,13 @@ public final class UdpChannel
                 .hasTagId(false)
                 .uriStr(channelUriString)
                 .channelUri(channelUri)
-                .isManualControlMode(isManualControlMode)
-                .isDynamicControlMode(isDynamicControlMode)
+                .controlMode(controlMode)
                 .hasExplicitEndpoint(hasExplicitEndpoint)
                 .hasNoDistinguishingCharacteristic(hasNoDistinguishingCharacteristic)
                 .socketRcvbufLength(socketRcvbufLength)
                 .socketSndbufLength(socketSndbufLength)
-                .receiverWindowLength(receiverWindowLength);
+                .receiverWindowLength(receiverWindowLength)
+                .nakDelayNs(parseOptionalDurationNs(channelUri, NAK_DELAY_PARAM_NAME));
 
             if (null != tagIdStr)
             {
@@ -234,7 +232,7 @@ public final class UdpChannel
                     .protocolFamily(getProtocolFamily(endpointAddress.getAddress()))
                     .canonicalForm(canonicalise(null, resolvedAddress, null, endpointAddress));
 
-                final String ttlValue = channelUri.get(CommonContext.TTL_PARAM_NAME);
+                final String ttlValue = channelUri.get(TTL_PARAM_NAME);
                 if (null != ttlValue)
                 {
                     context.hasMulticastTtl(true).multicastTtl(Integer.parseInt(ttlValue));
@@ -242,8 +240,8 @@ public final class UdpChannel
             }
             else if (null != controlAddress)
             {
-                final String controlVal = channelUri.get(CommonContext.MDC_CONTROL_PARAM_NAME);
-                final String endpointVal = channelUri.get(CommonContext.ENDPOINT_PARAM_NAME);
+                final String controlVal = channelUri.get(MDC_CONTROL_PARAM_NAME);
+                final String endpointVal = channelUri.get(ENDPOINT_PARAM_NAME);
 
                 String suffix = "";
                 if (requiresAdditionalSuffix)
@@ -270,7 +268,7 @@ public final class UdpChannel
                     searchAddress.getAddress() :
                     resolveToAddressOfInterface(findInterface(searchAddress), searchAddress);
 
-                final String endpointVal = channelUri.get(CommonContext.ENDPOINT_PARAM_NAME);
+                final String endpointVal = channelUri.get(ENDPOINT_PARAM_NAME);
                 String suffix = "";
                 if (requiresAdditionalSuffix)
                 {
@@ -370,6 +368,52 @@ public final class UdpChannel
         }
 
         return socketBufferLength;
+    }
+
+    /**
+     * Parse the control mode from the channel URI. If the value is null or unknown then {@link ControlMode#NONE} will
+     * be used.
+     *
+     * @param channelUri to parse the control mode from.
+     * @return an enum value representing the control mode.
+     */
+    public static ControlMode parseControlMode(final ChannelUri channelUri)
+    {
+        final String paramValue = channelUri.get(MDC_CONTROL_MODE_PARAM_NAME);
+        if (null == paramValue)
+        {
+            return ControlMode.NONE;
+        }
+
+        switch (paramValue)
+        {
+            case MDC_CONTROL_MODE_DYNAMIC:
+                return ControlMode.DYNAMIC;
+            case MDC_CONTROL_MODE_MANUAL:
+                return ControlMode.MANUAL;
+            case CONTROL_MODE_RESPONSE:
+                return ControlMode.RESPONSE;
+            default:
+                return ControlMode.NONE;
+        }
+    }
+
+    /**
+     * Parses out a duration from a channel URI and caters for unit suffix information.
+     *
+     * @param channelUri    to read the value from
+     * @param paramName     specific field to access in the URI
+     * @return              duration in nanoseconds, null if not present
+     */
+    public static Long parseOptionalDurationNs(final ChannelUri channelUri, final String paramName)
+    {
+        final String valueStr = channelUri.get(paramName);
+        if (null == valueStr)
+        {
+            return null;
+        }
+
+        return SystemUtil.parseDuration(paramName, valueStr);
     }
 
     /**
@@ -564,13 +608,24 @@ public final class UdpChannel
     }
 
     /**
+     * The channel's control mode.
+     *
+     * @return the control mode for the channel.
+     */
+    public ControlMode controlMode()
+    {
+        return controlMode;
+    }
+
+
+    /**
      * Does the channel have manual control mode specified.
      *
      * @return does channel have manual control mode specified.
      */
     public boolean isManualControlMode()
     {
-        return isManualControlMode;
+        return ControlMode.MANUAL == controlMode;
     }
 
     /**
@@ -580,7 +635,17 @@ public final class UdpChannel
      */
     public boolean isDynamicControlMode()
     {
-        return isDynamicControlMode;
+        return ControlMode.DYNAMIC == controlMode;
+    }
+
+    /**
+     * Does the channel have response control mode specified.
+     *
+     * @return does the channel have response control mode specified.
+     */
+    public boolean isResponseControlMode()
+    {
+        return ControlMode.RESPONSE == controlMode;
     }
 
     /**
@@ -620,7 +685,17 @@ public final class UdpChannel
      */
     public boolean isMultiDestination()
     {
-        return isDynamicControlMode || isManualControlMode || hasExplicitControl;
+        return controlMode.isMultiDestination();
+    }
+
+    /**
+     * Does the channel have group semantics (multicast or MDC).
+     *
+     * @return true if the channel has group semantics.
+     */
+    public boolean hasGroupSemantics()
+    {
+        return isMulticast || isMultiDestination();
     }
 
     /**
@@ -687,28 +762,73 @@ public final class UdpChannel
     }
 
     /**
+     * The length of the initial nak delay to be used by the LossDectector on this channel.
+     *
+     * @return delay in nanoseconds or null if the value is not set.
+     */
+    public Long nakDelayNs()
+    {
+        return nakDelayNs;
+    }
+
+    /**
      * Does this channel have a tag match to another channel having INADDR_ANY endpoints.
      *
      * @param udpChannel to match against.
+     * @param localAddress local address override to use for this channel.
+     * @param remoteAddress remote address override to use for this channel.
      * @return true if there is a match otherwise false.
      */
-    public boolean matchesTag(final UdpChannel udpChannel)
+    public boolean matchesTag(
+        final UdpChannel udpChannel,
+        final InetSocketAddress localAddress,
+        final InetSocketAddress remoteAddress)
     {
         if (!hasTag || !udpChannel.hasTag() || tag != udpChannel.tag())
         {
             return false;
         }
 
-        if (udpChannel.remoteData().getAddress().isAnyLocalAddress() &&
-            udpChannel.remoteData().getPort() == 0 &&
-            udpChannel.localData().getAddress().isAnyLocalAddress() &&
-            udpChannel.localData().getPort() == 0)
+        if (!hasMatchingControlMode(udpChannel))
         {
-            return true;
+            throw new IllegalArgumentException(
+                "matching tag=" + tag + " has mismatched control-mode: " + uriStr + " <> " + udpChannel.uriStr);
         }
 
-        throw new IllegalArgumentException(
-            "matching tag=" + tag + " has explicit endpoint or control: " + uriStr + " <> " + udpChannel.uriStr);
+        if (!hasMatchingAddress(udpChannel, localAddress, remoteAddress))
+        {
+            throw new IllegalArgumentException(
+                "matching tag=" + tag + " has mismatched endpoint or control: " + uriStr + " <> " + udpChannel.uriStr);
+        }
+
+        return true;
+    }
+
+    private boolean isWildcard()
+    {
+        return remoteData.getAddress().isAnyLocalAddress() &&
+            remoteData.getPort() == 0 &&
+            localData.getAddress().isAnyLocalAddress() &&
+            localData.getPort() == 0;
+    }
+
+    private boolean hasMatchingControlMode(final UdpChannel udpChannel)
+    {
+        return controlMode() == ControlMode.NONE || controlMode() == udpChannel.controlMode();
+    }
+
+    private boolean hasMatchingAddress(
+        final UdpChannel udpChannel,
+        final InetSocketAddress localAddress,
+        final InetSocketAddress remoteAddress)
+    {
+        final InetSocketAddress otherLocalData = localAddress != null ? localAddress : udpChannel.localData();
+        final InetSocketAddress otherRemoteData = remoteAddress != null ? remoteAddress : udpChannel.remoteData();
+
+        return isWildcard() || remoteData().getAddress().equals(otherRemoteData.getAddress()) &&
+            remoteData().getPort() == otherRemoteData.getPort() &&
+            localData().getAddress().equals(otherLocalData.getAddress()) &&
+            localData().getPort() == otherLocalData.getPort();
     }
 
     /**
@@ -769,14 +889,47 @@ public final class UdpChannel
         {
             validateConfiguration(uri);
 
-            final String endpointValue = uri.get(CommonContext.ENDPOINT_PARAM_NAME);
-            return SocketAddressParser.parse(
-                endpointValue, CommonContext.ENDPOINT_PARAM_NAME, false, nameResolver);
+            final String endpointValue = uri.get(ENDPOINT_PARAM_NAME);
+            return SocketAddressParser.parse(endpointValue, ENDPOINT_PARAM_NAME, false, nameResolver);
         }
         catch (final Exception ex)
         {
             throw new InvalidChannelException(ex);
         }
+    }
+
+    /**
+     * Check if the address pointed to by the endpoint is multicast.
+     *
+     * @param uri to check.
+     * @return {@code true} if the destination uses multicast address.
+     * @since 1.44.0
+     */
+    public static boolean isMulticastDestinationAddress(final ChannelUri uri)
+    {
+        try
+        {
+            validateConfiguration(uri);
+
+            final String endpointValue = uri.get(ENDPOINT_PARAM_NAME);
+            return isMulticastEndpoint(endpointValue);
+        }
+        catch (final Exception ex)
+        {
+            throw new InvalidChannelException(ex);
+        }
+    }
+
+    /**
+     * Check if the endpoint is multicast.
+     *
+     * @param endpoint to check.
+     * @return {@code true} if the destination uses multicast address.
+     * @since 1.47.0
+     */
+    public static boolean isMulticastEndpoint(final String endpoint)
+    {
+        return SocketAddressParser.isMulticastAddress(endpoint);
     }
 
     /**
@@ -857,7 +1010,7 @@ public final class UdpChannel
 
     private static InterfaceSearchAddress getInterfaceSearchAddress(final ChannelUri uri) throws UnknownHostException
     {
-        final String interfaceValue = uri.get(CommonContext.INTERFACE_PARAM_NAME);
+        final String interfaceValue = uri.get(INTERFACE_PARAM_NAME);
         if (null != interfaceValue)
         {
             return InterfaceSearchAddress.parse(interfaceValue);
@@ -870,17 +1023,17 @@ public final class UdpChannel
         throws UnknownHostException
     {
         InetSocketAddress address = null;
-        final String endpointValue = uri.get(CommonContext.ENDPOINT_PARAM_NAME);
+        final String endpointValue = uri.get(ENDPOINT_PARAM_NAME);
         if (null != endpointValue)
         {
             address = SocketAddressParser.parse(
-                endpointValue, CommonContext.ENDPOINT_PARAM_NAME, false, nameResolver);
+                endpointValue, ENDPOINT_PARAM_NAME, false, nameResolver);
 
             if (address.isUnresolved())
             {
                 throw new UnknownHostException(
-                    "unresolved - " + CommonContext.ENDPOINT_PARAM_NAME + "=" + endpointValue +
-                    ", name-resolver=" + nameResolver.getClass().getName());
+                    "unresolved - " + ENDPOINT_PARAM_NAME + "=" + endpointValue +
+                    ", name-resolver=" + nameResolver.name());
             }
         }
 
@@ -891,16 +1044,16 @@ public final class UdpChannel
         throws UnknownHostException
     {
         InetSocketAddress address = null;
-        final String controlValue = uri.get(CommonContext.MDC_CONTROL_PARAM_NAME);
+        final String controlValue = uri.get(MDC_CONTROL_PARAM_NAME);
         if (null != controlValue)
         {
             address = SocketAddressParser.parse(
-                controlValue, CommonContext.MDC_CONTROL_PARAM_NAME, false, nameResolver);
+                controlValue, MDC_CONTROL_PARAM_NAME, false, nameResolver);
 
             if (address.isUnresolved())
             {
                 throw new UnknownHostException(
-                    "unresolved - " + CommonContext.MDC_CONTROL_PARAM_NAME + "=" + controlValue +
+                    "unresolved - " + MDC_CONTROL_PARAM_NAME + "=" + controlValue +
                     ", name-resolver=" + nameResolver.getClass().getName());
             }
         }
@@ -994,8 +1147,7 @@ public final class UdpChannel
 
     static final class Context
     {
-        boolean isManualControlMode = false;
-        boolean isDynamicControlMode = false;
+        ControlMode controlMode = ControlMode.NONE;
         boolean hasExplicitEndpoint = false;
         boolean hasExplicitControl = false;
         boolean isMulticast = false;
@@ -1018,7 +1170,8 @@ public final class UdpChannel
         ChannelUri channelUri;
         int channelReceiveTimestampOffset;
         int channelSendTimestampOffset;
-        private Long groupTag = null;
+        Long groupTag = null;
+        Long nakDelayNs = null;
 
         Context uriStr(final String uri)
         {
@@ -1095,15 +1248,9 @@ public final class UdpChannel
             return this;
         }
 
-        Context isManualControlMode(final boolean isManualControlMode)
+        Context controlMode(final ControlMode controlMode)
         {
-            this.isManualControlMode = isManualControlMode;
-            return this;
-        }
-
-        Context isDynamicControlMode(final boolean isDynamicControlMode)
-        {
-            this.isDynamicControlMode = isDynamicControlMode;
+            this.controlMode = controlMode;
             return this;
         }
 
@@ -1166,6 +1313,12 @@ public final class UdpChannel
         Context channelSendTimestampOffset(final int timestampOffset)
         {
             this.channelSendTimestampOffset = timestampOffset;
+            return this;
+        }
+
+        Context nakDelayNs(final Long nakDelayNs)
+        {
+            this.nakDelayNs = nakDelayNs;
             return this;
         }
 

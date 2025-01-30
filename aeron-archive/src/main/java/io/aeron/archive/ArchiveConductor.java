@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,6 +33,7 @@ import org.agrona.*;
 import org.agrona.collections.Int2ObjectHashMap;
 import org.agrona.collections.Long2LongCounterMap;
 import org.agrona.collections.Long2ObjectHashMap;
+import org.agrona.collections.MutableLong;
 import org.agrona.collections.Object2ObjectHashMap;
 import org.agrona.concurrent.*;
 import org.agrona.concurrent.status.CountersReader;
@@ -42,11 +43,15 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.StandardOpenOption;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 import java.util.ArrayDeque;
 import java.util.EnumSet;
 import java.util.Iterator;
+import java.util.Random;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 import static io.aeron.Aeron.NULL_VALUE;
 import static io.aeron.CommonContext.*;
@@ -56,24 +61,27 @@ import static io.aeron.archive.Archive.segmentFileName;
 import static io.aeron.archive.client.AeronArchive.NULL_POSITION;
 import static io.aeron.archive.client.AeronArchive.segmentFileBasePosition;
 import static io.aeron.archive.client.ArchiveException.*;
+import static io.aeron.archive.codecs.RecordingState.DELETED;
 import static io.aeron.logbuffer.FrameDescriptor.FRAME_ALIGNMENT;
 import static io.aeron.protocol.DataHeaderFlyweight.*;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
 import static java.nio.file.StandardOpenOption.READ;
 import static java.nio.file.StandardOpenOption.WRITE;
+import static org.agrona.AsciiEncoding.digitCount;
 import static org.agrona.concurrent.status.CountersReader.METADATA_LENGTH;
 
 abstract class ArchiveConductor
     extends SessionWorker<Session>
-    implements AvailableImageHandler, UnavailableCounterHandler
+    implements UnavailableImageHandler, UnavailableCounterHandler
 {
     private static final EnumSet<StandardOpenOption> FILE_OPTIONS = EnumSet.of(READ, WRITE);
-    private static final String DELETE_SUFFIX = ".del";
+    static final String DELETE_SUFFIX = ".del";
 
     private final long closeHandlerRegistrationId;
     private final long unavailableCounterHandlerRegistrationId;
     private final long connectTimeoutMs;
+    private final long sessionLivenessCheckIntervalMs;
     private long nextSessionId = ThreadLocalRandom.current().nextInt(Integer.MAX_VALUE);
     private long markFileUpdateDeadlineMs = 0;
     private int replayId = 1;
@@ -85,9 +93,11 @@ abstract class ArchiveConductor
     private final Long2ObjectHashMap<ReplaySession> replaySessionByIdMap = new Long2ObjectHashMap<>();
     private final Long2ObjectHashMap<RecordingSession> recordingSessionByIdMap = new Long2ObjectHashMap<>();
     private final Long2ObjectHashMap<ReplicationSession> replicationSessionByIdMap = new Long2ObjectHashMap<>();
+    private final Long2ObjectHashMap<DeleteSegmentsSession> deleteSegmentsSessionByIdMap = new Long2ObjectHashMap<>();
     private final Int2ObjectHashMap<Counter> counterByIdMap = new Int2ObjectHashMap<>();
     private final Object2ObjectHashMap<String, Subscription> recordingSubscriptionByKeyMap =
         new Object2ObjectHashMap<>();
+    private final Long2ObjectHashMap<SessionForReplay> controlSessionByReplayToken = new Long2ObjectHashMap<>();
     private final UnsafeBuffer descriptorBuffer = new UnsafeBuffer();
     private final RecordingDescriptorDecoder recordingDescriptorDecoder = new RecordingDescriptorDecoder();
     private final UnsafeBuffer counterMetadataBuffer = new UnsafeBuffer(new byte[METADATA_LENGTH]);
@@ -107,9 +117,11 @@ abstract class ArchiveConductor
     private final RecordingEventsProxy recordingEventsProxy;
     private final Authenticator authenticator;
     private final AuthorisationService authorisationService;
+    private final ControlSessionAdapter controlSessionAdapter;
     private final ControlResponseProxy controlResponseProxy = new ControlResponseProxy();
     private final ControlSessionProxy controlSessionProxy = new ControlSessionProxy(controlResponseProxy);
     private final DutyCycleTracker dutyCycleTracker;
+    private final Random random;
     final Archive.Context ctx;
     Recorder recorder;
     Replayer replayer;
@@ -127,10 +139,13 @@ abstract class ArchiveConductor
         nanoClock = ctx.nanoClock();
         archiveDir = ctx.archiveDir();
         connectTimeoutMs = TimeUnit.NANOSECONDS.toMillis(ctx.connectTimeoutNs());
+        sessionLivenessCheckIntervalMs = TimeUnit.NANOSECONDS.toMillis(ctx.sessionLivenessCheckIntervalNs());
         catalog = ctx.catalog();
         markFile = ctx.archiveMarkFile();
         dutyCycleTracker = ctx.conductorDutyCycleTracker();
         cachedEpochClock.update(epochClock.time());
+
+        random = ctx.secureRandom();
 
         authenticator = ctx.authenticatorSupplier().get();
         if (null == authenticator)
@@ -155,7 +170,7 @@ abstract class ArchiveConductor
             final ChannelUri controlChannelUri = ChannelUri.parse(ctx.controlChannel());
             controlChannelUri.put(CommonContext.SPARSE_PARAM_NAME, Boolean.toString(ctx.controlTermBufferSparse()));
             controlSubscription = aeron.addSubscription(
-                controlChannelUri.toString(), ctx.controlStreamId(), this, null);
+                controlChannelUri.toString(), ctx.controlStreamId(), null, this);
         }
         else
         {
@@ -163,7 +178,10 @@ abstract class ArchiveConductor
         }
 
         localControlSubscription = aeron.addSubscription(
-            ctx.localControlChannel(), ctx.localControlStreamId(), this, null);
+            ctx.localControlChannel(), ctx.localControlStreamId(), null, this);
+
+        controlSessionAdapter = new ControlSessionAdapter(
+            decoders, controlSubscription, localControlSubscription, this, authorisationService);
     }
 
     public void onStart()
@@ -174,9 +192,9 @@ abstract class ArchiveConductor
         dutyCycleTracker.update(nanoClock.nanoTime());
     }
 
-    public void onAvailableImage(final Image image)
+    public void onUnavailableImage(final Image image)
     {
-        addSession(new ControlSessionDemuxer(decoders, image, this, authorisationService));
+        controlSessionAdapter.abortControlSessionByImage(image);
     }
 
     public void onUnavailableCounter(
@@ -186,14 +204,6 @@ abstract class ArchiveConductor
         if (null != counter)
         {
             counter.close();
-
-            for (final ReplaySession session : replaySessionByIdMap.values())
-            {
-                if (session.limitPosition() == counter)
-                {
-                    session.abort();
-                }
-            }
         }
     }
 
@@ -242,6 +252,7 @@ abstract class ArchiveConductor
         }
 
         markFile.updateActivityTimestamp(NULL_VALUE);
+        markFile.force();
         ctx.close();
     }
 
@@ -304,6 +315,9 @@ abstract class ArchiveConductor
             }
         }
 
+        workCount += controlSessionAdapter.poll();
+
+        workCount += checkReplayTokens(nowNs);
         workCount += invokeDriverConductor();
         workCount += runTasks(taskQueue);
 
@@ -355,23 +369,19 @@ abstract class ArchiveConductor
         return workCount;
     }
 
-    Catalog catalog()
-    {
-        return catalog;
-    }
-
     void logWarning(final String message)
     {
         errorHandler.onError(new ArchiveEvent(message));
     }
 
     ControlSession newControlSession(
+        final long imageCorrelationId,
         final long correlationId,
         final int streamId,
         final int version,
         final String channel,
         final byte[] encodedCredentials,
-        final ControlSessionDemuxer demuxer)
+        final ControlSessionAdapter controlSessionAdapter)
     {
         final ChannelUri channelUri = ChannelUri.parse(channel);
 
@@ -384,13 +394,21 @@ abstract class ArchiveConductor
         final String isSparseStr = channelUri.get(SPARSE_PARAM_NAME);
         final boolean isSparse = null == isSparseStr ?
             ctx.controlTermBufferSparse() : Boolean.parseBoolean(isSparseStr);
+        final boolean usingResponseChannel = CONTROL_MODE_RESPONSE.equals(channelUri.get(MDC_CONTROL_MODE_PARAM_NAME));
 
-        final String responseChannel = strippedChannelBuilder(channelUri)
+
+        final ChannelUriStringBuilder urlBuilder = strippedChannelBuilder(channelUri)
             .ttl(channelUri)
             .termLength(termLength)
             .sparse(isSparse)
-            .mtu(mtuLength)
-            .build();
+            .mtu(mtuLength);
+
+        if (usingResponseChannel)
+        {
+            urlBuilder.responseCorrelationId(imageCorrelationId);
+        }
+
+        final String responseChannel = urlBuilder.build();
 
         String invalidVersionMessage = null;
         if (SemanticVersion.major(version) != AeronArchive.Configuration.PROTOCOL_MAJOR_VERSION)
@@ -403,9 +421,10 @@ abstract class ArchiveConductor
             nextSessionId++,
             correlationId,
             connectTimeoutMs,
+            sessionLivenessCheckIntervalMs,
             aeron.asyncAddExclusivePublication(responseChannel, streamId),
             invalidVersionMessage,
-            demuxer,
+            controlSessionAdapter,
             aeron,
             this,
             cachedEpochClock,
@@ -421,6 +440,11 @@ abstract class ArchiveConductor
         return controlSession;
     }
 
+    void archiveId(final long correlationId, final ControlSession controlSession)
+    {
+        controlSession.sendOkResponse(correlationId, ctx.archiveId());
+    }
+
     void startRecording(
         final long correlationId,
         final int streamId,
@@ -432,11 +456,11 @@ abstract class ArchiveConductor
         if (recordingSessionByIdMap.size() >= ctx.maxConcurrentRecordings())
         {
             final String msg = "max concurrent recordings reached " + ctx.maxConcurrentRecordings();
-            controlSession.sendErrorResponse(correlationId, MAX_RECORDINGS, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, MAX_RECORDINGS, msg);
             return;
         }
 
-        if (isLowStorageSpace(correlationId, controlSession))
+        if (null != isLowStorageSpace(correlationId, controlSession))
         {
             return;
         }
@@ -460,18 +484,18 @@ abstract class ArchiveConductor
 
                 recordingSubscriptionByKeyMap.put(key, subscription);
                 subscriptionRefCountMap.incrementAndGet(subscription.registrationId());
-                controlSession.sendOkResponse(correlationId, subscription.registrationId(), controlResponseProxy);
+                controlSession.sendOkResponse(correlationId, subscription.registrationId());
             }
             else
             {
                 final String msg = "recording exists for streamId=" + streamId + " channel=" + originalChannel;
-                controlSession.sendErrorResponse(correlationId, ACTIVE_SUBSCRIPTION, msg, controlResponseProxy);
+                controlSession.sendErrorResponse(correlationId, ACTIVE_SUBSCRIPTION, msg);
             }
         }
         catch (final Exception ex)
         {
             errorHandler.onError(ex);
-            controlSession.sendErrorResponse(correlationId, ex.getMessage(), controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, ex.getMessage());
         }
     }
 
@@ -487,18 +511,18 @@ abstract class ArchiveConductor
             {
                 abortRecordingSessionAndCloseSubscription(subscription);
 
-                controlSession.sendOkResponse(correlationId, controlResponseProxy);
+                controlSession.sendOkResponse(correlationId);
             }
             else
             {
                 final String msg = "no recording found for streamId=" + streamId + " channel=" + channel;
-                controlSession.sendErrorResponse(correlationId, UNKNOWN_SUBSCRIPTION, msg, controlResponseProxy);
+                controlSession.sendErrorResponse(correlationId, UNKNOWN_SUBSCRIPTION, msg);
             }
         }
         catch (final Exception ex)
         {
             errorHandler.onError(ex);
-            controlSession.sendErrorResponse(correlationId, ex.getMessage(), controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, ex.getMessage());
         }
     }
 
@@ -507,12 +531,12 @@ abstract class ArchiveConductor
     {
         if (stopRecordingSubscription(subscriptionId))
         {
-            controlSession.sendOkResponse(correlationId, controlResponseProxy);
+            controlSession.sendOkResponse(correlationId);
         }
         else
         {
             final String msg = "no recording subscription found for subscriptionId=" + subscriptionId;
-            controlSession.sendErrorResponse(correlationId, UNKNOWN_SUBSCRIPTION, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, UNKNOWN_SUBSCRIPTION, msg);
         }
     }
 
@@ -534,7 +558,7 @@ abstract class ArchiveConductor
         if (controlSession.hasActiveListing())
         {
             final String msg = "active listing already in progress";
-            controlSession.sendErrorResponse(correlationId, ACTIVE_LISTING, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, ACTIVE_LISTING, msg);
             return;
         }
 
@@ -543,7 +567,6 @@ abstract class ArchiveConductor
             fromId,
             count,
             catalog,
-            controlResponseProxy,
             controlSession,
             descriptorBuffer);
         addSession(session);
@@ -561,7 +584,7 @@ abstract class ArchiveConductor
         if (controlSession.hasActiveListing())
         {
             final String msg = "active listing already in progress";
-            controlSession.sendErrorResponse(correlationId, ACTIVE_LISTING, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, ACTIVE_LISTING, msg);
             return;
         }
 
@@ -572,7 +595,6 @@ abstract class ArchiveConductor
             channelFragment,
             streamId,
             catalog,
-            controlResponseProxy,
             controlSession,
             descriptorBuffer,
             recordingDescriptorDecoder);
@@ -585,15 +607,14 @@ abstract class ArchiveConductor
         if (controlSession.hasActiveListing())
         {
             final String msg = "active listing already in progress";
-            controlSession.sendErrorResponse(correlationId, ACTIVE_LISTING, msg, controlResponseProxy);
-        }
-        else if (catalog.wrapDescriptor(recordingId, descriptorBuffer))
-        {
-            controlSession.sendDescriptor(correlationId, descriptorBuffer, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, ACTIVE_LISTING, msg);
         }
         else
         {
-            controlSession.sendRecordingUnknown(correlationId, recordingId, controlResponseProxy);
+            final ListRecordingByIdSession session =
+                new ListRecordingByIdSession(correlationId, recordingId, catalog, controlSession, descriptorBuffer);
+            addSession(session);
+            controlSession.activeListing(session);
         }
     }
 
@@ -608,16 +629,17 @@ abstract class ArchiveConductor
         if (minRecordingId < 0)
         {
             final String msg = "minRecordingId=" + minRecordingId + " < 0";
-            controlSession.sendErrorResponse(correlationId, UNKNOWN_RECORDING, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, UNKNOWN_RECORDING, msg);
         }
         else
         {
             final long recordingId = catalog.findLast(minRecordingId, sessionId, streamId, channelFragment);
             // If not found, recordingId is -1, which matches client side specification.
-            controlSession.sendOkResponse(correlationId, recordingId, controlResponseProxy);
+            controlSession.sendOkResponse(correlationId, recordingId);
         }
     }
 
+    @SuppressWarnings("MethodLength")
     void startReplay(
         final long correlationId,
         final long recordingId,
@@ -626,40 +648,54 @@ abstract class ArchiveConductor
         final int fileIoMaxLength,
         final int replayStreamId,
         final String replayChannel,
-        final Counter limitPosition,
+        final Counter limitPositionCounter,
         final ControlSession controlSession)
     {
         if (replaySessionByIdMap.size() >= ctx.maxConcurrentReplays())
         {
             final String msg = "max concurrent replays reached " + ctx.maxConcurrentReplays();
-            controlSession.sendErrorResponse(correlationId, MAX_REPLAYS, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, MAX_REPLAYS, msg);
             return;
         }
 
         if (!catalog.hasRecording(recordingId))
         {
             final String msg = "unknown recording id: " + recordingId;
-            controlSession.sendErrorResponse(correlationId, UNKNOWN_RECORDING, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, UNKNOWN_RECORDING, msg);
             return;
         }
 
-        catalog.recordingSummary(recordingId, recordingSummary);
-        long replayPosition = recordingSummary.startPosition;
+        Counter replayLimitPositionCounter = limitPositionCounter;
+        if (null == replayLimitPositionCounter)
+        {
+            final RecordingSession recordingSession = recordingSessionByIdMap.get(recordingId);
+            if (null != recordingSession)
+            {
+                replayLimitPositionCounter = recordingSession.recordingPosition();
+            }
+        }
+        long limitPosition = NULL_POSITION;
+        if (null != replayLimitPositionCounter)
+        {
+            limitPosition = replayLimitPositionCounter.get();
+        }
 
+        catalog.recordingSummary(recordingId, recordingSummary);
+        final long startPosition = recordingSummary.startPosition;
+        long replayPosition = startPosition;
         if (NULL_POSITION != position)
         {
             if (isInvalidReplayPosition(correlationId, controlSession, recordingId, position, recordingSummary))
             {
                 return;
             }
-
             replayPosition = position;
         }
 
         if (fileIoMaxLength > 0 && fileIoMaxLength < recordingSummary.mtuLength)
         {
             final String msg = "fileIoMaxLength=" + fileIoMaxLength + " < mtuLength=" + recordingSummary.mtuLength;
-            controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, msg);
             return;
         }
         else if (ctx.replayBuffer().capacity() < recordingSummary.mtuLength)
@@ -667,7 +703,37 @@ abstract class ArchiveConductor
             final int replayBufferCapacity = ctx.replayBuffer().capacity();
             final String msg = "replayBufferCapacity=" + replayBufferCapacity +
                 " < mtuLength=" + recordingSummary.mtuLength;
-            controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, msg);
+            return;
+        }
+
+        final long stopPosition;
+        final long maxLength;
+        if (NULL_POSITION != limitPosition)
+        {
+            if (replayPosition > limitPosition)
+            {
+                final String msg = "requested replay start position=" + replayPosition +
+                    " must be less than the limit position=" + limitPosition + " for recording " + recordingId;
+                controlSession.sendErrorResponse(correlationId, msg);
+                return;
+            }
+            stopPosition = limitPosition;
+            maxLength = Long.MAX_VALUE - replayPosition;
+        }
+        else
+        {
+            stopPosition = recordingSummary.stopPosition;
+            maxLength = stopPosition - replayPosition;
+        }
+
+        final long replayLength = AeronArchive.NULL_LENGTH == length ? maxLength : min(length, maxLength);
+        if (replayLength < 0)
+        {
+            final String msg = "replay length must be positive: replayLength=" + replayLength + ", length=" + length +
+                ", stopPosition=" + stopPosition + ", replayPosition=" + replayPosition + " for recording " +
+                recordingId;
+            controlSession.sendErrorResponse(correlationId, msg);
             return;
         }
 
@@ -688,44 +754,43 @@ abstract class ArchiveConductor
                 correlationId,
                 recordingId,
                 replayPosition,
-                length,
+                replayLength,
+                startPosition,
+                stopPosition,
+                recordingSummary.segmentFileLength,
+                recordingSummary.termBufferLength,
+                recordingSummary.streamId,
                 aeron.asyncAddExclusivePublication(channelBuilder.build(), replayStreamId),
                 fileIoMaxLength,
-                limitPosition,
+                replayLimitPositionCounter,
                 aeron,
                 controlSession,
-                controlResponseProxy,
                 this));
-
         }
         catch (final Exception ex)
         {
             final String msg = "failed to process replayChannel - " + ex.getMessage();
-            controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, msg);
             throw ex;
         }
     }
 
     void newReplaySession(
+        final long correlationId,
         final long recordingId,
         final long replayPosition,
         final long replayLength,
-        final long correlationId,
+        final long startPosition,
+        final long stopPosition,
+        final int segmentFileLength,
+        final int termBufferLength,
+        final int streamId,
         final int fileIoMaxLength,
         final ControlSession controlSession,
-        final Counter limitPositionCounter,
+        final Counter replayLimitPosition,
         final ExclusivePublication replayPublication)
     {
         final long replaySessionId = ((long)(replayId++) << 32) | (replayPublication.sessionId() & 0xFFFF_FFFFL);
-
-        Counter replayLimitPosition = limitPositionCounter;
-        if (null == replayLimitPosition)
-        {
-            final RecordingSession recordingSession = recordingSessionByIdMap.get(recordingId);
-            replayLimitPosition = null == recordingSession ? null : recordingSession.recordingPosition();
-        }
-
-        catalog.recordingSummary(recordingId, recordingSummary);
 
         final UnsafeBuffer replayBuffer;
         if (0 < fileIoMaxLength && fileIoMaxLength < ctx.replayBuffer().capacity())
@@ -738,20 +803,24 @@ abstract class ArchiveConductor
         }
 
         final ReplaySession replaySession = new ReplaySession(
+            correlationId,
+            recordingId,
             replayPosition,
             replayLength,
+            startPosition,
+            stopPosition,
+            segmentFileLength,
+            termBufferLength,
+            streamId,
             replaySessionId,
             connectTimeoutMs,
-            correlationId,
             controlSession,
-            controlResponseProxy,
             replayBuffer,
-            catalog,
             archiveDir,
             cachedEpochClock,
             nanoClock,
             replayPublication,
-            recordingSummary,
+            aeron.countersReader(),
             replayLimitPosition,
             ctx.replayChecksum(),
             replayer);
@@ -783,7 +852,7 @@ abstract class ArchiveConductor
             {
                 final String msg = "unable to create replay limit counter id= " + limitCounterId +
                     " because of: " + ex.getMessage();
-                controlSession.sendErrorResponse(correlationId, GENERIC, msg, controlResponseProxy);
+                controlSession.sendErrorResponse(correlationId, GENERIC, msg);
                 return;
             }
 
@@ -805,16 +874,12 @@ abstract class ArchiveConductor
     void stopReplay(final long correlationId, final long replaySessionId, final ControlSession controlSession)
     {
         final ReplaySession replaySession = replaySessionByIdMap.get(replaySessionId);
-        if (null == replaySession)
+        if (null != replaySession)
         {
-            final String errorMessage = "replay session not known for " + replaySessionId;
-            controlSession.sendErrorResponse(correlationId, UNKNOWN_REPLAY, errorMessage, controlResponseProxy);
+            replaySession.abort("stop replay");
         }
-        else
-        {
-            replaySession.abort();
-            controlSession.sendOkResponse(correlationId, controlResponseProxy);
-        }
+
+        controlSession.sendOkResponse(correlationId);
     }
 
     void stopAllReplays(final long correlationId, final long recordingId, final ControlSession controlSession)
@@ -823,14 +888,15 @@ abstract class ArchiveConductor
         {
             if (NULL_VALUE == recordingId || replaySession.recordingId() == recordingId)
             {
-                replaySession.abort();
+                replaySession.abort("stop all replays");
             }
         }
 
-        controlSession.sendOkResponse(correlationId, controlResponseProxy);
+        controlSession.sendOkResponse(correlationId);
     }
 
-    Subscription extendRecording(
+    /* Returns a Subscription or a String error message indicating why the subscription couldn't be acquired */
+    Object extendRecording(
         final long correlationId,
         final long recordingId,
         final int streamId,
@@ -842,15 +908,15 @@ abstract class ArchiveConductor
         if (recordingSessionByIdMap.size() >= ctx.maxConcurrentRecordings())
         {
             final String msg = "max concurrent recordings reached at " + ctx.maxConcurrentRecordings();
-            controlSession.sendErrorResponse(correlationId, MAX_RECORDINGS, msg, controlResponseProxy);
-            return null;
+            controlSession.sendErrorResponse(correlationId, MAX_RECORDINGS, msg);
+            return msg;
         }
 
         if (!catalog.hasRecording(recordingId))
         {
             final String msg = "unknown recording id: " + recordingId;
-            controlSession.sendErrorResponse(correlationId, UNKNOWN_RECORDING, msg, controlResponseProxy);
-            return null;
+            controlSession.sendErrorResponse(correlationId, UNKNOWN_RECORDING, msg);
+            return msg;
         }
 
         catalog.recordingSummary(recordingId, recordingSummary);
@@ -858,20 +924,30 @@ abstract class ArchiveConductor
         {
             final String msg = "cannot extend recording " + recordingSummary.recordingId +
                 " with streamId=" + streamId + " for existing streamId=" + recordingSummary.streamId;
-            controlSession.sendErrorResponse(correlationId, UNKNOWN_RECORDING, msg, controlResponseProxy);
-            return null;
+            controlSession.sendErrorResponse(correlationId, UNKNOWN_RECORDING, msg);
+            return msg;
         }
 
         if (recordingSessionByIdMap.containsKey(recordingId))
         {
             final String msg = "cannot extend active recording " + recordingId;
-            controlSession.sendErrorResponse(correlationId, ACTIVE_RECORDING, msg, controlResponseProxy);
-            return null;
+            controlSession.sendErrorResponse(correlationId, ACTIVE_RECORDING, msg);
+            return msg;
         }
 
-        if (isLowStorageSpace(correlationId, controlSession))
+        final DeleteSegmentsSession deleteSegmentsSession = deleteSegmentsSessionByIdMap.get(recordingId);
+        if (null != deleteSegmentsSession && deleteSegmentsSession.maxDeletePosition() >= recordingSummary.stopPosition)
         {
-            return null;
+            final String msg = "cannot extend recording " + recordingId +
+                " due to an outstanding delete operation";
+            controlSession.sendErrorResponse(correlationId, msg);
+            return msg;
+        }
+
+        final String lowStorageSpaceMsg = isLowStorageSpace(correlationId, controlSession);
+        if (null != lowStorageSpaceMsg)
+        {
+            return lowStorageSpaceMsg;
         }
 
         try
@@ -893,30 +969,30 @@ abstract class ArchiveConductor
 
                 recordingSubscriptionByKeyMap.put(key, subscription);
                 subscriptionRefCountMap.incrementAndGet(subscription.registrationId());
-                controlSession.sendOkResponse(correlationId, subscription.registrationId(), controlResponseProxy);
+                controlSession.sendOkResponse(correlationId, subscription.registrationId());
 
                 return subscription;
             }
             else
             {
                 final String msg = "recording exists for streamId=" + streamId + " channel=" + originalChannel;
-                controlSession.sendErrorResponse(correlationId, ACTIVE_SUBSCRIPTION, msg, controlResponseProxy);
+                controlSession.sendErrorResponse(correlationId, ACTIVE_SUBSCRIPTION, msg);
+                return msg;
             }
         }
         catch (final Exception ex)
         {
             errorHandler.onError(ex);
-            controlSession.sendErrorResponse(correlationId, ex.getMessage(), controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, ex.getMessage());
+            return ex.getMessage();
         }
-
-        return null;
     }
 
     void getStartPosition(final long correlationId, final long recordingId, final ControlSession controlSession)
     {
         if (hasRecording(recordingId, correlationId, controlSession))
         {
-            controlSession.sendOkResponse(correlationId, catalog.startPosition(recordingId), controlResponseProxy);
+            controlSession.sendOkResponse(correlationId, catalog.startPosition(recordingId));
         }
     }
 
@@ -927,7 +1003,7 @@ abstract class ArchiveConductor
             final RecordingSession recordingSession = recordingSessionByIdMap.get(recordingId);
             final long position = null == recordingSession ? NULL_POSITION : recordingSession.recordingPosition().get();
 
-            controlSession.sendOkResponse(correlationId, position, controlResponseProxy);
+            controlSession.sendOkResponse(correlationId, position);
         }
     }
 
@@ -935,7 +1011,20 @@ abstract class ArchiveConductor
     {
         if (hasRecording(recordingId, correlationId, controlSession))
         {
-            controlSession.sendOkResponse(correlationId, catalog.stopPosition(recordingId), controlResponseProxy);
+            controlSession.sendOkResponse(correlationId, catalog.stopPosition(recordingId));
+        }
+    }
+
+    void getMaxRecordedPosition(
+        final long correlationId, final long recordingId, final ControlSession controlSession)
+    {
+        if (hasRecording(recordingId, correlationId, controlSession))
+        {
+            final RecordingSession recordingSession = recordingSessionByIdMap.get(recordingId);
+            final long maxRecordedPosition = null != recordingSession ?
+                recordingSession.recordingPosition().get() : catalog.stopPosition(recordingId);
+
+            controlSession.sendOkResponse(correlationId, maxRecordedPosition);
         }
     }
 
@@ -943,7 +1032,8 @@ abstract class ArchiveConductor
         final long correlationId, final long recordingId, final long position, final ControlSession controlSession)
     {
         if (hasRecording(recordingId, correlationId, controlSession) &&
-            isValidTruncate(correlationId, controlSession, recordingId, position))
+            isValidTruncate(correlationId, controlSession, recordingId, position) &&
+            isDeleteAllowed(recordingId, correlationId, controlSession))
         {
             final long stopPosition = recordingSummary.stopPosition;
             final int segmentLength = recordingSummary.segmentFileLength;
@@ -958,19 +1048,7 @@ abstract class ArchiveConductor
             final ArrayDeque<String> files = new ArrayDeque<>();
             if (startPosition == position)
             {
-                final String prefix = recordingId + "-";
-                final String[] recordingFiles = archiveDir.list();
-                if (null != recordingFiles)
-                {
-                    for (final String file : recordingFiles)
-                    {
-                        if (file.startsWith(prefix) &&
-                            (file.endsWith(RECORDING_SEGMENT_SUFFIX) || file.endsWith(DELETE_SUFFIX)))
-                        {
-                            files.addLast(file);
-                        }
-                    }
-                }
+                listSegmentFiles(recordingId, files::addLast);
             }
             else
             {
@@ -1004,26 +1082,13 @@ abstract class ArchiveConductor
     void purgeRecording(final long correlationId, final long recordingId, final ControlSession controlSession)
     {
         if (hasRecording(recordingId, correlationId, controlSession) &&
-            isValidPurge(correlationId, controlSession, recordingId))
+            isValidPurge(correlationId, controlSession, recordingId) &&
+            isDeleteAllowed(recordingId, correlationId, controlSession))
         {
-            final ArrayDeque<String> files = new ArrayDeque<>();
+            catalog.changeState(recordingId, DELETED);
 
-            if (catalog.invalidateRecording(recordingId))
-            {
-                final String[] segmentFiles = archiveDir.list();
-                if (null != segmentFiles)
-                {
-                    final String prefix = recordingId + "-";
-                    for (final String segmentFile : segmentFiles)
-                    {
-                        if (segmentFile.startsWith(prefix) &&
-                            (segmentFile.endsWith(RECORDING_SEGMENT_SUFFIX) || segmentFile.endsWith(DELETE_SUFFIX)))
-                        {
-                            files.addLast(segmentFile);
-                        }
-                    }
-                }
-            }
+            final ArrayDeque<String> files = new ArrayDeque<>();
+            listSegmentFiles(recordingId, files::addLast);
 
             deleteSegments(correlationId, recordingId, controlSession, files);
         }
@@ -1041,11 +1106,11 @@ abstract class ArchiveConductor
         if (controlSession.hasActiveListing())
         {
             final String msg = "active listing already in progress";
-            controlSession.sendErrorResponse(correlationId, ACTIVE_LISTING, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, ACTIVE_LISTING, msg);
         }
         else if (pseudoIndex < 0 || pseudoIndex >= recordingSubscriptionByKeyMap.size() || subscriptionCount <= 0)
         {
-            controlSession.sendSubscriptionUnknown(correlationId, controlResponseProxy);
+            controlSession.sendSubscriptionUnknown(correlationId);
         }
         else
         {
@@ -1057,8 +1122,8 @@ abstract class ArchiveConductor
                 applyStreamId,
                 channelFragment,
                 correlationId,
-                controlSession,
-                controlResponseProxy);
+                controlSession
+            );
             addSession(session);
             controlSession.activeListing(session);
         }
@@ -1073,7 +1138,7 @@ abstract class ArchiveConductor
 
             if (null != recordingSession)
             {
-                recordingSession.abort();
+                recordingSession.abort("stop recording by identity");
 
                 final long subscriptionId = recordingSession.subscription().registrationId();
                 final Subscription subscription = removeRecordingSubscription(subscriptionId);
@@ -1088,7 +1153,7 @@ abstract class ArchiveConductor
                 }
             }
 
-            controlSession.sendOkResponse(correlationId, found, controlResponseProxy);
+            controlSession.sendOkResponse(correlationId, found);
         }
     }
 
@@ -1107,9 +1172,9 @@ abstract class ArchiveConductor
 
             try
             {
-                recordingSessionByIdMap.remove(recordingId);
                 catalog.recordingStopped(recordingId, position, epochClock.time());
-                session.sendPendingError(controlResponseProxy);
+                recordingSessionByIdMap.remove(recordingId);
+                session.sendPendingError();
                 session.controlSession().sendSignal(
                     session.correlationId(),
                     recordingId,
@@ -1124,7 +1189,7 @@ abstract class ArchiveConductor
 
             if (subscriptionRefCountMap.decrementAndGet(subscriptionId) <= 0 || session.isAutoStop())
             {
-                closeAndRemoveRecordingSubscription(subscription);
+                closeAndRemoveRecordingSubscription(subscription, "close recording session");
             }
             closeSession(session);
             ctx.recordingSessionCounter().decrementOrdered();
@@ -1137,7 +1202,7 @@ abstract class ArchiveConductor
         {
             try
             {
-                session.sendPendingError(controlResponseProxy);
+                session.sendPendingError();
             }
             catch (final Exception ex)
             {
@@ -1164,13 +1229,33 @@ abstract class ArchiveConductor
         final int fileIoMaxLength,
         final int replicationSessionId,
         final byte[] encodedCredentials,
+        final String srcResponseChannel,
         final ControlSession controlSession)
     {
+        final String replicationChannel0 = Strings.isEmpty(replicationChannel) ?
+            ctx.replicationChannel() : replicationChannel;
+
+        final ChannelUri replicationChannelUri = ChannelUri.parse(replicationChannel0);
+        if (replicationChannelUri.hasControlModeResponse() && !Strings.isEmpty(liveDestination))
+        {
+            final String msg = "response channels can't be used with live destinations";
+            controlSession.sendErrorResponse(correlationId, GENERIC, msg);
+            return;
+        }
+
+        if (replicationChannelUri.hasControlModeResponse() &&
+            (NULL_VALUE != channelTagId || NULL_VALUE != subscriptionTagId))
+        {
+            final String msg = "response channels can't be used with tagged replication";
+            controlSession.sendErrorResponse(correlationId, GENERIC, msg);
+            return;
+        }
+
         final boolean hasRecording = catalog.hasRecording(dstRecordingId);
         if (NULL_VALUE != dstRecordingId && !hasRecording)
         {
             final String msg = "unknown destination recording id " + dstRecordingId;
-            controlSession.sendErrorResponse(correlationId, UNKNOWN_RECORDING, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, UNKNOWN_RECORDING, msg);
             return;
         }
 
@@ -1181,7 +1266,7 @@ abstract class ArchiveConductor
             if (NULL_POSITION == recordingSummary.stopPosition || recordingSessionByIdMap.containsKey(dstRecordingId))
             {
                 final String msg = "cannot replicate to active recording " + dstRecordingId;
-                controlSession.sendErrorResponse(correlationId, ACTIVE_RECORDING, msg, controlResponseProxy);
+                controlSession.sendErrorResponse(correlationId, ACTIVE_RECORDING, msg);
                 return;
             }
         }
@@ -1195,6 +1280,11 @@ abstract class ArchiveConductor
             remoteArchiveContext.credentialsSupplier(new ReplicationCredentialsSupplier(encodedCredentials));
         }
 
+        if (!Strings.isEmpty(srcResponseChannel))
+        {
+            remoteArchiveContext.controlResponseChannel(srcResponseChannel);
+        }
+
         final long replicationId = nextSessionId++;
         final ReplicationSession replicationSession = new ReplicationSession(
             srcRecordingId,
@@ -1204,20 +1294,19 @@ abstract class ArchiveConductor
             replicationId,
             stopPosition,
             liveDestination,
-            Strings.isEmpty(replicationChannel) ? ctx.replicationChannel() : replicationChannel,
+            replicationChannel0,
             fileIoMaxLength,
             replicationSessionId,
             hasRecording ? recordingSummary : null,
             remoteArchiveContext,
             cachedEpochClock,
             catalog,
-            controlResponseProxy,
             controlSession);
 
         replicationSessionByIdMap.put(replicationId, replicationSession);
         addSession(replicationSession);
 
-        controlSession.sendOkResponse(correlationId, replicationId, controlResponseProxy);
+        controlSession.sendOkResponse(correlationId, replicationId);
     }
 
     void stopReplication(final long correlationId, final long replicationId, final ControlSession controlSession)
@@ -1226,12 +1315,12 @@ abstract class ArchiveConductor
         if (null == session)
         {
             final String msg = "unknown replication id " + replicationId;
-            controlSession.sendErrorResponse(correlationId, UNKNOWN_REPLICATION, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, UNKNOWN_REPLICATION, msg);
         }
         else
         {
-            session.abort();
-            controlSession.sendOkResponse(correlationId, controlResponseProxy);
+            session.abort("stop replication");
+            controlSession.sendOkResponse(correlationId);
         }
     }
 
@@ -1245,16 +1334,32 @@ abstract class ArchiveConductor
             isValidDetach(correlationId, controlSession, recordingId, newStartPosition))
         {
             catalog.startPosition(recordingId, newStartPosition);
-            controlSession.sendOkResponse(correlationId, controlResponseProxy);
+            controlSession.sendOkResponse(correlationId);
         }
     }
 
     void deleteDetachedSegments(final long correlationId, final long recordingId, final ControlSession controlSession)
     {
-        if (hasRecording(recordingId, correlationId, controlSession))
+        if (hasRecording(recordingId, correlationId, controlSession) &&
+            isDeleteAllowed(recordingId, correlationId, controlSession))
         {
+            final MutableLong minPosition = new MutableLong(Long.MAX_VALUE);
+            final int prefixLength = digitCount(recordingId) + 1;
+            listSegmentFiles(
+                recordingId,
+                (segmentFile) ->
+                {
+                    final int dotIndex = segmentFile.indexOf('.');
+                    final long filePosition =
+                        AsciiEncoding.parseLongAscii(segmentFile, prefixLength, dotIndex - prefixLength);
+                    minPosition.set(Math.min(minPosition.get(), filePosition));
+                });
+
             final ArrayDeque<String> files = new ArrayDeque<>();
-            findDetachedSegments(recordingId, files);
+            if (Long.MAX_VALUE != minPosition.get())
+            {
+                findDetachedSegments(recordingId, files, minPosition.get());
+            }
             deleteSegments(correlationId, recordingId, controlSession, files);
         }
     }
@@ -1266,12 +1371,16 @@ abstract class ArchiveConductor
         final ControlSession controlSession)
     {
         if (hasRecording(recordingId, correlationId, controlSession) &&
-            isValidDetach(correlationId, controlSession, recordingId, newStartPosition))
+            isValidDetach(correlationId, controlSession, recordingId, newStartPosition) &&
+            isDeleteAllowed(recordingId, correlationId, controlSession))
         {
+            catalog.recordingSummary(recordingId, recordingSummary);
+            final long oldStartPosition = recordingSummary.startPosition;
+
             catalog.startPosition(recordingId, newStartPosition);
 
             final ArrayDeque<String> files = new ArrayDeque<>();
-            findDetachedSegments(recordingId, files);
+            findDetachedSegments(recordingId, files, oldStartPosition);
             deleteSegments(correlationId, recordingId, controlSession, files);
         }
     }
@@ -1300,7 +1409,7 @@ abstract class ArchiveConductor
                 if (fileLength != segmentLength)
                 {
                     final String msg = "fileLength=" + fileLength + " not equal to segmentLength=" + segmentLength;
-                    controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+                    controlSession.sendErrorResponse(correlationId, msg);
                     return;
                 }
 
@@ -1330,12 +1439,12 @@ abstract class ArchiveConductor
                 }
                 catch (final IOException ex)
                 {
-                    controlSession.sendErrorResponse(correlationId, ex.getMessage(), controlResponseProxy);
+                    controlSession.sendErrorResponse(correlationId, ex.getMessage());
                     LangUtil.rethrowUnchecked(ex);
                 }
             }
 
-            controlSession.sendOkResponse(correlationId, count, controlResponseProxy);
+            controlSession.sendOkResponse(correlationId, count);
         }
     }
 
@@ -1374,7 +1483,7 @@ abstract class ArchiveConductor
                     " srcStopPosition=" + srcSummary.stopPosition +
                     " dstStartPosition=" + dstSummary.startPosition +
                     " dstStopPosition=" + dstSummary.stopPosition;
-                controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+                controlSession.sendErrorResponse(correlationId, msg);
                 return;
             }
 
@@ -1412,7 +1521,7 @@ abstract class ArchiveConductor
 
                     catalog.stopPosition(srcRecordingId, srcSummary.startPosition);
 
-                    controlSession.sendOkResponse(correlationId, movedSegmentCount, controlResponseProxy);
+                    controlSession.sendOkResponse(correlationId, movedSegmentCount);
 
                     final boolean hasSegmentsToDelete = toBeDeletedSegmentCount > 0;
                     if (movedSegmentCount > 0 && !hasSegmentsToDelete)
@@ -1430,17 +1539,33 @@ abstract class ArchiveConductor
         replicationSessionByIdMap.remove(replicationSession.sessionId());
     }
 
-    private void findDetachedSegments(final long recordingId, final ArrayDeque<String> files)
+    void removeDeleteSegmentsSession(final DeleteSegmentsSession deleteSegmentsSession)
+    {
+        deleteSegmentsSessionByIdMap.remove(deleteSegmentsSession.sessionId());
+    }
+
+    private void findDetachedSegments(
+        final long recordingId, final ArrayDeque<String> files, final long prevStartPosition)
     {
         catalog.recordingSummary(recordingId, recordingSummary);
-        final int segmentFile = recordingSummary.segmentFileLength;
-        long filenamePosition = recordingSummary.startPosition - segmentFile;
+        final int segmentFileLength = recordingSummary.segmentFileLength;
 
-        while (filenamePosition >= 0)
+        final long prevSegmentFilePosition = segmentFileBasePosition(
+            prevStartPosition, prevStartPosition, recordingSummary.termBufferLength, segmentFileLength);
+
+        final long startSegmentFilePosition = segmentFileBasePosition(
+            recordingSummary.startPosition,
+            recordingSummary.startPosition,
+            recordingSummary.termBufferLength,
+            segmentFileLength);
+
+        long filenamePosition = startSegmentFilePosition - segmentFileLength;
+
+        while (filenamePosition >= prevSegmentFilePosition)
         {
             final String segmentFileName = segmentFileName(recordingId, filenamePosition);
             files.addFirst(segmentFileName);
-            filenamePosition -= segmentFile;
+            filenamePosition -= segmentFileLength;
         }
     }
 
@@ -1458,41 +1583,13 @@ abstract class ArchiveConductor
         final ArrayDeque<File> deleteList = new ArrayDeque<>(files.size());
         for (final String name : files)
         {
-            final File file = new File(archiveDir, name);
-            if (file.exists())
-            {
-                if (!name.endsWith(DELETE_SUFFIX))
-                {
-                    final File toDelete = new File(archiveDir, name + DELETE_SUFFIX);
-                    if (!file.renameTo(toDelete))
-                    {
-                        final String msg = "failed to rename " + file + " to " + toDelete;
-                        controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
-                        return -1;
-                    }
-                    deleteList.addLast(toDelete);
-                }
-                else
-                {
-                    deleteList.addLast(file);
-                }
-            }
-            else if (!name.endsWith(DELETE_SUFFIX))
-            {
-                final File toDelete = new File(archiveDir, name + DELETE_SUFFIX);
-                if (toDelete.exists())
-                {
-                    deleteList.addLast(toDelete);
-                }
-            }
+            deleteList.add(new File(archiveDir, name));
         }
 
-        final int count = deleteList.size();
-
         addSession(new DeleteSegmentsSession(
-            recordingId, correlationId, deleteList, controlSession, controlResponseProxy, errorHandler));
+            recordingId, correlationId, deleteList, controlSession, errorHandler));
 
-        return count;
+        return files.size();
     }
 
     private void abortRecordingSessionAndCloseSubscription(final Subscription subscription)
@@ -1501,7 +1598,7 @@ abstract class ArchiveConductor
         {
             if (subscription == session.subscription())
             {
-                session.abort();
+                session.abort("stop recording");
             }
         }
 
@@ -1529,7 +1626,7 @@ abstract class ArchiveConductor
         if (HEADER_LENGTH != fileChannel.read(byteBuffer, 0))
         {
             final String msg = "failed to read segment file";
-            controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, msg);
             return termOffset;
         }
 
@@ -1544,7 +1641,7 @@ abstract class ArchiveConductor
                 if (bytesRead <= 0)
                 {
                     final String msg = "read failed on " + file;
-                    controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+                    controlSession.sendErrorResponse(correlationId, msg);
                     return NULL_VALUE;
                 }
 
@@ -1569,7 +1666,7 @@ abstract class ArchiveConductor
         if (termOffset >= termLength)
         {
             final String msg = "fragment not found in first term of segment " + file;
-            controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, msg);
             return NULL_VALUE;
         }
 
@@ -1577,7 +1674,7 @@ abstract class ArchiveConductor
         if (fileTermId != termId)
         {
             final String msg = "term id does not match: actual=" + fileTermId + " expected=" + termId;
-            controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, msg);
             return NULL_VALUE;
         }
 
@@ -1585,7 +1682,7 @@ abstract class ArchiveConductor
         if (fileStreamId != streamId)
         {
             final String msg = "stream id does not match: actual=" + fileStreamId + " expected=" + streamId;
-            controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, msg);
             return NULL_VALUE;
         }
 
@@ -1628,7 +1725,8 @@ abstract class ArchiveConductor
             .channelReceiveTimestampOffset(channelUri)
             .mediaReceiveTimestampOffset(channelUri)
             .sessionId(channelUri)
-            .alias(channelUri);
+            .alias(channelUri)
+            .responseCorrelationId(channelUri);
     }
 
     private static String makeKey(final int streamId, final ChannelUri channelUri)
@@ -1677,11 +1775,40 @@ abstract class ArchiveConductor
         if (!catalog.hasRecording(recordingId))
         {
             final String msg = "unknown recording id: " + recordingId;
-            session.sendErrorResponse(correlationId, UNKNOWN_RECORDING, msg, controlResponseProxy);
+            session.sendErrorResponse(correlationId, UNKNOWN_RECORDING, msg);
             return false;
         }
 
         return true;
+    }
+
+    private boolean isDeleteAllowed(
+        final long recordingId, final long correlationId, final ControlSession controlSession)
+    {
+        if (deleteSegmentsSessionByIdMap.containsKey(recordingId))
+        {
+            final String msg = "another delete operation in progress for recording id: " + recordingId;
+            controlSession.sendErrorResponse(correlationId, msg);
+            return false;
+        }
+        return true;
+    }
+
+    private void listSegmentFiles(final long recordingId, final Consumer<String> segmentFileConsumer)
+    {
+        final String prefix = recordingId + "-";
+        final String[] recordingFiles = archiveDir.list();
+        if (null != recordingFiles)
+        {
+            for (final String name : recordingFiles)
+            {
+                if (name.startsWith(prefix) &&
+                    (name.endsWith(RECORDING_SEGMENT_SUFFIX) || name.endsWith(DELETE_SUFFIX)))
+                {
+                    segmentFileConsumer.accept(name);
+                }
+            }
+        }
     }
 
     private void startRecordingSession(
@@ -1768,7 +1895,18 @@ abstract class ArchiveConductor
             {
                 final String msg = "cannot extend active recording " + recordingId +
                     " streamId=" + image.subscription().streamId() + " channel=" + originalChannel;
-                controlSession.attemptErrorResponse(correlationId, ACTIVE_RECORDING, msg, controlResponseProxy);
+                controlSession.sendErrorResponse(correlationId, ACTIVE_RECORDING, msg);
+                throw new ArchiveEvent(msg);
+            }
+
+            final DeleteSegmentsSession deleteSegmentsSession = deleteSegmentsSessionByIdMap.get(recordingId);
+            if (null != deleteSegmentsSession &&
+                deleteSegmentsSession.maxDeletePosition() >= recordingSummary.stopPosition)
+            {
+                final String msg = "cannot extend recording " + recordingId +
+                    " streamId=" + image.subscription().streamId() + " channel=" + originalChannel +
+                    " due to an outstanding delete operation";
+                controlSession.sendErrorResponse(correlationId, GENERIC, msg);
                 throw new ArchiveEvent(msg);
             }
 
@@ -1815,7 +1953,7 @@ abstract class ArchiveConductor
             errorHandler.onError(ex);
             if (autoStop)
             {
-                closeAndRemoveRecordingSubscription(image.subscription());
+                closeAndRemoveRecordingSubscription(image.subscription(), ex.getMessage());
             }
         }
     }
@@ -1846,7 +1984,7 @@ abstract class ArchiveConductor
         {
             final String msg = "cannot extend recording " + recordingSummary.recordingId +
                 " image.joinPosition=" + image.joinPosition() + " != rec.stopPosition=" + recordingSummary.stopPosition;
-            controlSession.attemptErrorResponse(correlationId, INVALID_EXTENSION, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, INVALID_EXTENSION, msg);
             throw new ArchiveEvent(msg);
         }
 
@@ -1855,7 +1993,7 @@ abstract class ArchiveConductor
             final String msg = "cannot extend recording " + recordingSummary.recordingId +
                 " image.initialTermId=" + image.initialTermId() +
                 " != rec.initialTermId=" + recordingSummary.initialTermId;
-            controlSession.attemptErrorResponse(correlationId, INVALID_EXTENSION, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, INVALID_EXTENSION, msg);
             throw new ArchiveEvent(msg);
         }
 
@@ -1864,7 +2002,7 @@ abstract class ArchiveConductor
             final String msg = "cannot extend recording " + recordingSummary.recordingId +
                 " image.termBufferLength=" + image.termBufferLength() +
                 " != rec.termBufferLength=" + recordingSummary.termBufferLength;
-            controlSession.attemptErrorResponse(correlationId, INVALID_EXTENSION, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, INVALID_EXTENSION, msg);
             throw new ArchiveEvent(msg);
         }
 
@@ -1872,7 +2010,7 @@ abstract class ArchiveConductor
         {
             final String msg = "cannot extend recording " + recordingSummary.recordingId +
                 " image.mtuLength=" + image.mtuLength() + " != rec.mtuLength=" + recordingSummary.mtuLength;
-            controlSession.attemptErrorResponse(correlationId, INVALID_EXTENSION, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, INVALID_EXTENSION, msg);
             throw new ArchiveEvent(msg);
         }
     }
@@ -1885,7 +2023,7 @@ abstract class ArchiveConductor
             if (replaySession.recordingId() == recordingId)
             {
                 final String msg = "cannot truncate recording with active replay " + recordingId;
-                controlSession.sendErrorResponse(correlationId, ACTIVE_RECORDING, msg, controlResponseProxy);
+                controlSession.sendErrorResponse(correlationId, ACTIVE_RECORDING, msg);
                 return false;
             }
         }
@@ -1897,7 +2035,7 @@ abstract class ArchiveConductor
         if (NULL_POSITION == stopPosition)
         {
             final String msg = "cannot truncate active recording";
-            controlSession.sendErrorResponse(correlationId, ACTIVE_RECORDING, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, ACTIVE_RECORDING, msg);
             return false;
         }
 
@@ -1905,7 +2043,7 @@ abstract class ArchiveConductor
         {
             final String msg = "invalid position " + position +
                 ": start=" + startPosition + " stop=" + stopPosition + " alignment=" + FRAME_ALIGNMENT;
-            controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, msg);
             return false;
         }
 
@@ -1919,7 +2057,7 @@ abstract class ArchiveConductor
             if (replaySession.recordingId() == recordingId)
             {
                 final String msg = "cannot purge recording with active replay " + recordingId;
-                controlSession.sendErrorResponse(correlationId, ACTIVE_RECORDING, msg, controlResponseProxy);
+                controlSession.sendErrorResponse(correlationId, ACTIVE_RECORDING, msg);
                 return false;
             }
         }
@@ -1930,7 +2068,7 @@ abstract class ArchiveConductor
         if (NULL_POSITION == stopPosition)
         {
             final String msg = "cannot purge active recording " + recordingId;
-            controlSession.sendErrorResponse(correlationId, ACTIVE_RECORDING, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, ACTIVE_RECORDING, msg);
             return false;
         }
 
@@ -1948,7 +2086,7 @@ abstract class ArchiveConductor
         {
             final String msg = "requested replay start position=" + position +
                 " is not a multiple of FRAME_ALIGNMENT (" + FRAME_ALIGNMENT + ") for recording " + recordingId;
-            controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, msg);
             return true;
         }
 
@@ -1957,7 +2095,7 @@ abstract class ArchiveConductor
         {
             final String msg = "requested replay start position=" + position +
                 " is less than recording start position=" + startPosition + " for recording " + recordingId;
-            controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, msg);
             return true;
         }
 
@@ -1966,7 +2104,7 @@ abstract class ArchiveConductor
         {
             final String msg = "requested replay start position=" + position +
                 " must be less than highest recorded position=" + stopPosition + " for recording " + recordingId;
-            controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, msg);
             return true;
         }
 
@@ -1987,14 +2125,14 @@ abstract class ArchiveConductor
         if (position != segmentFileBasePosition(startPosition, position, termLength, segmentLength))
         {
             final String msg = "invalid segment start: newStartPosition=" + position;
-            controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, msg);
             return false;
         }
 
         if (position < lowerBound)
         {
             final String msg = "invalid detach: newStartPosition=" + position + " lowerBound=" + lowerBound;
-            controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, msg);
             return false;
         }
 
@@ -2006,7 +2144,7 @@ abstract class ArchiveConductor
         if (position > endPosition)
         {
             final String msg = "invalid detach: in use, newStartPosition=" + position + " upperBound=" + endPosition;
-            controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, msg);
             return false;
         }
 
@@ -2030,7 +2168,7 @@ abstract class ArchiveConductor
                 " sessionId=" + (int)minReplaySession.sessionId() +
                 " streamId=" + minReplaySession.replayStreamId() +
                 " channel=" + minReplaySession.replayChannel();
-            controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, msg);
             return false;
         }
 
@@ -2060,7 +2198,7 @@ abstract class ArchiveConductor
                 " stopPosition=" + recordingSummary.stopPosition +
                 " termBufferLength=" + recordingSummary.termBufferLength +
                 " segmentFileLength=" + recordingSummary.segmentFileLength;
-            controlSession.sendErrorResponse(correlationId, error, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, error);
             return true;
         }
 
@@ -2076,7 +2214,7 @@ abstract class ArchiveConductor
         if (NULL_POSITION == srcStopPosition)
         {
             final String message = "recording " + srcRecordingSummary.recordingId + " is still active";
-            controlSession.sendErrorResponse(correlationId, message, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, message);
             return true;
         }
         return false;
@@ -2094,7 +2232,7 @@ abstract class ArchiveConductor
         {
             final String msg = "invalid migrate: srcSegmentFileLength=" + srcSegmentFileLength +
                 " dstSegmentFileLength=" + dstSegmentFileLength;
-            controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, msg);
             return false;
         }
 
@@ -2104,7 +2242,7 @@ abstract class ArchiveConductor
         {
             final String msg = "invalid migrate: srcTermBufferLength=" + srcTermBufferLength +
                 " dstTermBufferLength=" + dstTermBufferLength;
-            controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, msg);
             return false;
         }
 
@@ -2114,7 +2252,7 @@ abstract class ArchiveConductor
         {
             final String msg = "invalid migrate: srcInitialTermId=" + srcInitialTermId +
                 " dstInitialTermId=" + dstInitialTermId;
-            controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, msg);
             return false;
         }
 
@@ -2124,7 +2262,7 @@ abstract class ArchiveConductor
         {
             final String msg = "invalid migrate: srcStreamId=" + srcStreamId +
                 " dstStreamId=" + dstStreamId;
-            controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, msg);
             return false;
         }
 
@@ -2133,7 +2271,7 @@ abstract class ArchiveConductor
         if (dstMtuLength != srcMtuLength)
         {
             final String msg = "invalid migrate: srcMtuLength=" + srcMtuLength + " dstMtuLength=" + dstMtuLength;
-            controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, msg);
             return false;
         }
 
@@ -2177,14 +2315,14 @@ abstract class ArchiveConductor
                 if (!srcFile.exists())
                 {
                     final String msg = "missing src segment file " + srcFile;
-                    controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+                    controlSession.sendErrorResponse(correlationId, msg);
                     return -1L;
                 }
 
                 if (dstFile.exists())
                 {
                     final String msg = "preexisting dst segment file " + dstFile;
-                    controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+                    controlSession.sendErrorResponse(correlationId, msg);
                     return -1L;
                 }
             }
@@ -2207,7 +2345,7 @@ abstract class ArchiveConductor
                 if (!srcFile.renameTo(dstFile))
                 {
                     final String msg = "failed to rename " + srcFile + " to " + dstFile;
-                    controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+                    controlSession.sendErrorResponse(correlationId, msg);
                     return -1L;
                 }
 
@@ -2238,7 +2376,7 @@ abstract class ArchiveConductor
                 channel, dataBuffer, segmentOffset, termOffset, termId, recordingSummary.streamId))
             {
                 final String msg = position + " position not aligned to a data header";
-                controlSession.sendErrorResponse(correlationId, msg, controlResponseProxy);
+                controlSession.sendErrorResponse(correlationId, msg);
                 return false;
             }
 
@@ -2256,14 +2394,14 @@ abstract class ArchiveConductor
         }
         catch (final IOException ex)
         {
-            controlSession.sendErrorResponse(correlationId, ex.getMessage(), controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, ex.getMessage());
             LangUtil.rethrowUnchecked(ex);
         }
 
         return true;
     }
 
-    private void closeAndRemoveRecordingSubscription(final Subscription subscription)
+    private void closeAndRemoveRecordingSubscription(final Subscription subscription, final String reason)
     {
         final long subscriptionId = subscription.registrationId();
         subscriptionRefCountMap.remove(subscriptionId);
@@ -2272,7 +2410,7 @@ abstract class ArchiveConductor
         {
             if (subscription == session.subscription())
             {
-                session.abort();
+                session.abort(reason);
             }
         }
 
@@ -2280,7 +2418,7 @@ abstract class ArchiveConductor
         CloseHelper.close(errorHandler, subscription);
     }
 
-    private boolean isLowStorageSpace(final long correlationId, final ControlSession controlSession)
+    private String isLowStorageSpace(final long correlationId, final ControlSession controlSession)
     {
         try
         {
@@ -2290,8 +2428,8 @@ abstract class ArchiveConductor
             if (usableSpace <= threshold)
             {
                 final String msg = "low storage threshold=" + threshold + " <= usableSpace=" + usableSpace;
-                controlSession.sendErrorResponse(correlationId, STORAGE_SPACE, msg, controlResponseProxy);
-                return true;
+                controlSession.sendErrorResponse(correlationId, STORAGE_SPACE, msg);
+                return msg;
             }
         }
         catch (final IOException ex)
@@ -2299,7 +2437,7 @@ abstract class ArchiveConductor
             LangUtil.rethrowUnchecked(ex);
         }
 
-        return false;
+        return null;
     }
 
     private void deleteSegments(
@@ -2311,7 +2449,7 @@ abstract class ArchiveConductor
         final int count = addDeleteSegmentsSession(correlationId, recordingId, controlSession, files);
         if (count >= 0)
         {
-            controlSession.sendOkResponse(correlationId, count, controlResponseProxy);
+            controlSession.sendOkResponse(correlationId, count);
 
             if (0 == count)
             {
@@ -2319,6 +2457,66 @@ abstract class ArchiveConductor
                     correlationId, recordingId, Aeron.NULL_VALUE, Aeron.NULL_VALUE, RecordingSignal.DELETE);
             }
         }
+    }
+
+    public long generateReplayToken(final ControlSession session, final long recordingId)
+    {
+        long replayToken = NULL_VALUE;
+        while (NULL_VALUE == replayToken || controlSessionByReplayToken.containsKey(replayToken))
+        {
+            replayToken = random.nextLong();
+        }
+
+        final SessionForReplay sessionForReplay = new SessionForReplay(
+            recordingId, session, nanoClock.nanoTime() + TimeUnit.MILLISECONDS.toNanos(connectTimeoutMs));
+        controlSessionByReplayToken.put(replayToken, sessionForReplay);
+
+        return replayToken;
+    }
+
+    public ControlSession getReplaySession(final long replayToken, final long recordingId)
+    {
+        final SessionForReplay sessionForReplay = controlSessionByReplayToken.get(replayToken);
+
+        final long nowNs = nanoClock.nanoTime();
+        if (null != sessionForReplay &&
+            recordingId == sessionForReplay.recordingId &&
+            nowNs < sessionForReplay.deadlineNs)
+        {
+            return sessionForReplay.controlSession;
+        }
+
+        return null;
+    }
+
+    void removeReplayTokensForSession(final long sessionId)
+    {
+        //noinspection Java8CollectionRemoveIf
+        for (Long2ObjectHashMap<SessionForReplay>.ValueIterator it = controlSessionByReplayToken.values().iterator();
+            it.hasNext();)
+        {
+            final SessionForReplay sessionForReplay = it.next();
+            if (sessionForReplay.controlSession.sessionId() == sessionId)
+            {
+                it.remove();
+            }
+        }
+    }
+
+    private int checkReplayTokens(final long nowNs)
+    {
+        //noinspection Java8CollectionRemoveIf
+        for (Long2ObjectHashMap<SessionForReplay>.ValueIterator it = controlSessionByReplayToken.values().iterator();
+            it.hasNext();)
+        {
+            final SessionForReplay sessionForReplay = it.next();
+            if (sessionForReplay.deadlineNs <= nowNs)
+            {
+                it.remove();
+            }
+        }
+
+        return 0;
     }
 
     abstract static class Recorder extends SessionWorker<RecordingSession>
@@ -2411,5 +2609,37 @@ abstract class ArchiveConductor
 
             return workCount;
         }
+    }
+
+    private static final class SessionForReplay
+    {
+        private final long recordingId;
+        private final ControlSession controlSession;
+        private final long deadlineNs;
+
+        private SessionForReplay(final long recordingId, final ControlSession controlSession, final long deadlineNs)
+        {
+            this.recordingId = recordingId;
+            this.controlSession = controlSession;
+            this.deadlineNs = deadlineNs;
+        }
+    }
+
+
+    private static Random stronglySeededRandom()
+    {
+        boolean hasSeed = false;
+        long seed = 0;
+
+        try
+        {
+            seed = SecureRandom.getInstanceStrong().nextLong();
+            hasSeed = true;
+        }
+        catch (final NoSuchAlgorithmException ignore)
+        {
+        }
+
+        return hasSeed ? new Random(seed) : new Random();
     }
 }

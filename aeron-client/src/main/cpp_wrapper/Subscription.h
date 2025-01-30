@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -236,7 +236,7 @@ public:
      */
     std::string tryResolveChannelEndpointPort() const
     {
-        char uri_buffer[AERON_MAX_PATH] = { 0 };
+        char uri_buffer[AERON_CLIENT_MAX_LOCAL_ADDRESS_STR_LEN] = { 0 };
 
         if (aeron_subscription_try_resolve_channel_endpoint_port(m_subscription, uri_buffer, sizeof(uri_buffer)) < 0)
         {
@@ -487,6 +487,11 @@ public:
     inline std::shared_ptr<Image> imageBySessionId(std::int32_t sessionId) const
     {
         aeron_image_t *image = aeron_subscription_image_by_session_id(m_subscription, sessionId);
+        if (nullptr == image)
+        {
+            return nullptr;
+        }
+
         return std::make_shared<Image>(m_subscription, image);
     }
 
@@ -502,6 +507,11 @@ public:
     inline std::shared_ptr<Image> imageByIndex(std::size_t index) const
     {
         aeron_image_t *image = aeron_subscription_image_at_index(m_subscription, index);
+        if (nullptr == image)
+        {
+            throw std::logic_error("index out of range");
+        }
+
         return std::make_shared<Image>(m_subscription, image);
     }
 
@@ -548,6 +558,16 @@ public:
     inline bool isClosed() const
     {
         return aeron_subscription_is_closed(m_subscription);
+    }
+
+    /**
+     * Get the underlying C Aeron client subscription. Applications should not need to use this method.
+     *
+     * @return the underlying C Aeron client subscription.
+     */
+    inline aeron_subscription_t *subscription() const
+    {
+        return m_subscription;
     }
 
     /// @cond HIDDEN_SYMBOLS

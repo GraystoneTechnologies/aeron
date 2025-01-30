@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,6 @@
 
 extern "C"
 {
-#include "aeronc.h"
 #include "aeron_publication.h"
 #include "aeron_exclusive_publication.h"
 #include "aeron_subscription.h"
@@ -34,6 +33,8 @@ extern "C"
 #include "concurrent/aeron_broadcast_transmitter.h"
 #include "concurrent/aeron_counters_manager.h"
 #include "aeron_client_conductor.h"
+#include "aeron_counter.h"
+#include "aeron_counters.h"
 }
 
 #define CAPACITY (16 * 1024)
@@ -45,6 +46,7 @@ extern "C"
 #define ERROR_BUFFER_LENGTH (CAPACITY)
 #define FILE_PAGE_SIZE (4 * 1024)
 
+#define CLIENT_IDLE_SLEEP_INTERVAL (16 * 1000 * 1000LL)
 #define CLIENT_LIVENESS_TIMEOUT (5 * 1000 * 1000 * 1000LL)
 #define DRIVER_TIMEOUT_INTERVAL_MS (1 * 1000)
 #define DRIVER_TIMEOUT_INTERVAL_NS (DRIVER_TIMEOUT_INTERVAL_MS * 1000 * 1000LL)
@@ -158,6 +160,7 @@ public:
         m_context->nano_clock = test_nano_clock;
         m_context->driver_timeout_ms = DRIVER_TIMEOUT_INTERVAL_MS;
         m_context->keepalive_interval_ns = DRIVER_TIMEOUT_INTERVAL_NS;
+        m_context->idle_sleep_duration_ns = CLIENT_IDLE_SLEEP_INTERVAL;
 
         aeron_context_set_use_conductor_agent_invoker(m_context, true);
 
@@ -174,7 +177,7 @@ public:
         metadata->client_liveness_timeout = (int64_t)CLIENT_LIVENESS_TIMEOUT;
         metadata->start_timestamp = test_epoch_clock();
         metadata->pid = 101;
-        AERON_PUT_VOLATILE(metadata->cnc_version, AERON_CNC_VERSION);
+        AERON_SET_RELEASE(metadata->cnc_version, AERON_CNC_VERSION);
 
         if (aeron_mpsc_rb_init(
             &m_to_driver, aeron_cnc_to_driver_buffer(metadata), TO_DRIVER_RING_BUFFER_LENGTH) < 0)
@@ -188,6 +191,18 @@ public:
             throw std::runtime_error("could not init to_clients: " + std::string(aeron_errmsg()));
         }
 
+        if (aeron_counters_manager_init(
+            &m_counters_manager,
+            aeron_cnc_counters_metadata_buffer(metadata),
+            (size_t)metadata->counter_metadata_buffer_length,
+            aeron_cnc_counters_values_buffer(metadata),
+            (size_t)metadata->counter_values_buffer_length,
+            &m_cached_clock,
+            1000) < 0)
+        {
+            throw std::runtime_error("could not init counters manager: " + std::string(aeron_errmsg()));
+        }
+
         if (aeron_client_conductor_init(&m_conductor, m_context) < 0)
         {
             throw std::runtime_error("could not init conductor: " + std::string(aeron_errmsg()));
@@ -197,6 +212,7 @@ public:
     ~ClientConductorTest() override
     {
         aeron_client_conductor_on_close(&m_conductor);
+        aeron_counters_manager_close(&m_counters_manager);
         m_context->cnc_map.addr = nullptr;
         aeron_context_close(m_context);
 
@@ -258,7 +274,7 @@ public:
 
     void transmitOnPublicationReady(aeron_async_add_publication_t *async, const std::string &logFile, bool isExclusive)
     {
-        char response_buffer[sizeof(aeron_publication_buffers_ready_t) + AERON_MAX_PATH];
+        char response_buffer[sizeof(aeron_publication_buffers_ready_t) + AERON_ERROR_MAX_TOTAL_LENGTH];
         auto response = reinterpret_cast<aeron_publication_buffers_ready_t *>(response_buffer);
         int32_t position_limit_counter_id = 10, channel_status_indicator_id = 11;
 
@@ -300,7 +316,7 @@ public:
 
     void transmitOnError(aeron_async_add_publication_t *async, int32_t errorCode, const std::string &errorMessage)
     {
-        char response_buffer[sizeof(aeron_error_response_t) + AERON_MAX_PATH];
+        char response_buffer[sizeof(aeron_error_response_t) + AERON_ERROR_MAX_TOTAL_LENGTH];
         auto response = reinterpret_cast<aeron_error_response_t *>(response_buffer);
 
         response->offending_command_correlation_id = async->registration_id;
@@ -356,9 +372,29 @@ public:
         }
     }
 
+    void transmitOnStaticCounter(aeron_async_add_counter_t *async, int32_t counter_id)
+    {
+        char response_buffer[sizeof(aeron_static_counter_response_t)];
+        auto response = reinterpret_cast<aeron_static_counter_response_t *>(response_buffer);
+
+        response->correlation_id = async->registration_id;
+        response->counter_id = counter_id;
+
+        if (aeron_broadcast_transmitter_transmit(
+            &m_to_clients,
+            AERON_RESPONSE_ON_STATIC_COUNTER,
+            response_buffer,
+            sizeof(aeron_static_counter_response_t)) < 0)
+        {
+            throw std::runtime_error("error transmitting ON_STATIC_COUNTER: " + std::string(aeron_errmsg()));
+        }
+    }
+
 protected:
     aeron_context_t *m_context = nullptr;
     aeron_client_conductor_t m_conductor = {};
+    aeron_counters_manager_t m_counters_manager = {};
+    aeron_clock_cache_t m_cached_clock = {};
     std::unique_ptr<uint8_t[]> m_cnc;
     aeron_mpsc_rb_t m_to_driver = {};
     aeron_broadcast_transmitter_t m_to_clients = {};
@@ -1100,4 +1136,101 @@ TEST_F(ClientConductorTest, shouldCreateDriverTimeoutError)
     doWorkForNs(DRIVER_TIMEOUT_INTERVAL_NS * 2, false, DRIVER_TIMEOUT_INTERVAL_NS * 2);
 
     ASSERT_EQ(AERON_CLIENT_ERROR_DRIVER_TIMEOUT, errorcode);
+}
+
+TEST_F(ClientConductorTest, shouldAddClientInfoToTheHeartbeatCounterLabel)
+{
+    m_conductor.client_id = 0x60001da400;
+    m_conductor.client_name = "test client name";
+    aeron_heartbeat_timestamp_key_layout_t key = {};
+    key.registration_id = m_conductor.client_id;
+    std::string label = std::string("test 42 and beyond");
+
+    int32_t counter_id = aeron_counters_manager_allocate(
+        &m_counters_manager,
+        AERON_COUNTER_CLIENT_HEARTBEAT_TIMESTAMP_TYPE_ID,
+        (const uint8_t *)&key,
+        sizeof(key),
+        label.c_str(),
+        label.length());
+    ASSERT_GT(counter_id, -1);
+
+    char counterLabel[100];
+    memset(counterLabel, '\0', sizeof(counterLabel));
+    ASSERT_EQ(label.length(), aeron_counters_reader_counter_label(
+        &m_conductor.counters_reader, counter_id, counterLabel, sizeof(counterLabel)));
+
+    ASSERT_STREQ(label.c_str(), counterLabel);
+
+    doWorkForNs((int64_t)m_context->keepalive_interval_ns * 2, true);
+
+    ASSERT_GT(aeron_counters_reader_counter_label(
+        &m_conductor.counters_reader, counter_id, counterLabel, sizeof(counterLabel)), label.length());
+    ASSERT_EQ(
+        label + " name=test client name version=" + aeron_version_text() + " commit=" + aeron_version_gitsha(),
+        std::string(counterLabel));
+}
+
+TEST_F(ClientConductorTest, shouldAddClientInfoToTheHeartbeatCounterLabelUpToMaxLength)
+{
+    m_conductor.client_id = -4373543;
+    auto clientName = std::string("test").append(1000, 'p');
+    m_conductor.client_name = clientName.c_str();
+    aeron_heartbeat_timestamp_key_layout_t key = {};
+    key.registration_id = m_conductor.client_id;
+    std::string label = std::string("abc");
+
+    int32_t counter_id = aeron_counters_manager_allocate(
+        &m_counters_manager,
+        AERON_COUNTER_CLIENT_HEARTBEAT_TIMESTAMP_TYPE_ID,
+        (const uint8_t *)&key,
+        sizeof(key),
+        label.c_str(),
+        label.length());
+    ASSERT_GT(counter_id, -1);
+
+    char counterLabel[AERON_COUNTER_MAX_LABEL_LENGTH];
+    memset(counterLabel, '\0', sizeof(counterLabel));
+    ASSERT_EQ(label.length(), aeron_counters_reader_counter_label(
+        &m_conductor.counters_reader, counter_id, counterLabel, sizeof(counterLabel)));
+
+    ASSERT_STREQ(label.c_str(), counterLabel);
+
+    doWorkForNs((int64_t)m_context->keepalive_interval_ns * 2, true);
+
+    ASSERT_GT(aeron_counters_reader_counter_label(
+        &m_conductor.counters_reader, counter_id, counterLabel, sizeof(counterLabel)), label.length());
+    ASSERT_EQ(
+        label + std::string(" name=test").append(366, 'p'),
+        std::string(counterLabel));
+}
+
+TEST_F(ClientConductorTest, shouldAddStaticCounterSuccessfully)
+{
+    aeron_async_add_counter_t *async = nullptr;
+    aeron_counter_t *counter = nullptr;
+
+    const char *label = "first static counter from C";
+    const size_t label_length = strlen(label);
+    const int registration_id = 42;
+    ASSERT_EQ(aeron_client_conductor_async_add_static_counter(
+        &async, &m_conductor, COUNTER_TYPE_ID, nullptr, 0, label, label_length, registration_id), 0);
+    ASSERT_EQ(registration_id, async->counter.registration_id);
+    ASSERT_EQ(label_length, async->counter.label_buffer_length);
+    doWork();
+
+    ASSERT_EQ(aeron_async_add_counter_poll(&counter, async), 0) << aeron_errmsg();
+    ASSERT_TRUE(nullptr == counter);
+
+    const int32_t counter_id = 777;
+    transmitOnStaticCounter(async, counter_id);
+    doWork();
+
+    ASSERT_GT(aeron_async_add_counter_poll(&counter, async), 0) << aeron_errmsg();
+    ASSERT_TRUE(nullptr != counter);
+    ASSERT_EQ(registration_id, counter->registration_id);
+    ASSERT_EQ(counter_id, counter->counter_id);
+
+    ASSERT_EQ(aeron_counter_close(counter, nullptr, nullptr), 0);
+    doWork();
 }

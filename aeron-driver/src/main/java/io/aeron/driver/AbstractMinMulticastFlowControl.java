@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package io.aeron.driver;
 import io.aeron.CommonContext;
 import io.aeron.driver.media.UdpChannel;
 import io.aeron.driver.status.FlowControlReceivers;
+import io.aeron.protocol.ErrorFlyweight;
 import io.aeron.protocol.SetupFlyweight;
 import io.aeron.protocol.StatusMessageFlyweight;
 import org.agrona.CloseHelper;
@@ -25,6 +26,7 @@ import org.agrona.ErrorHandler;
 import org.agrona.concurrent.status.AtomicCounter;
 import org.agrona.concurrent.status.CountersManager;
 
+import java.net.InetSocketAddress;
 import java.util.Arrays;
 
 import static io.aeron.logbuffer.LogBufferDescriptor.computePosition;
@@ -46,6 +48,7 @@ abstract class AbstractMinMulticastFlowControlFields extends AbstractMinMulticas
 {
     long lastSetupSenderLimit;
     long timeOfLastSetupNs;
+    boolean hasTaggedStatusMessageTriggeredSetup;
 }
 
 abstract class AbstractMinMulticastFlowControlRhsPadding extends AbstractMinMulticastFlowControlFields
@@ -67,7 +70,11 @@ public abstract class AbstractMinMulticastFlowControl
     extends AbstractMinMulticastFlowControlRhsPadding
     implements FlowControl
 {
-    static final Receiver[] EMPTY_RECEIVERS = new Receiver[0];
+    /**
+     * Multiple of receiver window to allow for a retransmit action.
+     */
+    private static final int RETRANSMIT_RECEIVER_WINDOW_MULTIPLE = 16;
+    private static final Receiver[] EMPTY_RECEIVERS = new Receiver[0];
 
     private final boolean isGroupTagAware;
     private volatile boolean hasRequiredReceivers;
@@ -114,6 +121,7 @@ public abstract class AbstractMinMulticastFlowControl
             context.tempBuffer(), countersManager, registrationId, sessionId, streamId, channel);
         timeOfLastSetupNs = 0;
         lastSetupSenderLimit = -1;
+        hasTaggedStatusMessageTriggeredSetup = false;
     }
 
     /**
@@ -134,11 +142,13 @@ public abstract class AbstractMinMulticastFlowControl
         final int positionBitsToShift,
         final long timeNs)
     {
-        if (receivers.length > 0)
+        if (hasTaggedStatusMessageTriggeredSetup && receivers.length > 0)
         {
             timeOfLastSetupNs = timeNs;
             lastSetupSenderLimit = senderLimit;
         }
+
+        hasTaggedStatusMessageTriggeredSetup = false;
 
         return senderLimit;
     }
@@ -190,6 +200,19 @@ public abstract class AbstractMinMulticastFlowControl
     public boolean hasRequiredReceivers()
     {
         return hasRequiredReceivers;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public int maxRetransmissionLength(
+        final int termOffset,
+        final int resendLength,
+        final int termBufferLength,
+        final int mtuLength)
+    {
+        return FlowControl.calculateRetransmissionLength(
+            resendLength, termBufferLength, termOffset, RETRANSMIT_RECEIVER_WINDOW_MULTIPLE);
     }
 
     /**
@@ -267,6 +290,51 @@ public abstract class AbstractMinMulticastFlowControl
         else
         {
             return Math.max(senderLimit, minPosition);
+        }
+    }
+
+    /**
+     *  Process a status message triggering a setup to be sent.
+     *
+     * @param flyweight       over the status message receiver.
+     * @param receiverAddress of the receiver.
+     * @param timeNs          current time (in nanoseconds).
+     * @param hasMatchingTag  if the status messages comes from a receiver with a tag matching the group.
+     */
+    protected void processSendSetupTrigger(
+        final StatusMessageFlyweight flyweight,
+        final InetSocketAddress receiverAddress,
+        final long timeNs,
+        final boolean hasMatchingTag)
+    {
+        if (!hasTaggedStatusMessageTriggeredSetup)
+        {
+            hasTaggedStatusMessageTriggeredSetup = hasMatchingTag;
+        }
+    }
+
+    /**
+     * Process an error frame from a downstream receiver.
+     *
+     * @param error             flyweight over the error frame.
+     * @param receiverAddress   of the receiver.
+     * @param timeNs            current time in nanoseconds.
+     * @param hasMatchingTag    if the error message comes from a receiver with a tag matching the group.
+     */
+    protected void processError(
+        final ErrorFlyweight error,
+        final InetSocketAddress receiverAddress,
+        final long timeNs,
+        final boolean hasMatchingTag)
+    {
+        final long receiverId = error.receiverId();
+
+        for (final Receiver receiver : receivers)
+        {
+            if (hasMatchingTag && receiverId == receiver.receiverId)
+            {
+                receiver.eosFlagged = true;
+            }
         }
     }
 

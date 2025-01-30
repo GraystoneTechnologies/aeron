@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,9 +15,11 @@
  */
 package io.aeron;
 
+import io.aeron.command.PublicationErrorFrameFlyweight;
 import io.aeron.exceptions.*;
 import io.aeron.status.ChannelEndpointStatus;
 import io.aeron.status.HeartbeatTimestamp;
+import io.aeron.status.PublicationErrorFrame;
 import org.agrona.*;
 import org.agrona.collections.ArrayListUtil;
 import org.agrona.collections.Long2ObjectHashMap;
@@ -32,8 +34,6 @@ import java.util.ArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
 
-import static io.aeron.Aeron.Configuration.IDLE_SLEEP_MS;
-import static io.aeron.Aeron.Configuration.IDLE_SLEEP_NS;
 import static io.aeron.Aeron.NULL_VALUE;
 import static io.aeron.ErrorCode.CHANNEL_ENDPOINT_ERROR;
 import static io.aeron.status.HeartbeatTimestamp.HEARTBEAT_TYPE_ID;
@@ -50,6 +50,7 @@ final class ClientConductor implements Agent
     private static final long NO_CORRELATION_ID = NULL_VALUE;
     private static final long EXPLICIT_CLOSE_LINGER_NS = TimeUnit.SECONDS.toNanos(1);
 
+    private final long idleSleepDurationNs;
     private final long keepAliveIntervalNs;
     private final long driverTimeoutMs;
     private final long driverTimeoutNs;
@@ -71,10 +72,10 @@ final class ClientConductor implements Agent
     private final LogBuffersFactory logBuffersFactory;
     private final Long2ObjectHashMap<LogBuffers> logBuffersByIdMap = new Long2ObjectHashMap<>();
     private final ArrayList<LogBuffers> lingeringLogBuffers = new ArrayList<>();
-    private final Long2ObjectHashMap<Object> resourceByRegIdMap = new Long2ObjectHashMap<>();
+    final Long2ObjectHashMap<Object> resourceByRegIdMap = new Long2ObjectHashMap<>();
     private final Long2ObjectHashMap<RegistrationException> asyncExceptionByRegIdMap = new Long2ObjectHashMap<>();
     private final Long2ObjectHashMap<String> stashedChannelByRegistrationId = new Long2ObjectHashMap<>();
-    private final LongHashSet asyncCommandIdSet = new LongHashSet();
+    final LongHashSet asyncCommandIdSet = new LongHashSet();
     private final AvailableImageHandler defaultAvailableImageHandler;
     private final UnavailableImageHandler defaultUnavailableImageHandler;
     private final Long2ObjectHashMap<AvailableCounterHandler> availableCounterHandlerById = new Long2ObjectHashMap<>();
@@ -85,6 +86,7 @@ final class ClientConductor implements Agent
     private final AgentInvoker driverAgentInvoker;
     private final UnsafeBuffer counterValuesBuffer;
     private final CountersReader countersReader;
+    private final PublicationErrorFrame publicationErrorFrame = new PublicationErrorFrame();
     private AtomicCounter heartbeatTimestamp;
 
     ClientConductor(final Aeron.Context ctx, final Aeron aeron)
@@ -98,6 +100,7 @@ final class ClientConductor implements Agent
         awaitingIdleStrategy = ctx.awaitingIdleStrategy();
         driverProxy = ctx.driverProxy();
         logBuffersFactory = ctx.logBuffersFactory();
+        idleSleepDurationNs = ctx.idleSleepDurationNs();
         keepAliveIntervalNs = ctx.keepAliveIntervalNs();
         driverTimeoutMs = ctx.driverTimeoutMs();
         driverTimeoutNs = MILLISECONDS.toNanos(driverTimeoutMs);
@@ -147,7 +150,7 @@ final class ClientConductor implements Agent
             {
                 if (isTerminating)
                 {
-                    Thread.sleep(IDLE_SLEEP_MS);
+                    Thread.sleep(Aeron.Configuration.IDLE_SLEEP_DEFAULT_MS);
                 }
 
                 Thread.sleep(NANOSECONDS.toMillis(ctx.closeLingerDurationNs()));
@@ -266,6 +269,22 @@ final class ClientConductor implements Agent
             stashedChannelByRegistrationId.remove(correlationId);
             handleError(new RegistrationException(
                 correlationId, CHANNEL_ENDPOINT_ERROR.value(), CHANNEL_ENDPOINT_ERROR, message));
+        }
+    }
+
+    void onPublicationError(final PublicationErrorFrameFlyweight errorFrameFlyweight)
+    {
+        for (final Object resource : resourceByRegIdMap.values())
+        {
+            if (resource instanceof Publication)
+            {
+                final Publication publication = (Publication)resource;
+                if (publication.originalRegistrationId() == errorFrameFlyweight.registrationId())
+                {
+                    publicationErrorFrame.set(errorFrameFlyweight);
+                    ctx.publicationErrorFrameHandler().onPublicationError(publicationErrorFrame);
+                }
+            }
         }
     }
 
@@ -606,7 +625,8 @@ final class ClientConductor implements Agent
             final Object resource = resourceByRegIdMap.get(publicationRegistrationId);
             if (null != resource && !(resource instanceof Publication))
             {
-                throw new AeronException("registration id is not a Publication");
+                throw new AeronException("registration id is not a Publication: " +
+                    resource.getClass().getSimpleName());
             }
 
             final Publication publication = (Publication)resource;
@@ -620,7 +640,7 @@ final class ClientConductor implements Agent
 
             if (asyncCommandIdSet.remove(publicationRegistrationId) || null != publication)
             {
-                driverProxy.removePublication(publicationRegistrationId);
+                asyncCommandIdSet.add(driverProxy.removePublication(publicationRegistrationId));
                 stashedChannelByRegistrationId.remove(publicationRegistrationId);
             }
         }
@@ -753,6 +773,44 @@ final class ClientConductor implements Agent
         }
     }
 
+    void removeSubscription(final long subscriptionRegistrationId)
+    {
+        clientLock.lock();
+        try
+        {
+            if (NULL_VALUE == subscriptionRegistrationId || isTerminating || isClosed)
+            {
+                return;
+            }
+
+            ensureNotReentrant();
+
+            final Object resource = resourceByRegIdMap.get(subscriptionRegistrationId);
+            if (resource != null && !(resource instanceof PendingSubscription || resource instanceof Subscription))
+            {
+                throw new AeronException("registration id is not a Subscription: " +
+                    resource.getClass().getSimpleName());
+            }
+
+            final Subscription subscription = resource instanceof PendingSubscription ?
+                ((PendingSubscription)resource).subscription : (Subscription)resource;
+            if (null != subscription)
+            {
+                resourceByRegIdMap.remove(subscriptionRegistrationId);
+                subscription.internalClose(EXPLICIT_CLOSE_LINGER_NS);
+            }
+
+            if (asyncCommandIdSet.remove(subscriptionRegistrationId) || null != subscription)
+            {
+                asyncCommandIdSet.add(driverProxy.removeSubscription(subscriptionRegistrationId));
+            }
+        }
+        finally
+        {
+            clientLock.unlock();
+        }
+    }
+
     void addDestination(final long registrationId, final String endpointChannel)
     {
         clientLock.lock();
@@ -769,6 +827,24 @@ final class ClientConductor implements Agent
         }
     }
 
+    long addDestinationWithId(final long registrationId, final String endpointChannel)
+    {
+        clientLock.lock();
+        try
+        {
+            ensureActive();
+            ensureNotReentrant();
+
+            final long correlationId = driverProxy.addDestination(registrationId, endpointChannel);
+            awaitResponse(correlationId);
+            return correlationId;
+        }
+        finally
+        {
+            clientLock.unlock();
+        }
+    }
+
     void removeDestination(final long registrationId, final String endpointChannel)
     {
         clientLock.lock();
@@ -778,6 +854,22 @@ final class ClientConductor implements Agent
             ensureNotReentrant();
 
             awaitResponse(driverProxy.removeDestination(registrationId, endpointChannel));
+        }
+        finally
+        {
+            clientLock.unlock();
+        }
+    }
+
+    void removeDestination(final long publicationRegistrationId, final long destinationRegistrationId)
+    {
+        clientLock.lock();
+        try
+        {
+            ensureActive();
+            ensureNotReentrant();
+
+            awaitResponse(driverProxy.removeDestination(publicationRegistrationId, destinationRegistrationId));
         }
         finally
         {
@@ -844,6 +936,24 @@ final class ClientConductor implements Agent
             ensureNotReentrant();
 
             final long correlationId = driverProxy.removeDestination(registrationId, endpointChannel);
+            asyncCommandIdSet.add(correlationId);
+            return correlationId;
+        }
+        finally
+        {
+            clientLock.unlock();
+        }
+    }
+
+    long asyncRemoveDestination(final long registrationId, final long destinationRegistrationId)
+    {
+        clientLock.lock();
+        try
+        {
+            ensureActive();
+            ensureNotReentrant();
+
+            final long correlationId = driverProxy.removeDestination(registrationId, destinationRegistrationId);
             asyncCommandIdSet.add(correlationId);
             return correlationId;
         }
@@ -989,6 +1099,71 @@ final class ClientConductor implements Agent
             awaitResponse(registrationId);
 
             return (Counter)resourceByRegIdMap.get(registrationId);
+        }
+        finally
+        {
+            clientLock.unlock();
+        }
+    }
+
+    Counter addStaticCounter(
+        final int typeId,
+        final DirectBuffer keyBuffer,
+        final int keyOffset,
+        final int keyLength,
+        final DirectBuffer labelBuffer,
+        final int labelOffset,
+        final int labelLength,
+        final long registrationId)
+    {
+        clientLock.lock();
+        try
+        {
+            ensureActive();
+            ensureNotReentrant();
+
+            if (keyLength < 0 || keyLength > CountersManager.MAX_KEY_LENGTH)
+            {
+                throw new IllegalArgumentException("key length out of bounds: " + keyLength);
+            }
+
+            if (labelLength < 0 || labelLength > CountersManager.MAX_LABEL_LENGTH)
+            {
+                throw new IllegalArgumentException("label length out of bounds: " + labelLength);
+            }
+
+            final long correlationId = driverProxy.addStaticCounter(
+                typeId, keyBuffer, keyOffset, keyLength, labelBuffer, labelOffset, labelLength, registrationId);
+
+            awaitResponse(correlationId);
+
+            final int counterId = (int)resourceByRegIdMap.remove(correlationId);
+            return new Counter(aeron.countersReader(), registrationId, counterId);
+        }
+        finally
+        {
+            clientLock.unlock();
+        }
+    }
+
+    Counter addStaticCounter(final int typeId, final String label, final long registrationId)
+    {
+        clientLock.lock();
+        try
+        {
+            ensureActive();
+            ensureNotReentrant();
+
+            if (label.length() > CountersManager.MAX_LABEL_LENGTH)
+            {
+                throw new IllegalArgumentException("label length exceeds MAX_LABEL_LENGTH: " + label.length());
+            }
+
+            final long correlationId = driverProxy.addStaticCounter(typeId, label, registrationId);
+            awaitResponse(correlationId);
+
+            final int counterId = (int)resourceByRegIdMap.remove(correlationId);
+            return new Counter(aeron.countersReader(), registrationId, counterId);
         }
         finally
         {
@@ -1259,6 +1434,30 @@ final class ClientConductor implements Agent
         }
     }
 
+    void onStaticCounter(final long correlationId, final int counterId)
+    {
+        resourceByRegIdMap.put(correlationId, (Integer)counterId);
+    }
+
+    void rejectImage(final long correlationId, final long position, final String reason)
+    {
+        clientLock.lock();
+        try
+        {
+            ensureActive();
+            ensureNotReentrant();
+
+            // TODO, check reason length??
+
+            final long registrationId = driverProxy.rejectImage(correlationId, position, reason);
+            awaitResponse(registrationId);
+        }
+        finally
+        {
+            clientLock.unlock();
+        }
+    }
+
     private void ensureActive()
     {
         if (isClosed)
@@ -1287,7 +1486,7 @@ final class ClientConductor implements Agent
         {
             logBuffers = logBuffersFactory.map(logFileName);
 
-            if (ctx.preTouchMappedMemory() && !channel.contains("sparse=true"))
+            if (ctx.preTouchMappedMemory())
             {
                 logBuffers.preTouch();
             }
@@ -1395,7 +1594,7 @@ final class ClientConductor implements Agent
     {
         int workCount = 0;
 
-        if ((timeOfLastServiceNs + IDLE_SLEEP_NS) - nowNs < 0)
+        if ((timeOfLastServiceNs + idleSleepDurationNs) - nowNs < 0)
         {
             checkServiceInterval(nowNs);
             timeOfLastServiceNs = nowNs;
@@ -1430,9 +1629,15 @@ final class ClientConductor implements Agent
             {
                 terminateConductor();
 
+                if (Aeron.NULL_VALUE == lastKeepAliveMs)
+                {
+                    throw new DriverTimeoutException(
+                        "MediaDriver (" + aeron.context().aeronDirectoryName() + ") has been shutdown");
+                }
+
                 throw new DriverTimeoutException(
                     "MediaDriver (" + aeron.context().aeronDirectoryName() + ") keepalive: age=" +
-                    (nowMs - lastKeepAliveMs) + "ms > timeout=" + driverTimeoutMs + "ms");
+                        (nowMs - lastKeepAliveMs) + "ms > timeout=" + driverTimeoutMs + "ms");
             }
 
             if (null == heartbeatTimestamp)
@@ -1440,11 +1645,24 @@ final class ClientConductor implements Agent
                 final int counterId = HeartbeatTimestamp.findCounterIdByRegistrationId(
                     countersReader, HEARTBEAT_TYPE_ID, ctx.clientId());
 
-                if (counterId != CountersReader.NULL_COUNTER_ID)
+                if (CountersReader.NULL_COUNTER_ID != counterId)
                 {
-                    heartbeatTimestamp = new AtomicCounter(counterValuesBuffer, counterId);
-                    heartbeatTimestamp.setOrdered(nowMs);
-                    timeOfLastKeepAliveNs = nowNs;
+                    try
+                    {
+                        heartbeatTimestamp = new AtomicCounter(counterValuesBuffer, counterId);
+                        heartbeatTimestamp.setOrdered(nowMs);
+                        AeronCounters.appendToLabel(
+                            countersReader.metaDataBuffer(),
+                            counterId,
+                            " name=" + ctx.clientName() + " " +
+                            AeronCounters.formatVersionInfo(AeronVersion.VERSION, AeronVersion.GIT_SHA));
+                        timeOfLastKeepAliveNs = nowNs;
+                    }
+                    catch (final RuntimeException ex)  // a race caused by the driver timing out the client
+                    {
+                        terminateConductor();
+                        throw new AeronException("unexpected close of heartbeat timestamp counter: " + counterId, ex);
+                    }
                 }
             }
             else
@@ -1453,7 +1671,6 @@ final class ClientConductor implements Agent
                 if (!HeartbeatTimestamp.isActive(countersReader, counterId, HEARTBEAT_TYPE_ID, ctx.clientId()))
                 {
                     terminateConductor();
-
                     throw new AeronException("unexpected close of heartbeat timestamp counter: " + counterId);
                 }
 
@@ -1629,9 +1846,9 @@ final class ClientConductor implements Agent
         return correlationId != NO_CORRELATION_ID;
     }
 
-    private static final class PendingSubscription
+    static final class PendingSubscription
     {
-        private final Subscription subscription;
+        final Subscription subscription;
 
         private PendingSubscription(final Subscription subscription)
         {

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <mutex>
 
 #include "concurrent/AtomicBuffer.h"
 #include "concurrent/logbuffer/BufferClaim.h"
@@ -39,11 +40,11 @@ using namespace aeron::concurrent::logbuffer;
 using namespace aeron::concurrent;
 using namespace aeron::util;
 
-static const std::int64_t NOT_CONNECTED = -1;
-static const std::int64_t BACK_PRESSURED = -2;
-static const std::int64_t ADMIN_ACTION = -3;
-static const std::int64_t PUBLICATION_CLOSED = -4;
-static const std::int64_t MAX_POSITION_EXCEEDED = -5;
+static constexpr std::int64_t NOT_CONNECTED = -1;
+static constexpr std::int64_t BACK_PRESSURED = -2;
+static constexpr std::int64_t ADMIN_ACTION = -3;
+static constexpr std::int64_t PUBLICATION_CLOSED = -4;
+static constexpr std::int64_t MAX_POSITION_EXCEEDED = -5;
 
 /**
  * Supplies the reserved value field for a data frame header. The returned value will be set in the header as
@@ -190,13 +191,13 @@ public:
     /**
      * Maximum length of a message payload that fits within a message fragment.
      *
-     * This is he MTU length minus the message fragment header length.
+     * This is the MTU length minus the message fragment header length.
      *
      * @return maximum message fragment payload length.
      */
     inline util::index_t maxPayloadLength() const
     {
-        return static_cast<util::index_t>(m_constants.max_message_length);
+        return static_cast<util::index_t>(m_constants.max_payload_length);
     }
 
     /**
@@ -439,7 +440,7 @@ public:
             {
                 throw aeron::util::IllegalStateException(
                     "length overflow: " + std::to_string(length) + " + " + std::to_string(it->capacity()) +
-                    " > " + std::to_string(length + it->capacity()),
+                        " > " + std::to_string(length + it->capacity()),
                     SOURCEINFO);
             }
 
@@ -470,7 +471,7 @@ public:
      * {@link #ADMIN_ACTION} or {@link #CLOSED}.
      */
     std::int64_t offer(
-        const concurrent::AtomicBuffer buffers[],
+        const concurrent::AtomicBuffer *buffers,
         std::size_t length,
         const on_reserved_value_supplier_t &reservedValueSupplier = DEFAULT_RESERVED_VALUE_SUPPLIER)
     {
@@ -485,11 +486,41 @@ public:
      * @return The new stream position, otherwise {@link #NOT_CONNECTED}, {@link #BACK_PRESSURED},
      * {@link #ADMIN_ACTION} or {@link #CLOSED}.
      */
-    template<std::size_t N> std::int64_t offer(
+    template<std::size_t N>
+    std::int64_t offer(
         const std::array<concurrent::AtomicBuffer, N> &buffers,
         const on_reserved_value_supplier_t &reservedValueSupplier = DEFAULT_RESERVED_VALUE_SUPPLIER)
     {
         return offer(buffers.begin(), buffers.end(), reservedValueSupplier);
+    }
+
+    /**
+     * Non-blocking publish of a simple const data buffer and length containing a message
+     *
+     * @param buffer contain the message.
+     * @param length of the message.
+     * @param reservedValueSupplier for the frame.
+     * @return The new stream position, otherwise {@link #NOT_CONNECTED}, {@link #BACK_PRESSURED},
+     * {@link #ADMIN_ACTION} or {@link #CLOSED}.
+     */
+    std::int64_t offer(
+        const std::uint8_t *buffer,
+        std::size_t length,
+        const on_reserved_value_supplier_t &reservedValueSupplier = DEFAULT_RESERVED_VALUE_SUPPLIER)
+    {
+        std::int64_t position = aeron_publication_offer(
+            m_publication,
+            buffer,
+            static_cast<std::size_t>(length),
+            reservedValueSupplierCallback,
+            (void *)&reservedValueSupplier);
+
+        if (AERON_PUBLICATION_ERROR == position)
+        {
+            AERON_MAP_ERRNO_TO_SOURCED_EXCEPTION_AND_THROW;
+        }
+
+        return position;
     }
 
     /**
@@ -610,6 +641,41 @@ public:
     }
 
     /**
+     * Remove a previously added destination manually from a multi-destination-cast Publication.
+     *
+     * @param destinationRegistrationId for the destination to remove
+     * @return async object to track the progress of the command
+     */
+    AsyncDestination *removeDestinationAsync(std::int64_t destinationRegistrationId)
+    {
+        AsyncDestination *async = nullptr;
+        if (aeron_publication_async_remove_destination_by_id(
+            &async, m_aeron, m_publication, destinationRegistrationId) < 0)
+        {
+            AERON_MAP_ERRNO_TO_SOURCED_EXCEPTION_AND_THROW;
+        }
+
+        return async;
+    }
+
+    /**
+     * Remove a previously added destination manually from a multi-destination-cast Publication by destinationRegistrationId.
+     *
+     * @param destinationRegistrationId for the destination to remove
+     * @return correlation id for the remove command
+     */
+    std::int64_t removeDestination(std::int64_t destinationRegistrationId)
+    {
+        AsyncDestination *async = removeDestinationAsync(destinationRegistrationId);
+        std::int64_t correlationId = aeron_async_destination_get_registration_id(async);
+
+        std::lock_guard<std::recursive_mutex> lock(m_adminLock);
+        m_pendingDestinations[correlationId] = async;
+
+        return correlationId;
+    }
+
+    /**
      * Retrieve the status of the associated add or remove destination operation with the given correlationId.
      *
      * This method is non-blocking.
@@ -669,6 +735,13 @@ public:
 
         return findDestinationResponse(search->second);
     }
+
+    /// @cond HIDDEN_SYMBOLS
+    aeron_publication_t *publication()
+    {
+        return m_publication;
+    }
+    /// @endcond
 
 private:
     aeron_t *m_aeron = nullptr;

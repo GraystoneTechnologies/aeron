@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,12 +23,11 @@
 #include "command/aeron_control_protocol.h"
 #include "aeronc.h"
 #include "concurrent/aeron_counters_manager.h"
+#include "collections/aeron_array_to_ptr_hash_map.h"
 #include "collections/aeron_int64_to_ptr_hash_map.h"
 
 #define AERON_CLIENT_COMMAND_QUEUE_FAIL_THRESHOLD (10)
 #define AERON_CLIENT_COMMAND_RB_FAIL_THRESHOLD (10)
-
-#define AERON_CLIENT_CONDUCTOR_IDLE_SLEEP_NS (16 * 1000 * 1000L)
 
 typedef enum aeron_client_registration_status_en
 {
@@ -79,6 +78,7 @@ typedef struct aeron_client_registering_resource_stct
 
     char *error_message;
     char *uri;
+    int64_t destination_registration_id;
     int64_t registration_id;
     long long registration_deadline_ns;
     int32_t error_code;
@@ -91,6 +91,7 @@ typedef struct aeron_client_registering_resource_stct
         const char *label_buffer;
         uint64_t key_buffer_length;
         uint64_t label_buffer_length;
+        int64_t registration_id;
         int32_t type_id;
     }
     counter;
@@ -158,7 +159,7 @@ typedef struct aeron_client_conductor_stct
 
     aeron_int64_to_ptr_hash_map_t log_buffer_by_id_map;
     aeron_int64_to_ptr_hash_map_t resource_by_id_map;
-    aeron_int64_to_ptr_hash_map_t image_by_id_map;
+    aeron_array_to_ptr_hash_map_t image_by_key_map;
 
     struct available_counter_handlers_stct
     {
@@ -214,14 +215,19 @@ typedef struct aeron_client_conductor_stct
     uint64_t inter_service_timeout_ns;
     uint64_t keepalive_interval_ns;
     uint64_t resource_linger_duration_ns;
+    uint64_t idle_sleep_duration_ns;
 
     long long time_of_last_service_ns;
     long long time_of_last_keepalive_ns;
 
     int64_t client_id;
+    const char* client_name;
 
     aeron_error_handler_t error_handler;
     void *error_handler_clientd;
+
+    aeron_publication_error_frame_handler_t error_frame_handler;
+    void *error_frame_handler_clientd;
 
     aeron_on_new_publication_t on_new_publication;
     void *on_new_publication_clientd;
@@ -299,6 +305,16 @@ int aeron_client_conductor_async_close_counter(
     aeron_notification_t on_close_complete,
     void *on_close_complete_clientd);
 
+int aeron_client_conductor_async_add_static_counter(
+    aeron_async_add_counter_t **async,
+    aeron_client_conductor_t *conductor,
+    int32_t type_id,
+    const uint8_t *key_buffer,
+    size_t key_buffer_length,
+    const char *label_buffer,
+    size_t label_buffer_length,
+    int64_t registration_id);
+
 int aeron_client_conductor_async_add_publication_destination(
     aeron_async_destination_t **async,
     aeron_client_conductor_t *conductor,
@@ -311,6 +327,12 @@ int aeron_client_conductor_async_remove_publication_destination(
     aeron_publication_t *publication,
     const char *uri);
 
+int aeron_client_conductor_async_remove_publication_destination_by_id(
+    aeron_async_destination_t **async,
+    aeron_client_conductor_t *conductor,
+    aeron_publication_t *publication,
+    int64_t destination_registration_id);
+
 int aeron_client_conductor_async_add_exclusive_publication_destination(
     aeron_async_destination_t **async,
     aeron_client_conductor_t *conductor,
@@ -322,6 +344,12 @@ int aeron_client_conductor_async_remove_exclusive_publication_destination(
     aeron_client_conductor_t *conductor,
     aeron_exclusive_publication_t *publication,
     const char *uri);
+
+int aeron_client_conductor_async_remove_exclusive_publication_destination_by_id(
+    aeron_async_destination_t **async,
+    aeron_client_conductor_t *conductor,
+    aeron_exclusive_publication_t *publication,
+    int64_t destination_registration_id);
 
 int aeron_client_conductor_async_add_subscription_destination(
     aeron_async_destination_t **async,
@@ -355,7 +383,11 @@ int aeron_client_conductor_on_unavailable_image(aeron_client_conductor_t *conduc
 int aeron_client_conductor_on_counter_ready(aeron_client_conductor_t *conductor, aeron_counter_update_t *response);
 int aeron_client_conductor_on_unavailable_counter(
     aeron_client_conductor_t *conductor, aeron_counter_update_t *response);
+
+int aeron_client_conductor_on_static_counter(aeron_client_conductor_t *conductor, aeron_static_counter_response_t *response);
+
 int aeron_client_conductor_on_client_timeout(aeron_client_conductor_t *conductor, aeron_client_timeout_t *response);
+int aeron_client_conductor_on_error_frame(aeron_client_conductor_t *conductor, aeron_publication_error_t *response);
 
 int aeron_client_conductor_get_or_create_log_buffer(
     aeron_client_conductor_t *conductor,
@@ -377,6 +409,13 @@ int aeron_client_conductor_offer_destination_command(
     const char *uri,
     int64_t *correlation_id);
 
+int aeron_client_conductor_reject_image(
+    aeron_client_conductor_t *conductor,
+    int64_t image_correlation_id,
+    int64_t position,
+    const char *reason,
+    int32_t command_type);
+
 inline int aeron_counter_heartbeat_timestamp_find_counter_id_by_registration_id(
     aeron_counters_reader_t *counters_reader, int32_t type_id, int64_t registration_id)
 {
@@ -386,14 +425,14 @@ inline int aeron_counter_heartbeat_timestamp_find_counter_id_by_registration_id(
             counters_reader->metadata + AERON_COUNTER_METADATA_OFFSET(i));
         int32_t record_state;
 
-        AERON_GET_VOLATILE(record_state, metadata->state);
+        AERON_GET_ACQUIRE(record_state, metadata->state);
 
-        if (AERON_COUNTER_RECORD_ALLOCATED == record_state)
+        if (AERON_COUNTER_RECORD_ALLOCATED == record_state && type_id == metadata->type_id)
         {
             int64_t counter_registration_id;
-
             memcpy(&counter_registration_id, metadata->key, sizeof(int64_t));
-            if (type_id == metadata->type_id && registration_id == counter_registration_id)
+
+            if (registration_id == counter_registration_id)
             {
                 return (int)i;
             }
@@ -411,7 +450,7 @@ inline bool aeron_counter_heartbeat_timestamp_is_active(
     int64_t counter_registration_id;
     int32_t record_state;
 
-    AERON_GET_VOLATILE(record_state, metadata->state);
+    AERON_GET_ACQUIRE(record_state, metadata->state);
 
     memcpy(&counter_registration_id, metadata->key, sizeof(int64_t));
 
@@ -434,7 +473,7 @@ inline void aeron_client_conductor_notify_close_handlers(aeron_client_conductor_
 inline bool aeron_client_conductor_is_closed(aeron_client_conductor_t *conductor)
 {
     bool is_closed;
-    AERON_GET_VOLATILE(is_closed, conductor->is_closed);
+    AERON_GET_ACQUIRE(is_closed, conductor->is_closed);
     return is_closed;
 }
 

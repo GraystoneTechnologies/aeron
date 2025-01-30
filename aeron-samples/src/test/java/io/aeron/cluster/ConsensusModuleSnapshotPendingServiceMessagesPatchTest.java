@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,6 +24,8 @@ import io.aeron.cluster.codecs.ConsensusModuleDecoder;
 import io.aeron.cluster.codecs.ConsensusModuleEncoder;
 import io.aeron.cluster.codecs.MessageHeaderDecoder;
 import io.aeron.cluster.codecs.MessageHeaderEncoder;
+import io.aeron.cluster.codecs.PendingMessageTrackerDecoder;
+import io.aeron.cluster.codecs.PendingMessageTrackerEncoder;
 import io.aeron.cluster.codecs.SessionMessageHeaderDecoder;
 import io.aeron.cluster.codecs.SessionMessageHeaderEncoder;
 import io.aeron.samples.archive.RecordingReplicator;
@@ -58,10 +60,12 @@ import java.nio.MappedByteBuffer;
 import java.util.ArrayList;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.function.IntFunction;
 
 import static io.aeron.CommonContext.IPC_CHANNEL;
 import static io.aeron.CommonContext.NULL_SESSION_ID;
 import static io.aeron.cluster.ConsensusModuleSnapshotPendingServiceMessagesPatch.replayLocalSnapshotRecording;
+import static io.aeron.cluster.PendingServiceMessageTracker.*;
 import static io.aeron.test.cluster.TestCluster.aCluster;
 import static java.nio.ByteOrder.LITTLE_ENDIAN;
 import static org.agrona.BitUtil.SIZE_OF_INT;
@@ -84,6 +88,7 @@ class ConsensusModuleSnapshotPendingServiceMessagesPatchTest
     @Test
     void executeThrowsNullPointerExceptionIfClusterDirIsNull()
     {
+        //noinspection DataFlowIssue
         assertThrowsExactly(
             NullPointerException.class,
             () -> new ConsensusModuleSnapshotPendingServiceMessagesPatch().execute(null));
@@ -130,17 +135,21 @@ class ConsensusModuleSnapshotPendingServiceMessagesPatchTest
     @InterruptAfter(60)
     void executeIsANoOpIfTheSnapshotIsValid()
     {
+        final IntFunction<TestNode.TestService[]> servicesSupplier =
+            (i) -> new TestNode.TestService[]
+            {
+                new TestNode.MessageTrackingService(1, i),
+                new TestNode.MessageTrackingService(2, i)
+            };
         final TestCluster cluster = aCluster()
             .withStaticNodes(3)
             .withTimerServiceSupplier(new PriorityHeapTimerServiceSupplier())
-            .withServiceSupplier((i) -> new TestNode.TestService[]{
-                new TestNode.MessageTrackingService(1, i),
-                new TestNode.MessageTrackingService(2, i) })
+            .withServiceSupplier(servicesSupplier)
             .start();
         systemTestWatcher.cluster(cluster);
         final int serviceCount = cluster.node(0).services().length;
 
-        cluster.awaitLeader();
+        final TestNode leader = cluster.awaitLeader();
         cluster.connectClient();
 
         TestNode.MessageTrackingService.delaySessionMessageProcessing(true);
@@ -152,7 +161,6 @@ class ConsensusModuleSnapshotPendingServiceMessagesPatchTest
             cluster.pollUntilMessageSent(SIZE_OF_INT);
         }
 
-        final TestNode leader = cluster.awaitLeader();
         cluster.takeSnapshot(leader);
         cluster.awaitSnapshotCount(1);
         TestNode.MessageTrackingService.delaySessionMessageProcessing(false);
@@ -207,7 +215,9 @@ class ConsensusModuleSnapshotPendingServiceMessagesPatchTest
         assertNotEquals(0, beforeClusterSessionIds.length);
 
         final ConsensusModuleSnapshotPendingServiceMessagesPatch snapshotPatch =
-            new ConsensusModuleSnapshotPendingServiceMessagesPatch();
+            new ConsensusModuleSnapshotPendingServiceMessagesPatch(
+            leader.archive().context().localControlChannel(),
+            leader.archive().context().localControlStreamId());
         assertFalse(snapshotPatch.execute(leaderClusterDir));
 
         mutableNextSessionId.set(NULL_SESSION_ID);
@@ -232,7 +242,7 @@ class ConsensusModuleSnapshotPendingServiceMessagesPatchTest
         "$compute, 200000, 1, 199999, NextServiceSessionId",
         "7777, 9999, 1000000000000000, 1223372036854775, MaxClusterSessionId" })
     @SlowTest
-    @InterruptAfter(30)
+    @InterruptAfter(60)
     @SuppressWarnings("MethodLength")
     void executeShouldPatchTheStateOfTheLeaderSnapshot(
         final String baseLogServiceSessionId,
@@ -241,12 +251,16 @@ class ConsensusModuleSnapshotPendingServiceMessagesPatchTest
         final long clusterSessionIdUpperBound,
         final String mode)
     {
+        final IntFunction<TestNode.TestService[]> servicesSupplier =
+            (i) -> new TestNode.TestService[]
+            {
+                new TestNode.MessageTrackingService(1, i),
+                new TestNode.MessageTrackingService(2, i)
+            };
         final TestCluster cluster = aCluster()
             .withStaticNodes(3)
             .withTimerServiceSupplier(new PriorityHeapTimerServiceSupplier())
-            .withServiceSupplier((i) -> new TestNode.TestService[]{
-                new TestNode.MessageTrackingService(1, i),
-                new TestNode.MessageTrackingService(2, i) })
+            .withServiceSupplier(servicesSupplier)
             .start();
         systemTestWatcher.cluster(cluster);
         final int serviceCount = cluster.node(0).services().length;
@@ -279,7 +293,12 @@ class ConsensusModuleSnapshotPendingServiceMessagesPatchTest
         final MutableLong mutableNextServiceSessionId = new MutableLong();
         final MutableLong mutableLogServiceSessionId = new MutableLong();
         final MutableInteger consensusModuleStateOffset = new MutableInteger();
-        final IntArrayList pendingMessageOffsets = new IntArrayList();
+        final IntArrayList pendingMessageTrackerOffsets = new IntArrayList();
+        final IntArrayList[] pendingMessageOffsets = new IntArrayList[serviceCount];
+        for (int i = 0; i < serviceCount; i++)
+        {
+            pendingMessageOffsets[i] = new IntArrayList();
+        }
         readSnapshotRecording(
             leader,
             leaderSnapshot.recordingId,
@@ -301,18 +320,37 @@ class ConsensusModuleSnapshotPendingServiceMessagesPatchTest
                     assertEquals(MessageHeaderDecoder.ENCODED_LENGTH + ConsensusModuleDecoder.BLOCK_LENGTH, length);
                 }
 
+                public void onLoadPendingMessageTracker(
+                    final long nextServiceSessionId,
+                    final long logServiceSessionId,
+                    final int pendingMessageCapacity,
+                    final int serviceId,
+                    final DirectBuffer buffer,
+                    final int offset,
+                    final int length)
+                {
+                    pendingMessageTrackerOffsets.add(offset);
+                    assertEquals(
+                        MessageHeaderDecoder.ENCODED_LENGTH + PendingMessageTrackerDecoder.BLOCK_LENGTH,
+                        length);
+                }
+
                 public void onLoadPendingMessage(
                     final long clusterSessionId, final DirectBuffer buffer, final int offset, final int length)
                 {
-                    pendingMessageOffsets.addInt(offset);
+                    final int serviceId = serviceIdFromLogMessage(clusterSessionId);
+                    pendingMessageOffsets[serviceId].addInt(offset);
                     assertEquals(
                         MessageHeaderDecoder.ENCODED_LENGTH + SessionMessageHeaderDecoder.BLOCK_LENGTH + SIZE_OF_INT,
                         length);
                 }
             });
         assertNotEquals(0, consensusModuleStateOffset.get());
-        final int numPendingMessages = pendingMessageOffsets.size();
-        assertNotEquals(0, numPendingMessages);
+        assertEquals(serviceCount, pendingMessageTrackerOffsets.size());
+        for (int i = 0; i < serviceCount; i++)
+        {
+            assertNotEquals(0, pendingMessageOffsets[i].size());
+        }
 
         final long expectedNextSessionId = mutableNextSessionId.get();
         assertNotEquals(Long.toString(mutableLogServiceSessionId.get()), baseLogServiceSessionId);
@@ -322,6 +360,7 @@ class ConsensusModuleSnapshotPendingServiceMessagesPatchTest
             leader,
             leaderSnapshot,
             consensusModuleStateOffset,
+            pendingMessageTrackerOffsets,
             pendingMessageOffsets,
             baseLogServiceSessionId,
             baseNextServiceSessionId,
@@ -329,17 +368,23 @@ class ConsensusModuleSnapshotPendingServiceMessagesPatchTest
             clusterSessionIdUpperBound);
 
         final ConsensusModuleSnapshotPendingServiceMessagesPatch snapshotPatch =
-            new ConsensusModuleSnapshotPendingServiceMessagesPatch();
+            new ConsensusModuleSnapshotPendingServiceMessagesPatch(
+            leader.archive().context().localControlChannel(),
+            leader.archive().context().localControlStreamId());
         assertTrue(snapshotPatch.execute(leaderClusterDir));
 
-        final MutableBoolean onLoadConsensusModuleState = new MutableBoolean();
-        final MutableInteger onLoadPendingMessageCount = new MutableInteger();
+        final MutableBoolean hasLoadedConsensusModuleState = new MutableBoolean();
+        final MutableInteger[] onLoadPendingMessageCounters = new MutableInteger[serviceCount];
+        for (int i = 0; i < serviceCount; i++)
+        {
+            onLoadPendingMessageCounters[i] = new MutableInteger();
+        }
         readSnapshotRecording(
             leader,
             leaderSnapshot.recordingId,
             new NoOpConsensusModuleSnapshotListener()
             {
-                long nextClusterSessionId;
+                final long[] nextClusterSessionIds = new long[serviceCount];
 
                 public void onLoadConsensusModuleState(
                     final long nextSessionId,
@@ -351,6 +396,7 @@ class ConsensusModuleSnapshotPendingServiceMessagesPatchTest
                     final int length)
                 {
                     assertEquals(expectedNextSessionId, nextSessionId);
+                    final int numPendingMessages = pendingMessageOffsets[0].size();
 
                     switch (mode)
                     {
@@ -381,19 +427,35 @@ class ConsensusModuleSnapshotPendingServiceMessagesPatchTest
                         }
                     }
 
-                    nextClusterSessionId = logServiceSessionId + 1;
-                    onLoadConsensusModuleState.set(true);
+                    hasLoadedConsensusModuleState.set(true);
+                }
+
+                public void onLoadPendingMessageTracker(
+                    final long nextServiceSessionId,
+                    final long logServiceSessionId,
+                    final int pendingMessageCapacity,
+                    final int serviceId,
+                    final DirectBuffer buffer,
+                    final int offset,
+                    final int length)
+                {
+                    nextClusterSessionIds[serviceId] = logServiceSessionId + 1;
                 }
 
                 public void onLoadPendingMessage(
                     final long clusterSessionId, final DirectBuffer buffer, final int offset, final int length)
                 {
-                    assertEquals(nextClusterSessionId++, clusterSessionId, "Invalid pending message header!");
-                    onLoadPendingMessageCount.increment();
+                    final int serviceId = serviceIdFromLogMessage(clusterSessionId);
+                    onLoadPendingMessageCounters[serviceId].increment();
+                    assertEquals(
+                        nextClusterSessionIds[serviceId]++, clusterSessionId, "Invalid pending message header!");
                 }
             });
-        assertTrue(onLoadConsensusModuleState.get());
-        assertEquals(numPendingMessages, onLoadPendingMessageCount.get());
+        assertTrue(hasLoadedConsensusModuleState.get());
+        for (int i = 0; i < serviceCount; i++)
+        {
+            assertEquals(pendingMessageOffsets[i].size(), onLoadPendingMessageCounters[i].get());
+        }
 
         for (int i = 0; i < 3; i++)
         {
@@ -435,29 +497,35 @@ class ConsensusModuleSnapshotPendingServiceMessagesPatchTest
 
     private static void stopConsensusModulesAndServices(final TestCluster cluster)
     {
+        final TestNode leader = cluster.findLeader();
         for (int i = 0; i < 3; i++)
         {
             final TestNode node = cluster.node(i);
-            if (null != node)
+            if (null != node && node != leader)
             {
                 node.isTerminationExpected(true);
                 node.stopServiceContainers();
                 node.consensusModule().close();
             }
         }
+
+        leader.isTerminationExpected(true);
+        leader.stopServiceContainers();
+        leader.consensusModule().close();
     }
 
     private static void modifySnapshot(
         final TestNode leader,
         final RecordingLog.Entry leaderSnapshot,
         final MutableInteger consensusModuleStateOffset,
-        final IntArrayList pendingMessageOffsets,
+        final IntArrayList pendingMessageTrackerOffsets,
+        final IntArrayList[] pendingMessageOffsets,
         final String baseLogServiceSessionId,
         final String baseNextServiceSessionId,
         final long clusterSessionIdLowerBound,
         final long clusterSessionIdUpperBound)
     {
-        final int numberOfPendingMessages = pendingMessageOffsets.size();
+        final int numberOfPendingMessages = pendingMessageOffsets[0].size();
         final long logServiceSessionId;
         if ("$compute".equals(baseLogServiceSessionId))
         {
@@ -485,6 +553,7 @@ class ConsensusModuleSnapshotPendingServiceMessagesPatchTest
         {
             final UnsafeBuffer snapshotBuffer = new UnsafeBuffer(mappedByteBuffer);
             final MessageHeaderEncoder messageHeaderEncoder = new MessageHeaderEncoder();
+            final MessageHeaderDecoder messageHeaderDecoder = new MessageHeaderDecoder();
 
             // Set the ConsensusModuleState values
             final ConsensusModuleEncoder consensusModuleEncoder = new ConsensusModuleEncoder();
@@ -493,33 +562,46 @@ class ConsensusModuleSnapshotPendingServiceMessagesPatchTest
                 .logServiceSessionId(logServiceSessionId)
                 .nextServiceSessionId(nextServiceSessionId);
 
+            final PendingMessageTrackerEncoder pendingMessageTrackerEncoder = new PendingMessageTrackerEncoder();
+            final int serviceCount = pendingMessageTrackerOffsets.size();
+            for (int i = 0; i < serviceCount; i++)
+            {
+                final int offset = pendingMessageTrackerOffsets.get(i);
+                pendingMessageTrackerEncoder
+                    .wrapAndApplyHeader(snapshotBuffer, offset, messageHeaderEncoder)
+                    .logServiceSessionId(serviceSessionId(i, logServiceSessionId))
+                    .nextServiceSessionId(serviceSessionId(i, nextServiceSessionId));
+            }
+
             // Now randomize clusterSessionId of every pending service message
             final SessionMessageHeaderEncoder sessionMessageHeaderEncoder = new SessionMessageHeaderEncoder();
+            final SessionMessageHeaderDecoder sessionMessageHeaderDecoder = new SessionMessageHeaderDecoder();
             final MutableInteger count = new MutableInteger();
-            pendingMessageOffsets.forEachInt(
-                (offset) ->
-                {
-                    final long clusterSessionId;
-                    switch (count.getAndIncrement())
+            for (int i = 0; i < serviceCount; i++)
+            {
+                final IntArrayList offsets = pendingMessageOffsets[i];
+                offsets.forEachInt(
+                    (offset) ->
                     {
-                        case 0:
-                            clusterSessionId = clusterSessionIdLowerBound;
-                            break;
+                        final long clusterSessionId = switch (count.getAndIncrement())
+                        {
+                            case 0 -> clusterSessionIdLowerBound;
+                            case 1 -> clusterSessionIdUpperBound;
+                            default -> ThreadLocalRandom.current().nextLong(
+                            clusterSessionIdLowerBound + 1, clusterSessionIdUpperBound);
+                        };
 
-                        case 1:
-                            clusterSessionId = clusterSessionIdUpperBound;
-                            break;
+                        final long originalClusterSessionId = sessionMessageHeaderDecoder
+                            .wrapAndApplyHeader(snapshotBuffer, offset, messageHeaderDecoder)
+                            .clusterSessionId();
+                        final int serviceId = serviceIdFromLogMessage(originalClusterSessionId);
+                        final long newClusterSessionId = serviceSessionId(serviceId, clusterSessionId);
 
-                        default:
-                            clusterSessionId = ThreadLocalRandom.current()
-                                .nextLong(clusterSessionIdLowerBound + 1, clusterSessionIdUpperBound);
-                            break;
-                    }
-
-                    sessionMessageHeaderEncoder
-                        .wrapAndApplyHeader(snapshotBuffer, offset, messageHeaderEncoder)
-                        .clusterSessionId(clusterSessionId);
-                });
+                        sessionMessageHeaderEncoder
+                            .wrapAndApplyHeader(snapshotBuffer, offset, messageHeaderEncoder)
+                            .clusterSessionId(newClusterSessionId);
+                    });
+            }
         }
         finally
         {
@@ -557,7 +639,8 @@ class ConsensusModuleSnapshotPendingServiceMessagesPatchTest
             Aeron aeron = Aeron.connect(new Aeron.Context()
                 .aeronDirectoryName(node.mediaDriver().aeronDirectoryName()));
             AeronArchive archive = AeronArchive.connect(new AeronArchive.Context()
-                .controlRequestChannel(IPC_CHANNEL)
+                .controlRequestChannel(node.archive().context().localControlChannel())
+                .controlRequestStreamId(node.archive().context().localControlStreamId())
                 .controlResponseChannel(IPC_CHANNEL)
                 .aeron(aeron)))
         {
@@ -579,8 +662,9 @@ class ConsensusModuleSnapshotPendingServiceMessagesPatchTest
         final String aeronDirectoryName = follower.mediaDriver().aeronDirectoryName();
         try (Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(aeronDirectoryName));
             AeronArchive aeronArchive = AeronArchive.connect(new AeronArchive.Context()
-                .controlRequestChannel(AeronArchive.Configuration.localControlChannel())
-                .controlResponseChannel(AeronArchive.Configuration.localControlChannel())
+                .controlRequestChannel(follower.archive().context().localControlChannel())
+                .controlRequestStreamId(follower.archive().context().localControlStreamId())
+                .controlResponseChannel(IPC_CHANNEL)
                 .aeron(aeron)
                 .recordingSignalConsumer(new RecordingSignalCapture())))
         {

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import io.aeron.archive.checksum.Checksum;
 import io.aeron.archive.client.ArchiveException;
 import io.aeron.archive.codecs.*;
 import org.agrona.*;
+import org.agrona.collections.Long2ObjectHashMap;
 import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.UnsafeBuffer;
 
@@ -30,6 +31,7 @@ import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.function.IntConsumer;
 import java.util.function.Predicate;
 
@@ -38,7 +40,6 @@ import static io.aeron.archive.Archive.Configuration.RECORDING_SEGMENT_SUFFIX;
 import static io.aeron.archive.client.AeronArchive.NULL_POSITION;
 import static io.aeron.archive.client.AeronArchive.NULL_TIMESTAMP;
 import static io.aeron.archive.codecs.RecordingDescriptorDecoder.*;
-import static io.aeron.archive.codecs.RecordingState.INVALID;
 import static io.aeron.archive.codecs.RecordingState.VALID;
 import static io.aeron.logbuffer.FrameDescriptor.*;
 import static io.aeron.protocol.DataHeaderFlyweight.HEADER_LENGTH;
@@ -48,6 +49,7 @@ import static java.nio.ByteOrder.nativeOrder;
 import static java.nio.channels.FileChannel.MapMode.READ_ONLY;
 import static java.nio.channels.FileChannel.MapMode.READ_WRITE;
 import static java.nio.file.StandardOpenOption.*;
+import static java.util.Collections.emptyList;
 import static org.agrona.AsciiEncoding.parseLongAscii;
 import static org.agrona.BitUtil.*;
 
@@ -81,7 +83,7 @@ import static org.agrona.BitUtil.*;
  *  +---------------------------------------------------------------+
  *  |                          Reserved                             |
  *  +---------------------------------------------------------------+
- *  |                 Recording Descriptor (varible)                |
+ *  |                Recording Descriptor (variable)                |
  *  |                                                              ...
  * ...                                                              |
  *  +---------------------------------------------------------------+
@@ -773,7 +775,7 @@ final class Catalog implements AutoCloseable
         return nativeOrder() == BYTE_ORDER ? stopPosition : Long.reverseBytes(stopPosition);
     }
 
-    boolean invalidateRecording(final long recordingId)
+    boolean changeState(final long recordingId, final RecordingState newState)
     {
         if (recordingId >= 0)
         {
@@ -782,7 +784,7 @@ final class Catalog implements AutoCloseable
             {
                 fieldAccessBuffer.putInt(
                     (int)offset + RecordingDescriptorHeaderEncoder.stateEncodingOffset(),
-                    INVALID.value(),
+                    newState.value(),
                     BYTE_ORDER);
 
                 forceWrites(catalogChannel);
@@ -1046,14 +1048,17 @@ final class Catalog implements AutoCloseable
      * @param checksum     to validate the last fragment upon the page straddle.
      * @param buffer       to recover the stop position.
      */
+    @SuppressWarnings("checkstyle:indentation")
     private void refreshCatalog(final boolean fixOnRefresh, final Checksum checksum, final UnsafeBuffer buffer)
     {
         if (fixOnRefresh)
         {
             final UnsafeBuffer tmpBuffer = null != buffer ?
                 buffer : new UnsafeBuffer(ByteBuffer.allocateDirect(FILE_IO_MAX_LENGTH_DEFAULT));
+            final Long2ObjectHashMap<List<String>> segmentFiles = indexSegmentFiles(archiveDir);
             forEach((recordingDescriptorOffset, headerEncoder, headerDecoder, descriptorEncoder, descriptorDecoder) ->
-                refreshAndFixDescriptor(headerDecoder, descriptorEncoder, descriptorDecoder, checksum, tmpBuffer));
+                refreshAndFixDescriptor(
+                    headerDecoder, descriptorEncoder, descriptorDecoder, segmentFiles, checksum, tmpBuffer));
         }
     }
 
@@ -1061,13 +1066,14 @@ final class Catalog implements AutoCloseable
         final RecordingDescriptorHeaderDecoder headerDecoder,
         final RecordingDescriptorEncoder encoder,
         final RecordingDescriptorDecoder decoder,
+        final Long2ObjectHashMap<List<String>> segmentFilesByRecordingId,
         final Checksum checksum,
         final UnsafeBuffer buffer)
     {
         final long recordingId = decoder.recordingId();
         if (VALID == headerDecoder.state() && NULL_POSITION == decoder.stopPosition())
         {
-            final ArrayList<String> segmentFiles = listSegmentFiles(archiveDir, recordingId);
+            final List<String> segmentFiles = segmentFilesByRecordingId.getOrDefault(recordingId, emptyList());
             final String maxSegmentFile = findSegmentFileWithHighestPosition(segmentFiles);
 
             encoder.stopPosition(computeStopPosition(
@@ -1126,7 +1132,34 @@ final class Catalog implements AutoCloseable
         return segmentFiles;
     }
 
-    static String findSegmentFileWithHighestPosition(final ArrayList<String> segmentFiles)
+    static Long2ObjectHashMap<List<String>> indexSegmentFiles(final File archiveDir)
+    {
+        final Long2ObjectHashMap<List<String>> index = new Long2ObjectHashMap<>();
+        final String[] files = archiveDir.list();
+
+        if (null != files)
+        {
+            for (final String file : files)
+            {
+                if (file.endsWith(RECORDING_SEGMENT_SUFFIX))
+                {
+                    try
+                    {
+                        final long recordingId = parseSegmentFileRecordingId(file);
+                        index.computeIfAbsent(recordingId, r -> new ArrayList<>()).add(file);
+                    }
+                    catch (final InvalidRecordingNameException ignore)
+                    {
+                        // Just skip over invalid files.
+                    }
+                }
+            }
+        }
+
+        return index;
+    }
+
+    static String findSegmentFileWithHighestPosition(final List<String> segmentFiles)
     {
         long maxSegmentPosition = NULL_POSITION;
         String maxFileName = null;
@@ -1165,6 +1198,17 @@ final class Catalog implements AutoCloseable
         }
 
         return parseLongAscii(filename, positionOffset, positionLength);
+    }
+
+    static long parseSegmentFileRecordingId(final String filename)
+    {
+        final int dashOffset = filename.indexOf('-');
+        if (-1 == dashOffset || 0 == dashOffset)
+        {
+            throw new InvalidRecordingNameException("invalid filename format: " + filename);
+        }
+
+        return parseLongAscii(filename, 0, dashOffset);
     }
 
     static long computeStopPosition(
@@ -1358,5 +1402,15 @@ final class Catalog implements AutoCloseable
             ", nextRecordingId=" + nextRecordingId +
             ", nextRecordingDescriptorOffset=" + nextRecordingDescriptorOffset +
             '}';
+    }
+
+    static class InvalidRecordingNameException extends ArchiveException
+    {
+        private static final long serialVersionUID = -2374545383916725365L;
+
+        InvalidRecordingNameException(final String message)
+        {
+            super(message);
+        }
     }
 }

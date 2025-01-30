@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 package io.aeron.driver;
 
+import io.aeron.ChannelUri;
 import io.aeron.ChannelUriStringBuilder;
 import io.aeron.driver.exceptions.InvalidChannelException;
 import io.aeron.driver.media.UdpChannel;
@@ -27,15 +28,23 @@ import org.hamcrest.TypeSafeMatcher;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.net.*;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
 
+import static io.aeron.driver.media.ControlMode.DYNAMIC;
+import static io.aeron.driver.media.ControlMode.MANUAL;
+import static io.aeron.driver.media.ControlMode.RESPONSE;
 import static java.net.InetAddress.getByName;
+import static java.util.concurrent.TimeUnit.MICROSECONDS;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -461,6 +470,14 @@ class UdpChannelTest
     }
 
     @Test
+    void shouldParseResponseControlMode()
+    {
+        final UdpChannel channel = UdpChannel.parse("aeron:udp?control-mode=response|control=127.0.0.1:10001");
+        assertEquals("UDP-127.0.0.1:10001-0.0.0.0:0", channel.canonicalForm());
+        assertTrue(channel.isResponseControlMode());
+    }
+
+    @Test
     void shouldUseTagsInCanonicalFormForWildcardPorts()
     {
         assertEquals(
@@ -583,6 +600,64 @@ class UdpChannelTest
     {
         final UdpChannel channel = UdpChannel.parse("aeron:udp?endpoint=localhost:8080|gtag=1234");
         assertEquals(1234L, channel.groupTag());
+    }
+
+    @Test
+    void shouldSpecifyControlIfDynamicControlModeSpecified()
+    {
+        assertThrows(InvalidChannelException.class, () -> UdpChannel.parse("aeron:udp?control-mode=dynamic"));
+    }
+
+    @Test
+    void shouldParseControlMode()
+    {
+        assertEquals(DYNAMIC, UdpChannel.parse("aeron:udp?control=localhost:8080|control-mode=dynamic").controlMode());
+        assertEquals(MANUAL, UdpChannel.parse("aeron:udp?control=localhost:8080|control-mode=manual").controlMode());
+        assertEquals(
+            RESPONSE, UdpChannel.parse("aeron:udp?control=localhost:8080|control-mode=response").controlMode());
+    }
+
+    @Test
+    void shouldParseNakDelay()
+    {
+        assertEquals(
+            MILLISECONDS.toNanos(34),
+            UdpChannel.parse("aeron:udp?endpoint=localhost:8080|nak-delay=34ms").nakDelayNs());
+        assertEquals(
+            MICROSECONDS.toNanos(27),
+            UdpChannel.parse("aeron:udp?endpoint=localhost:8080|nak-delay=27us").nakDelayNs());
+    }
+
+    @ParameterizedTest
+    @MethodSource("invalidMulticastAddresses")
+    void isMulticastDestinationAddressThrowsInvalidChannelExceptionIfInvalid(final ChannelUri uri)
+    {
+        assertThrowsExactly(InvalidChannelException.class, () -> UdpChannel.isMulticastDestinationAddress(uri));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "aeron:udp?mtu=8192|endpoint=192.168.0.1:5656, false",
+        "aeron:udp?mtu=8192|endpoint=224.0.0.1:5656, true",
+        "aeron:udp?endpoint=239.255.255.250:1010, true",
+        "aeron:udp?endpoint=[FF01:0:0:0:0:0:0:18C]:5555, true",
+        "aeron:udp?endpoint=[ff02::1]:1234, true",
+        "aeron:udp?endpoint=[fe80::ce81:b1c:bd2c:69e%utun3]:8080, false"
+    })
+    void shouldDetectMulticastAddress(final String uri, final boolean expected)
+    {
+        assertEquals(expected, UdpChannel.isMulticastDestinationAddress(ChannelUri.parse(uri)));
+    }
+
+    private static List<ChannelUri> invalidMulticastAddresses()
+    {
+        return Arrays.asList(
+            null,
+            ChannelUri.parse("aeron:ipc"),
+            ChannelUri.parse("aeron:udp?mtu=4096"),
+            ChannelUri.parse("aeron:udp?endpoint=test"),
+            ChannelUri.parse("aeron:udp?endpoint=test:a"),
+            ChannelUri.parse("aeron:udp?endpoint=[xx:xx:xx:xx]:5656"));
     }
 
     private static Matcher<NetworkInterface> supportsMulticastOrIsLoopback()

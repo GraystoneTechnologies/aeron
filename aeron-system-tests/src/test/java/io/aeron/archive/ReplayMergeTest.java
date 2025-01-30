@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -44,7 +44,7 @@ import static io.aeron.archive.ArchiveSystemTests.*;
 import static io.aeron.archive.codecs.SourceLocation.REMOTE;
 import static org.junit.jupiter.api.Assertions.*;
 
-@ExtendWith(InterruptingTestCallback.class)
+@ExtendWith({ EventLogExtension.class, InterruptingTestCallback.class })
 class ReplayMergeTest
 {
     private static final String MESSAGE_PREFIX = "Message-Prefix-";
@@ -181,7 +181,8 @@ class ReplayMergeTest
 
             aeronArchive.startRecording(recordingChannel, STREAM_ID, REMOTE, true);
             final CountersReader counters = aeron.countersReader();
-            final int recordingCounterId = Tests.awaitRecordingCounterId(counters, publication.sessionId());
+            final int recordingCounterId =
+                Tests.awaitRecordingCounterId(counters, publication.sessionId(), aeronArchive.archiveId());
             final long recordingId = RecordingPos.getRecordingId(counters, recordingCounterId);
 
             publishMessages(publication);

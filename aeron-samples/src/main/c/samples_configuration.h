@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,5 +30,11 @@
 #define DEFAULT_FRAGMENT_COUNT_LIMIT (10)
 #define DEFAULT_RANDOM_MESSAGE_LENGTH (false)
 #define DEFAULT_PUBLICATION_RATE_PROGRESS (false)
+
+#define DEFAULT_RESPONSE_CONTROL_CHANNEL "aeron:udp?control=localhost:20126"
+#define DEFAULT_RESPONSE_STREAM_ID (10001)
+
+#define DEFAULT_REQUEST_CHANNEL "aeron:udp?endpoint=localhost:20125"
+#define DEFAULT_REQUEST_STREAM_ID (10000)
 
 #endif //AERON_SAMPLES_CONFIGURATION_H

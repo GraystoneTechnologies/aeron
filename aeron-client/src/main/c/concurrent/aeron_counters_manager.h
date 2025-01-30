@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -125,6 +125,9 @@ void aeron_counters_manager_counter_registration_id(
 void aeron_counters_manager_counter_owner_id(
     aeron_counters_manager_t *manager, int32_t counter_id, int64_t owner_id);
 
+void aeron_counters_manager_counter_reference_id(
+    aeron_counters_manager_t *manager, int32_t counter_id, int64_t reference_id);
+
 void aeron_counters_manager_update_label(
     aeron_counters_manager_t *manager, int32_t counter_id, size_t label_length, const char *label);
 
@@ -173,7 +176,7 @@ inline int aeron_counters_reader_init(
 
 inline void aeron_counter_set_ordered(volatile int64_t *addr, int64_t value)
 {
-    AERON_PUT_ORDERED(*addr, value);
+    AERON_SET_RELEASE(*addr, value);
 }
 
 inline int64_t aeron_counter_get(volatile int64_t *addr)
@@ -184,7 +187,7 @@ inline int64_t aeron_counter_get(volatile int64_t *addr)
 inline int64_t aeron_counter_get_volatile(volatile int64_t *addr)
 {
     int64_t value;
-    AERON_GET_VOLATILE(value, *addr);
+    AERON_GET_ACQUIRE(value, *addr);
     return value;
 }
 
@@ -198,15 +201,15 @@ inline int64_t aeron_counter_increment(volatile int64_t *addr, int64_t value)
 inline int64_t aeron_counter_ordered_increment(volatile int64_t *addr, int64_t value)
 {
     int64_t current_value;
-    AERON_GET_VOLATILE(current_value, *addr);
-    AERON_PUT_ORDERED(*addr, (current_value + value));
+    AERON_GET_ACQUIRE(current_value, *addr);
+    AERON_SET_RELEASE(*addr, (current_value + value));
     return current_value;
 }
 
 inline int64_t aeron_counter_add_ordered(volatile int64_t *addr, int64_t value)
 {
     int64_t current = *addr;
-    AERON_PUT_ORDERED(*addr, (current + value));
+    AERON_SET_RELEASE(*addr, (current + value));
     return current;
 }
 
@@ -216,7 +219,7 @@ inline bool aeron_counter_propose_max_ordered(volatile int64_t *addr, int64_t pr
 
     if (*addr < proposed_value)
     {
-        AERON_PUT_ORDERED(*addr, proposed_value);
+        AERON_SET_RELEASE(*addr, proposed_value);
         updated = true;
     }
 

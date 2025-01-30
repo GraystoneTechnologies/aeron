@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,47 +17,24 @@ package io.aeron.driver;
 
 import io.aeron.ChannelUri;
 import io.aeron.driver.media.SendChannelEndpoint;
-import org.agrona.concurrent.AgentTerminationException;
-import org.agrona.concurrent.QueuedPipe;
+import org.agrona.concurrent.OneToOneConcurrentArrayQueue;
 import org.agrona.concurrent.status.AtomicCounter;
 
 import java.net.InetSocketAddress;
 
-import static io.aeron.driver.ThreadingMode.INVOKER;
-import static io.aeron.driver.ThreadingMode.SHARED;
-
 /**
  * Proxy for offering into the Sender Thread's command queue.
  */
-final class SenderProxy
+final class SenderProxy extends CommandProxy
 {
-    private final ThreadingMode threadingMode;
-    private final QueuedPipe<Runnable> commandQueue;
-    private final AtomicCounter failCount;
     private Sender sender;
 
     SenderProxy(
-        final ThreadingMode threadingMode, final QueuedPipe<Runnable> commandQueue, final AtomicCounter failCount)
+        final ThreadingMode threadingMode,
+        final OneToOneConcurrentArrayQueue<Runnable> commandQueue,
+        final AtomicCounter failCount)
     {
-        this.threadingMode = threadingMode;
-        this.commandQueue = commandQueue;
-        this.failCount = failCount;
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    public String toString()
-    {
-        return "SenderProxy{" +
-            "threadingMode=" + threadingMode +
-            ", failCount=" + failCount +
-            '}';
-    }
-
-    boolean isApplyingBackpressure()
-    {
-        return commandQueue.remainingCapacity() < 1;
+        super(threadingMode, commandQueue, failCount);
     }
 
     void sender(final Sender sender)
@@ -114,15 +91,18 @@ final class SenderProxy
     }
 
     void addDestination(
-        final SendChannelEndpoint channelEndpoint, final ChannelUri channelUri, final InetSocketAddress address)
+        final SendChannelEndpoint channelEndpoint,
+        final ChannelUri channelUri,
+        final InetSocketAddress address,
+        final long registrationId)
     {
         if (notConcurrent())
         {
-            sender.onAddDestination(channelEndpoint, channelUri, address);
+            sender.onAddDestination(channelEndpoint, channelUri, address, registrationId);
         }
         else
         {
-            offer(() -> sender.onAddDestination(channelEndpoint, channelUri, address));
+            offer(() -> sender.onAddDestination(channelEndpoint, channelUri, address, registrationId));
         }
     }
 
@@ -139,6 +119,19 @@ final class SenderProxy
         }
     }
 
+    void removeDestination(
+        final SendChannelEndpoint channelEndpoint, final long destinationRegistrationId)
+    {
+        if (notConcurrent())
+        {
+            sender.onRemoveDestination(channelEndpoint, destinationRegistrationId);
+        }
+        else
+        {
+            offer(() -> sender.onRemoveDestination(channelEndpoint, destinationRegistrationId));
+        }
+    }
+
     void onResolutionChange(
         final SendChannelEndpoint channelEndpoint, final String endpoint, final InetSocketAddress newAddress)
     {
@@ -149,28 +142,6 @@ final class SenderProxy
         else
         {
             offer(() -> sender.onResolutionChange(channelEndpoint, endpoint, newAddress));
-        }
-    }
-
-    private boolean notConcurrent()
-    {
-        return threadingMode == SHARED || threadingMode == INVOKER;
-    }
-
-    private void offer(final Runnable cmd)
-    {
-        while (!commandQueue.offer(cmd))
-        {
-            if (!failCount.isClosed())
-            {
-                failCount.increment();
-            }
-
-            Thread.yield();
-            if (Thread.currentThread().isInterrupted())
-            {
-                throw new AgentTerminationException("interrupted");
-            }
         }
     }
 }

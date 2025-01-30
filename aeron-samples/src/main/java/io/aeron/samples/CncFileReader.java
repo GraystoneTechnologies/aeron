@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ import org.agrona.concurrent.status.CountersReader;
 
 import java.io.File;
 import java.nio.MappedByteBuffer;
+import java.nio.charset.StandardCharsets;
 
 import static io.aeron.CncFileDescriptor.*;
 import static io.aeron.samples.SamplesUtil.mapExistingFileReadOnly;
@@ -37,6 +38,7 @@ import static io.aeron.samples.SamplesUtil.mapExistingFileReadOnly;
 public final class CncFileReader implements AutoCloseable
 {
     private boolean isClosed = false;
+    private final int driverPid;
     private final int cncVersion;
     private final String cncSemanticVersion;
     private final MappedByteBuffer cncByteBuffer;
@@ -48,6 +50,7 @@ public final class CncFileReader implements AutoCloseable
         this.cncByteBuffer = cncByteBuffer;
 
         final DirectBuffer cncMetaDataBuffer = createMetaDataBuffer(cncByteBuffer);
+        driverPid = cncMetaDataBuffer.getInt(pidOffset(0));
         final int cncVersion = cncMetaDataBuffer.getInt(cncVersionOffset(0));
 
         try
@@ -67,7 +70,8 @@ public final class CncFileReader implements AutoCloseable
 
         this.countersReader = new CountersReader(
             createCountersMetaDataBuffer(cncByteBuffer, cncMetaDataBuffer),
-            createCountersValuesBuffer(cncByteBuffer, cncMetaDataBuffer));
+            createCountersValuesBuffer(cncByteBuffer, cncMetaDataBuffer),
+            StandardCharsets.US_ASCII);
     }
 
     /**
@@ -125,6 +129,16 @@ public final class CncFileReader implements AutoCloseable
             RingBufferDescriptor.CONSUMER_HEARTBEAT_OFFSET;
 
         return toDriverBuffer.getLongVolatile(timestampOffset);
+    }
+
+    /**
+     * Return media driver PID that is stored in the CnC file.
+     *
+     * @return media driver PID.
+     */
+    public int driverPid()
+    {
+        return driverPid;
     }
 
     /**

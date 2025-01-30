@@ -1,6 +1,6 @@
 
 ////
-* Copyright 2014-2023 Real Logic Limited.
+* Copyright 2014-2025 Real Logic Limited.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -266,15 +266,15 @@ detected from the stored messages. The two approaches can be used to sanity chec
 include::{sampleSourceDir}/io/aeron/samples/cluster/tutorial/BasicAuctionClusteredService.java[tag=loadSnapshot]
 ----
 
-<1> The method `Image::isEndOfStream` can be used to determine if there is going to be any more input.
-
-<2> Because our snapshot is a stream of messages written to a `Publication`, we use the `Image.poll` method for
+<1> Our snapshot is a stream of messages written to a `Publication`, we then use the `Image::poll` method for
 extracting data from the snapshot.
 
-<3> Our total snapshot length (16 bytes) is going to be smaller than any reasonable MTU therefore we can assume that all
-the data will come in a single message.
+<2> Our total snapshot length (16 bytes) is going to be smaller than any reasonable MTU therefore we can assume that all
+the data will come in a single message fragment.
 
-<4> Once all data is loaded, we can initialise the application logic state from the snapshot.
+<3> Once all data is loaded, we can initialise the application logic state from the snapshot.
+
+<4> The method `Image::isEndOfStream` can be used to determine if there is going to be any more input.
 
 <5> Once we've loaded all the data for the application we can break out of the snapshot loading loop.
 
@@ -295,12 +295,12 @@ and disconnecting from the cluster, plus leadership and role changes. We won't l
 Now we have our application implemented we can move onto running it in a Cluster. There are a number of moving parts to
 setting up a cluster node, one of the trickiest parts of using Aeron Cluster is getting the configuration correct. We
 are going to start with a static three-node cluster with a simplified configuration where all the components
-(`MediaDriver`, `Archive`, `ConsensusModule` and `ClusteredServiceContainer`) for a single node within a single process.
-Later we will then start the cluster as three separate processes.
+(`MediaDriver`, `Archive`, `ConsensusModule`, and `ClusteredServiceContainer`) for a single node within a single
+process. Later we will then start the cluster as three separate processes.
 
 === Running Multiple Nodes on the Same Host
 
-In a production deployment, you will want to run the 3 instances on three separate servers, however for our example we
+In a production deployment, you will want to run the 3 instances on 3 separate servers, however for our example we
 want to run the services on a single machine. This does make port allocation a concern as each node within the cluster
 needs to bind to a number of ports, so we need to make sure are no clashes. We could do this with VMs or containers,
 but in the interest of simplicity we are going to specify a port range for each node. For example:
@@ -424,17 +424,12 @@ on a separate network to the ingress traffic.
 template that specifies the parameters, but excludes the endpoint, which will be filled using value from the
 `clusterMembersString` as appropriate for this node.
 
-<5> Specify the log channel. Like the ingress channel this is specified as a template. This channel needs to be a
-multi-destination-cast (MDC) or multicast channel. In our example we are using multi-destination-cast using manual
-configuration, hence we need a separate control endpoint (including a port) used for adding and removing destination to
-the publication.
-
-<6> Specify the replication channel. This channel is the one that the local archive for a node will receive replication
+<5> Specify the replication channel. This channel is the one that the local archive for a node will receive replication
 responses from other archives when the log or snapshot replication step is required. This was added in version 1.33.0
 and is a required parameter. It is important in a production environment that this channel's endpoint is not set to
 localhost, but instead a hostname/ip address that is reachable by the other nodes in the cluster.
 
-<7> Clone the Archive Client context that the Consensus Module will use to talk to the Archive.
+<6> Clone the Archive Client context that the Consensus Module will use to talk to the Archive.
 
 ==== Clustered Service Container
 

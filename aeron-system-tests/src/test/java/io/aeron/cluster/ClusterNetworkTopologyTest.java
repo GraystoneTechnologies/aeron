@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import io.aeron.driver.ThreadingMode;
 import io.aeron.samples.cluster.ClusterConfig;
 import io.aeron.samples.cluster.EchoServiceNode;
 import io.aeron.samples.cluster.tutorial.BasicAuctionClusterClient;
+import io.aeron.test.EventLogExtension;
 import io.aeron.test.InterruptAfter;
 import io.aeron.test.InterruptingTestCallback;
 import io.aeron.test.SystemTestWatcher;
@@ -38,7 +39,8 @@ import org.agrona.collections.MutableReference;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.JRE;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -60,7 +62,6 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.EnumSet;
 import java.util.List;
 import java.util.Set;
 import java.util.regex.Pattern;
@@ -72,7 +73,8 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.junit.jupiter.api.Assertions.*;
 
 @TopologyTest
-@ExtendWith(InterruptingTestCallback.class)
+@ExtendWith({ EventLogExtension.class, InterruptingTestCallback.class })
+@EnabledOnOs(OS.LINUX)
 class ClusterNetworkTopologyTest
 {
     private static final int REMOTE_LAUNCH_PORT = 11112;
@@ -457,12 +459,10 @@ class ClusterNetworkTopologyTest
         IoUtil.delete(clusterDir, false);
         IoUtil.ensureDirectoryExists(clusterDir, "cluster base directory");
 
-        if (isVersionAfterJdk8())
-        {
-            command.add("--add-opens");
-            command.add("java.base/sun.nio.ch=ALL-UNNAMED");
-        }
-
+        command.add("--add-opens");
+        command.add("java.base/jdk.internal.misc=ALL-UNNAMED");
+        command.add("--add-opens");
+        command.add("java.base/java.util.zip=ALL-UNNAMED");
         command.add("-Xmx32m");
         command.add("-cp");
         command.add(FileResolveUtil.resolveAeronAllJar().getAbsolutePath());
@@ -496,10 +496,5 @@ class ClusterNetworkTopologyTest
         command.add(EchoServiceNode.class.getName());
 
         return command.toArray(new String[0]);
-    }
-
-    private static boolean isVersionAfterJdk8()
-    {
-        return EnumSet.range(JRE.JAVA_9, JRE.OTHER).contains(JRE.currentVersion());
     }
 }

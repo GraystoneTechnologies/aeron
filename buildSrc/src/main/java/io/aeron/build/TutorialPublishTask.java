@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -120,7 +120,8 @@ public class TutorialPublishTask extends DefaultTask
     public void publish() throws Exception
     {
         final String wikiUri = getWikiUri();
-        final File directory = new File(getProject().getBuildDir(), "tmp/tutorialPublish");
+        final File directory =
+            new File(getProject().getLayout().getBuildDirectory().getAsFile().get(), "tmp/tutorialPublish");
         // Use Personal Access Token or GITHUB_TOKEN for workflows
         final CredentialsProvider credentialsProvider = new UsernamePasswordCredentialsProvider(apiKey, "");
 

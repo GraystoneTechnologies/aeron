@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -59,12 +59,12 @@ import static org.mockito.Mockito.verify;
 @ExtendWith({InterruptingTestCallback.class, HideStdErrExtension.class})
 class ClusterNodeRestartTest
 {
-    private static final long CATALOG_CAPACITY = 1024 * 1024;
     private static final int MESSAGE_LENGTH = SIZE_OF_INT;
     private static final int TIMER_MESSAGE_LENGTH = SIZE_OF_INT + SIZE_OF_LONG + SIZE_OF_LONG;
     private static final int MESSAGE_VALUE_OFFSET = 0;
     private static final int TIMER_MESSAGE_ID_OFFSET = MESSAGE_VALUE_OFFSET + SIZE_OF_INT;
     private static final int TIMER_MESSAGE_DELAY_OFFSET = TIMER_MESSAGE_ID_OFFSET + SIZE_OF_LONG;
+    public static final long TIMER_CORRELATION_ID = 777;
 
     private ClusteredMediaDriver clusteredMediaDriver;
     private ClusteredServiceContainer container;
@@ -280,7 +280,7 @@ class ClusterNodeRestartTest
         sendNumberedMessageIntoCluster(0);
         sendNumberedMessageIntoCluster(1);
         sendNumberedMessageIntoCluster(2);
-        sendTimerMessageIntoCluster(3, 1, TimeUnit.HOURS.toMillis(10));
+        sendTimerMessageIntoCluster(3, TimeUnit.HOURS.toMillis(10));
 
         Tests.awaitValue(serviceMsgCount, 4);
 
@@ -442,10 +442,10 @@ class ClusterNodeRestartTest
         sendMessageIntoCluster(aeronCluster, msgBuffer, MESSAGE_LENGTH);
     }
 
-    private void sendTimerMessageIntoCluster(final int value, final long timerCorrelationId, final long delay)
+    private void sendTimerMessageIntoCluster(final int value, final long delay)
     {
         msgBuffer.putInt(MESSAGE_VALUE_OFFSET, value);
-        msgBuffer.putLong(TIMER_MESSAGE_ID_OFFSET, timerCorrelationId);
+        msgBuffer.putLong(TIMER_MESSAGE_ID_OFFSET, TIMER_CORRELATION_ID);
         msgBuffer.putLong(TIMER_MESSAGE_DELAY_OFFSET, delay);
 
         sendMessageIntoCluster(aeronCluster, msgBuffer, TIMER_MESSAGE_LENGTH);
@@ -529,6 +529,7 @@ class ClusterNodeRestartTest
                     final long correlationId = serviceCorrelationId(nextCorrelationId++);
                     final long deadlineMs = timestamp + buffer.getLong(offset + TIMER_MESSAGE_DELAY_OFFSET);
 
+                    idleStrategy.reset();
                     while (!cluster.scheduleTimer(correlationId, deadlineMs))
                     {
                         idleStrategy.idle();
@@ -608,6 +609,7 @@ class ClusterNodeRestartTest
                 final ExpandableArrayBuffer buffer = new ExpandableArrayBuffer();
                 buffer.putLong(0, triggeredTimersCounter.get());
 
+                idleStrategy.reset();
                 while (snapshotPublication.offer(buffer, 0, SIZE_OF_INT) < 0)
                 {
                     idleStrategy.idle();
@@ -639,8 +641,10 @@ class ClusterNodeRestartTest
     private void connectClient()
     {
         CloseHelper.close(aeronCluster);
-        aeronCluster = AeronCluster.connect(
-            new AeronCluster.Context().ingressChannel("aeron:udp").ingressEndpoints(INGRESS_ENDPOINTS));
+        aeronCluster = AeronCluster.connect(new AeronCluster.Context()
+                .ingressChannel("aeron:udp")
+                .ingressEndpoints(INGRESS_ENDPOINTS)
+                .egressChannel("aeron:udp?endpoint=localhost:0"));
     }
 
     private void launchClusteredMediaDriver(final boolean initialLaunch)
@@ -653,7 +657,7 @@ class ClusterNodeRestartTest
                 .errorHandler(ClusterTests.errorHandler(0))
                 .dirDeleteOnStart(true),
             TestContexts.localhostArchive()
-                .catalogCapacity(CATALOG_CAPACITY)
+                .catalogCapacity(ClusterTestConstants.CATALOG_CAPACITY)
                 .recordingEventsEnabled(false)
                 .threadingMode(ArchiveThreadingMode.SHARED)
                 .deleteArchiveOnStart(initialLaunch),
@@ -666,13 +670,13 @@ class ClusterNodeRestartTest
                 .replicationChannel("aeron:udp?endpoint=localhost:0"));
     }
 
-    private static void checkResult(final long result)
+    private static void checkResult(final long position)
     {
-        if (result == Publication.NOT_CONNECTED ||
-            result == Publication.CLOSED ||
-            result == Publication.MAX_POSITION_EXCEEDED)
+        if (position == Publication.NOT_CONNECTED ||
+            position == Publication.CLOSED ||
+            position == Publication.MAX_POSITION_EXCEEDED)
         {
-            throw new IllegalStateException("unexpected publication state: " + result);
+            throw new IllegalStateException("unexpected publication state: " + Publication.errorString(position));
         }
     }
 }

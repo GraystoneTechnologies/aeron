@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -69,13 +69,18 @@ public:
         m_mediaReceiveTimestampOffset.reset(nullptr);
         m_channelReceiveTimestampOffset.reset(nullptr);
         m_channelSendTimestampOffset.reset(nullptr);
+        m_responseCorrelationId.reset(nullptr);
+        m_nakDelay.reset(nullptr);
+        m_untetheredWindowLimitTimeout.reset(nullptr);
+        m_untetheredRestingTimeout.reset(nullptr);
+        m_maxResend.reset(nullptr);
 
         return *this;
     }
 
     inline this_t &prefix(const std::string &prefix)
     {
-        if (m_prefix && !m_prefix->empty() && !(m_prefix->compare(SPY_QUALIFIER)))
+        if (!prefix.empty() && prefix != SPY_QUALIFIER)
         {
             throw IllegalArgumentException("invalid prefix: " + prefix, SOURCEINFO);
         }
@@ -121,7 +126,9 @@ public:
 
     inline this_t &controlMode(const std::string &controlMode)
     {
-        if (controlMode != MDC_CONTROL_MODE_MANUAL && controlMode != MDC_CONTROL_MODE_DYNAMIC)
+        if (controlMode != MDC_CONTROL_MODE_MANUAL &&
+            controlMode != MDC_CONTROL_MODE_DYNAMIC &&
+            controlMode != CONTROL_MODE_RESPONSE)
         {
             throw IllegalArgumentException("invalid control mode: " + controlMode, SOURCEINFO);
         }
@@ -334,7 +341,7 @@ public:
 
     inline this_t &receiverWindowLength(std::nullptr_t)
     {
-        m_socketRcvbufLength.reset(nullptr);
+        m_receiverWindowLength.reset(nullptr);
         return *this;
     }
 
@@ -357,9 +364,9 @@ public:
         return *this;
     }
 
-    inline this_t &mediaReceiveTimestampOffset(const std::string &rxTimestampOffset)
+    inline this_t &mediaReceiveTimestampOffset(const std::string &mediaReceiveTimestampOffset)
     {
-        m_mediaReceiveTimestampOffset.reset(new std::string(rxTimestampOffset));
+        m_mediaReceiveTimestampOffset.reset(new std::string(mediaReceiveTimestampOffset));
         return *this;
     }
 
@@ -375,6 +382,36 @@ public:
         return *this;
     }
 
+    inline this_t &responseCorrelationId(std::int64_t responseCorrelationId)
+    {
+        m_responseCorrelationId.reset(new Value(responseCorrelationId));
+        return *this;
+    }
+
+    inline this_t &nakDelay(std::int64_t nakDelay)
+    {
+        m_nakDelay.reset(new Value(nakDelay));
+        return *this;
+    }
+
+    inline this_t &untetheredWindowLimitTimeout(std::int64_t timeout)
+    {
+        m_untetheredWindowLimitTimeout.reset(new Value(timeout));
+        return *this;
+    }
+
+    inline this_t &untetheredRestingTimeout(std::int64_t timeout)
+    {
+        m_untetheredRestingTimeout.reset(new Value(timeout));
+        return *this;
+    }
+
+    inline this_t &maxResend(std::int32_t maxResend)
+    {
+        m_maxResend.reset(new Value(maxResend));
+        return *this;
+    }
+
     std::string build()
     {
         std::ostringstream sb;
@@ -386,75 +423,30 @@ public:
 
         sb << AERON_SCHEME << ':' << *m_media << '?';
 
-        if (m_tags)
-        {
-            sb << TAGS_PARAM_NAME << '=' << *m_tags << '|';
-        }
-
-        if (m_endpoint)
-        {
-            sb << ENDPOINT_PARAM_NAME << '=' << *m_endpoint << '|';
-        }
-
-        if (m_networkInterface)
-        {
-            sb << INTERFACE_PARAM_NAME << '=' << *m_networkInterface << '|';
-        }
-
-        if (m_controlEndpoint)
-        {
-            sb << MDC_CONTROL_PARAM_NAME << '=' << *m_controlEndpoint << '|';
-        }
-
-        if (m_controlMode)
-        {
-            sb << MDC_CONTROL_MODE_PARAM_NAME << '=' << *m_controlMode << '|';
-        }
-
-        if (m_mtu)
-        {
-            sb << MTU_LENGTH_PARAM_NAME << '=' << std::to_string(m_mtu->value) << '|';
-        }
-
-        if (m_termLength)
-        {
-            sb << TERM_LENGTH_PARAM_NAME << '=' << std::to_string(m_termLength->value) << '|';
-        }
-
-        if (m_initialTermId)
-        {
-            sb << INITIAL_TERM_ID_PARAM_NAME << '=' << std::to_string(m_initialTermId->value) << '|';
-        }
-
-        if (m_termId)
-        {
-            sb << TERM_ID_PARAM_NAME << '=' << std::to_string(m_termId->value) << '|';
-        }
-
-        if (m_termOffset)
-        {
-            sb << TERM_OFFSET_PARAM_NAME << '=' << std::to_string(m_termOffset->value) << '|';
-        }
+        append(sb, TAGS_PARAM_NAME, m_tags);
+        append(sb, ENDPOINT_PARAM_NAME, m_endpoint);
+        append(sb, INTERFACE_PARAM_NAME, m_networkInterface);
+        append(sb, MDC_CONTROL_PARAM_NAME, m_controlEndpoint);
+        append(sb, MDC_CONTROL_MODE_PARAM_NAME, m_controlMode);
+        append(sb, MTU_LENGTH_PARAM_NAME, m_mtu);
+        append(sb, TERM_LENGTH_PARAM_NAME, m_termLength);
+        append(sb, INITIAL_TERM_ID_PARAM_NAME, m_initialTermId);
+        append(sb, TERM_ID_PARAM_NAME, m_termId);
+        append(sb, TERM_OFFSET_PARAM_NAME, m_termOffset);
 
         if (m_sessionId)
         {
             sb << SESSION_ID_PARAM_NAME << '=' << prefixTag(m_isSessionIdTagged, *m_sessionId) << '|';
         }
 
-        if (m_ttl)
-        {
-            sb << TTL_PARAM_NAME << '=' << std::to_string(m_ttl->value) << '|';
-        }
+        append(sb, TTL_PARAM_NAME, m_ttl);
 
         if (m_reliable)
         {
             sb << RELIABLE_STREAM_PARAM_NAME << '=' << (m_reliable->value == 1 ? "true" : "false") << '|';
         }
 
-        if (m_linger)
-        {
-            sb << LINGER_PARAM_NAME << '=' << std::to_string(m_linger->value) << '|';
-        }
+        append(sb, LINGER_PARAM_NAME, m_linger);
 
         if (m_alias)
         {
@@ -471,10 +463,7 @@ public:
             sb << FLOW_CONTROL_PARAM_NAME << '=' << *m_fc << '|';
         }
 
-        if (m_gtag)
-        {
-            sb << GROUP_TAG_PARAM_NAME << '=' << std::to_string(m_gtag->value) << '|';
-        }
+        append(sb, GROUP_TAG_PARAM_NAME, m_gtag);
 
         if (m_sparse)
         {
@@ -506,35 +495,17 @@ public:
             sb << SPIES_SIMULATE_CONNECTION_PARAM_NAME << '=' << (m_ssc->value == 1 ? "true" : "false") << '|';
         }
 
-        if (m_socketSndbufLength)
-        {
-            sb << SOCKET_SNDBUF_PARAM_NAME << '=' << m_socketSndbufLength->value << '|';
-        }
-
-        if (m_socketRcvbufLength)
-        {
-            sb << SOCKET_RCVBUF_PARAM_NAME << '=' << m_socketRcvbufLength->value << '|';
-        }
-
-        if (m_receiverWindowLength)
-        {
-            sb << RECEIVER_WINDOW_LENGTH_PARAM_NAME << '=' << m_receiverWindowLength->value << '|';
-        }
-
-        if (m_mediaReceiveTimestampOffset)
-        {
-            sb << MEDIA_RCV_TIMESTAMP_OFFSET_PARAM_NAME << '=' << *m_mediaReceiveTimestampOffset << '|';
-        }
-
-        if (m_channelReceiveTimestampOffset)
-        {
-            sb << CHANNEL_RCV_TIMESTAMP_OFFSET_PARAM_NAME << '=' << *m_channelReceiveTimestampOffset << '|';
-        }
-
-        if (m_channelSendTimestampOffset)
-        {
-            sb << CHANNEL_SND_TIMESTAMP_OFFSET_PARAM_NAME << '=' << *m_channelSendTimestampOffset << '|';
-        }
+        append(sb, SOCKET_SNDBUF_PARAM_NAME, m_socketSndbufLength);
+        append(sb, SOCKET_RCVBUF_PARAM_NAME, m_socketRcvbufLength);
+        append(sb, RECEIVER_WINDOW_LENGTH_PARAM_NAME, m_receiverWindowLength);
+        append(sb, MEDIA_RCV_TIMESTAMP_OFFSET_PARAM_NAME, m_mediaReceiveTimestampOffset);
+        append(sb, CHANNEL_RCV_TIMESTAMP_OFFSET_PARAM_NAME, m_channelReceiveTimestampOffset);
+        append(sb, CHANNEL_SND_TIMESTAMP_OFFSET_PARAM_NAME, m_channelSendTimestampOffset);
+        append(sb, RESPONSE_CORRELATION_ID_PARAM_NAME, m_responseCorrelationId);
+        append(sb, NAK_DELAY_PARAM_NAME, m_nakDelay);
+        append(sb, UNTETHERED_WINDOW_LIMIT_TIMEOUT_PARAM_NAME, m_untetheredWindowLimitTimeout);
+        append(sb, UNTETHERED_RESTING_TIMEOUT_PARAM_NAME, m_untetheredRestingTimeout);
+        append(sb, MAX_RESEND_PARAM_NAME, m_maxResend);
 
         std::string result = sb.str();
         const char lastChar = result.back();
@@ -587,6 +558,11 @@ private:
     std::unique_ptr<Value> m_socketSndbufLength;
     std::unique_ptr<Value> m_socketRcvbufLength;
     std::unique_ptr<Value> m_receiverWindowLength;
+    std::unique_ptr<Value> m_responseCorrelationId;
+    std::unique_ptr<Value> m_nakDelay;
+    std::unique_ptr<Value> m_untetheredWindowLimitTimeout;
+    std::unique_ptr<Value> m_untetheredRestingTimeout;
+    std::unique_ptr<Value> m_maxResend;
     std::unique_ptr<std::string> m_mediaReceiveTimestampOffset;
     std::unique_ptr<std::string> m_channelReceiveTimestampOffset;
     std::unique_ptr<std::string> m_channelSendTimestampOffset;
@@ -595,6 +571,22 @@ private:
     inline static std::string prefixTag(bool isTagged, Value &value)
     {
         return isTagged ? (std::string(TAG_PREFIX) + std::to_string(value.value)) : std::to_string(value.value);
+    }
+
+    inline static void append(std::ostringstream &sb, const char *name, std::unique_ptr<Value> &value)
+    {
+        if (value)
+        {
+            sb << name << '=' << value->value << '|';
+        }
+    }
+
+    inline static void append(std::ostringstream &sb, const char *name, std::unique_ptr<std::string> &value)
+    {
+        if (value)
+        {
+            sb << name << '=' << *value << '|';
+        }
     }
 };
 

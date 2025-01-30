@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,6 +37,12 @@
 #define AERON_FILE_SEP '\\'
 #else
 #define AERON_FILE_SEP '/'
+#endif
+
+#ifdef _MSC_VER
+#define AERON_FILE_SEP_STR "\\"
+#else
+#define AERON_FILE_SEP_STR "/"
 #endif
 
 #if defined(AERON_COMPILER_MSVC)
@@ -125,6 +131,16 @@ int aeron_unmap(aeron_mapped_file_t *mapped_file)
         return UnmapViewOfFile(mapped_file->addr) ? 0 : -1;
     }
 
+    return 0;
+}
+
+int aeron_msync(void *addr, size_t length)
+{
+    if (NULL != addr && 0 == FlushViewOfFile(addr, length))
+    {
+        AERON_SET_ERR_WIN(GetLastError(), "%s", "FlushViewOfFile failed");
+        return -1;
+    }
     return 0;
 }
 
@@ -305,11 +321,22 @@ int aeron_unmap(aeron_mapped_file_t *mapped_file)
     return 0;
 }
 
+int aeron_msync(void *addr, size_t length)
+{
+    if (NULL != addr && 0 != msync(addr, length, MS_SYNC | MS_INVALIDATE))
+    {
+        AERON_SET_ERR(errno, "%s", "msync failed");
+        return -1;
+    }
+    return 0;
+}
+
 static int unlink_func(const char *path, const struct stat *sb, int type_flag, struct FTW *ftw)
 {
     if (remove(path) != 0)
     {
         AERON_SET_ERR(errno, "could not remove %s", path);
+        return -1;
     }
 
     return 0;
@@ -426,6 +453,54 @@ int aeron_open_file_rw(const char *path)
 }
 #endif
 
+int aeron_mkdir_recursive(const char *pathname, int permission)
+{
+    if (aeron_mkdir(pathname, permission) == 0)
+    {
+        return 0;
+    }
+
+    if (errno != ENOENT)
+    {
+        AERON_SET_ERR(errno, "aeron_mkdir failed for %s", pathname);
+        return -1;
+    }
+
+    char *_pathname = strdup(pathname);
+    char *p;
+
+    for (p = _pathname + strlen(_pathname) - 1; p != _pathname; p--)
+    {
+        if (*p == AERON_FILE_SEP)
+        {
+            *p = '\0';
+
+            // _pathname is now the parent directory of the original pathname
+            int rc = aeron_mkdir_recursive(_pathname, permission);
+
+            free(_pathname);
+
+            if (0 == rc)
+            {
+                // if rc is 0, then we were able to create the parent directory
+                // so retry the original pathname
+                return aeron_mkdir(pathname, permission);
+            }
+            else
+            {
+                AERON_APPEND_ERR("pathname=%s", pathname);
+                return rc;
+            }
+        }
+    }
+
+    free(_pathname);
+
+    AERON_SET_ERR(EINVAL, "aeron_mkdir_recursive failed to find parent directory in %s", pathname);
+
+    return -1;
+}
+
 #include <inttypes.h>
 
 #define AERON_BLOCK_SIZE (4 * 1024)
@@ -526,7 +601,7 @@ int aeron_publication_image_location(char *dst, size_t length, const char *aeron
 {
     return snprintf(
         dst, length,
-        "%s/" AERON_IMAGES_DIR "/%" PRId64 ".logbuffer",
+        "%s" AERON_FILE_SEP_STR AERON_IMAGES_DIR AERON_FILE_SEP_STR "%" PRId64 ".logbuffer",
         aeron_dir, correlation_id);
 }
 

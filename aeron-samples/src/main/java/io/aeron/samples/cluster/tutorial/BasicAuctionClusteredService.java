@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import io.aeron.cluster.codecs.CloseReason;
 import io.aeron.cluster.service.ClientSession;
 import io.aeron.cluster.service.Cluster;
 import io.aeron.cluster.service.ClusteredService;
+import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.Header;
 import org.agrona.*;
 import org.agrona.collections.MutableBoolean;
@@ -35,16 +36,16 @@ import java.util.Objects;
 public class BasicAuctionClusteredService implements ClusteredService
 // end::new_service[]
 {
-    public static final int CORRELATION_ID_OFFSET = 0;
-    public static final int CUSTOMER_ID_OFFSET = CORRELATION_ID_OFFSET + BitUtil.SIZE_OF_LONG;
-    public static final int PRICE_OFFSET = CUSTOMER_ID_OFFSET + BitUtil.SIZE_OF_LONG;
-    public static final int BID_MESSAGE_LENGTH = PRICE_OFFSET + BitUtil.SIZE_OF_LONG;
-    public static final int BID_SUCCEEDED_OFFSET = BID_MESSAGE_LENGTH;
-    public static final int EGRESS_MESSAGE_LENGTH = BID_SUCCEEDED_OFFSET + BitUtil.SIZE_OF_BYTE;
+    static final int CORRELATION_ID_OFFSET = 0;
+    static final int CUSTOMER_ID_OFFSET = CORRELATION_ID_OFFSET + BitUtil.SIZE_OF_LONG;
+    static final int PRICE_OFFSET = CUSTOMER_ID_OFFSET + BitUtil.SIZE_OF_LONG;
+    static final int BID_MESSAGE_LENGTH = PRICE_OFFSET + BitUtil.SIZE_OF_LONG;
+    static final int BID_SUCCEEDED_OFFSET = BID_MESSAGE_LENGTH;
+    static final int EGRESS_MESSAGE_LENGTH = BID_SUCCEEDED_OFFSET + BitUtil.SIZE_OF_BYTE;
 
-    public static final int SNAPSHOT_CUSTOMER_ID_OFFSET = 0;
-    public static final int SNAPSHOT_PRICE_OFFSET = SNAPSHOT_CUSTOMER_ID_OFFSET + BitUtil.SIZE_OF_LONG;
-    public static final int SNAPSHOT_MESSAGE_LENGTH = SNAPSHOT_PRICE_OFFSET + BitUtil.SIZE_OF_LONG;
+    static final int SNAPSHOT_CUSTOMER_ID_OFFSET = 0;
+    static final int SNAPSHOT_PRICE_OFFSET = SNAPSHOT_CUSTOMER_ID_OFFSET + BitUtil.SIZE_OF_LONG;
+    static final int SNAPSHOT_MESSAGE_LENGTH = SNAPSHOT_PRICE_OFFSET + BitUtil.SIZE_OF_LONG;
 
     private final MutableDirectBuffer egressMessageBuffer = new ExpandableArrayBuffer();
     private final MutableDirectBuffer snapshotBuffer = new ExpandableArrayBuffer();
@@ -125,34 +126,33 @@ public class BasicAuctionClusteredService implements ClusteredService
     // tag::loadSnapshot[]
     private void loadSnapshot(final Cluster cluster, final Image snapshotImage)
     {
-        final MutableBoolean allDataLoaded = new MutableBoolean(false);
-
-        while (!snapshotImage.isEndOfStream())                                                       // <1>
+        final MutableBoolean isAllDataLoaded = new MutableBoolean(false);
+        final FragmentHandler fragmentHandler = (buffer, offset, length, header) ->         // <1>
         {
-            final int fragmentsPolled = snapshotImage.poll(
-                (buffer, offset, length, header) -> // <2>
-                {
-                    assert length >= SNAPSHOT_MESSAGE_LENGTH;                                        // <3>
+            assert length >= SNAPSHOT_MESSAGE_LENGTH;                                       // <2>
 
-                    final long customerId = buffer.getLong(offset + SNAPSHOT_CUSTOMER_ID_OFFSET);
-                    final long price = buffer.getLong(offset + SNAPSHOT_PRICE_OFFSET);
+            final long customerId = buffer.getLong(offset + SNAPSHOT_CUSTOMER_ID_OFFSET);
+            final long price = buffer.getLong(offset + SNAPSHOT_PRICE_OFFSET);
 
-                    auction.loadInitialState(price, customerId);                                     // <4>
+            auction.loadInitialState(price, customerId);                                    // <3>
 
-                    allDataLoaded.set(true);
-                },
-                1);
+            isAllDataLoaded.set(true);
+        };
 
-            if (allDataLoaded.value)                                                                 // <5>
+        while (!snapshotImage.isEndOfStream())                                              // <4>
+        {
+            final int fragmentsPolled = snapshotImage.poll(fragmentHandler, 1);
+
+            if (isAllDataLoaded.value)                                                      // <5>
             {
                 break;
             }
 
-            idleStrategy.idle(fragmentsPolled);                                                      // <6>
+            idleStrategy.idle(fragmentsPolled);                                             // <6>
         }
 
-        assert snapshotImage.isEndOfStream();                                                        // <7>
-        assert allDataLoaded.value;
+        assert snapshotImage.isEndOfStream();                                               // <7>
+        assert isAllDataLoaded.value;
     }
     // end::loadSnapshot[]
 

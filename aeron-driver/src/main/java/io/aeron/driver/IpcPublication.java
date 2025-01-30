@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -58,6 +58,7 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
     private final int startingTermOffset;
     private final int positionBitsToShift;
     private final int termBufferLength;
+    private final int mtuLength;
     private final int termWindowLength;
     private final int initialTermId;
     private final int tripGain;
@@ -90,7 +91,6 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
         final Position publisherPos,
         final Position publisherLimit,
         final RawLog rawLog,
-        final int termWindowLength,
         final boolean isExclusive,
         final PublicationParams params)
     {
@@ -102,21 +102,22 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
         this.isExclusive = isExclusive;
         this.termBuffers = rawLog.termBuffers();
         this.initialTermId = LogBufferDescriptor.initialTermId(rawLog.metaData());
-        this.startingTermId = params.hasPosition ? params.termId : initialTermId;
-        this.startingTermOffset = params.hasPosition ? params.termOffset : 0;
+        this.startingTermId = params.termId;
+        this.startingTermOffset = params.termOffset;
         this.errorHandler = ctx.errorHandler();
 
-        final int termLength = rawLog.termLength();
+        final int termLength = params.termLength;
         this.termBufferLength = termLength;
+        this.mtuLength = params.mtuLength;
         this.positionBitsToShift = LogBufferDescriptor.positionBitsToShift(termLength);
-        this.termWindowLength = termWindowLength;
+        this.termWindowLength = params.publicationWindowLength;
         this.tripGain = termWindowLength >> 3;
         this.publisherPos = publisherPos;
         this.publisherLimit = publisherLimit;
         this.rawLog = rawLog;
         this.unblockTimeoutNs = ctx.publicationUnblockTimeoutNs();
-        this.untetheredWindowLimitTimeoutNs = ctx.untetheredWindowLimitTimeoutNs();
-        this.untetheredRestingTimeoutNs = ctx.untetheredRestingTimeoutNs();
+        this.untetheredWindowLimitTimeoutNs = params.untetheredWindowLimitTimeoutNs;
+        this.untetheredRestingTimeoutNs = params.untetheredRestingTimeoutNs;
         this.unblockedPublications = ctx.systemCounters().get(UNBLOCKED_PUBLICATIONS);
         this.metaDataBuffer = rawLog.metaData();
 
@@ -204,6 +205,16 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
         return publisherLimit.id();
     }
 
+    int termBufferLength()
+    {
+        return termBufferLength;
+    }
+
+    int mtuLength()
+    {
+        return mtuLength;
+    }
+
     /**
      * {@inheritDoc}
      */
@@ -251,7 +262,7 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
      */
     public void removeSubscriber(final SubscriptionLink subscriptionLink, final ReadablePosition subscriberPosition)
     {
-        updatePublisherLimit();
+        updatePublisherPositionAndLimit();
         subscriberPositions = ArrayUtil.remove(subscriberPositions, subscriberPosition);
         subscriberPosition.close();
 
@@ -343,12 +354,15 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
         }
     }
 
-    int updatePublisherLimit()
+    int updatePublisherPositionAndLimit()
     {
         int workCount = 0;
 
         if (State.ACTIVE == state)
         {
+            final long producerPosition = producerPosition();
+            publisherPos.setOrdered(producerPosition);
+
             if (subscriberPositions.length > 0)
             {
                 long minSubscriberPosition = Long.MAX_VALUE;
@@ -452,13 +466,14 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
             {
                 if ((untethered.timeOfLastUpdateNs + untetheredRestingTimeoutNs) - nowNs <= 0)
                 {
+                    final long joinPosition = joinPosition();
                     subscriberPositions = ArrayUtil.add(subscriberPositions, untethered.position);
                     conductor.notifyAvailableImageLink(
                         registrationId,
                         sessionId,
                         untethered.subscriptionLink,
                         untethered.position.id(),
-                        joinPosition(),
+                        joinPosition,
                         rawLog.fileName(),
                         CommonContext.IPC_CHANNEL);
                     untethered.state(UntetheredSubscription.State.ACTIVE, nowNs, streamId, sessionId);
@@ -520,14 +535,14 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
         final long cleanPosition = this.cleanPosition;
         if (position > cleanPosition)
         {
-            final UnsafeBuffer dirtyTerm = termBuffers[indexByPosition(cleanPosition, positionBitsToShift)];
+            final UnsafeBuffer dirtyTermBuffer = termBuffers[indexByPosition(cleanPosition, positionBitsToShift)];
             final int bytesForCleaning = (int)(position - cleanPosition);
             final int bufferCapacity = termBufferLength;
             final int termOffset = (int)cleanPosition & (bufferCapacity - 1);
             final int length = Math.min(bytesForCleaning, bufferCapacity - termOffset);
 
-            dirtyTerm.setMemory(termOffset + SIZE_OF_LONG, length - SIZE_OF_LONG, (byte)0);
-            dirtyTerm.putLongOrdered(termOffset, 0);
+            dirtyTermBuffer.setMemory(termOffset + SIZE_OF_LONG, length - SIZE_OF_LONG, (byte)0);
+            dirtyTermBuffer.putLongOrdered(termOffset, 0);
             this.cleanPosition = cleanPosition + length;
         }
     }

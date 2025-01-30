@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -57,14 +57,20 @@ inline void rate_reporter_poll_handler(void *clientd, const uint8_t *buffer, siz
 {
     rate_reporter_t *reporter = (rate_reporter_t *)clientd;
 
-    AERON_PUT_ORDERED(reporter->polling_fields.total_bytes, reporter->polling_fields.total_bytes + length);
-    AERON_PUT_ORDERED(reporter->polling_fields.total_messages, reporter->polling_fields.total_messages + 1);
+    AERON_SET_RELEASE(reporter->polling_fields.total_bytes, reporter->polling_fields.total_bytes + length);
+    AERON_SET_RELEASE(reporter->polling_fields.total_messages, reporter->polling_fields.total_messages + 1);
 }
 
 inline void rate_reporter_on_message(rate_reporter_t *reporter, size_t length)
 {
-    AERON_PUT_ORDERED(reporter->polling_fields.total_bytes, reporter->polling_fields.total_bytes + length);
-    AERON_PUT_ORDERED(reporter->polling_fields.total_messages, reporter->polling_fields.total_messages + 1);
+    AERON_SET_RELEASE(reporter->polling_fields.total_bytes, reporter->polling_fields.total_bytes + length);
+    AERON_SET_RELEASE(reporter->polling_fields.total_messages, reporter->polling_fields.total_messages + 1);
 }
+
+#if defined(_MSC_VER)
+#define SNPRINTF(_buf, _len, _fmt, ...) sprintf_s(_buf, _len, _fmt, __VA_ARGS__)
+#else
+#define SNPRINTF(_buf, _len, _fmt, ...) snprintf(_buf, _len, _fmt, __VA_ARGS__)
+#endif
 
 #endif //AERON_SAMPLE_UTIL_H

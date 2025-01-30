@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@
 #include <atomic>
 #include <cassert>
 #include <functional>
+#include <memory>
 
 #include "concurrent/AtomicBuffer.h"
 #include "concurrent/logbuffer/Header.h"
@@ -81,7 +82,7 @@ static void doPoll(void *clientd, const std::uint8_t *buffer, std::size_t length
 {
     H &handler = *reinterpret_cast<H *>(clientd);
     AtomicBuffer atomicBuffer(const_cast<std::uint8_t *>(buffer), length);
-    Header headerWrapper(header, nullptr);
+    Header headerWrapper{header};
     handler(atomicBuffer, static_cast<util::index_t>(0), static_cast<util::index_t>(length), headerWrapper);
 }
 
@@ -91,7 +92,7 @@ static aeron_controlled_fragment_handler_action_t doControlledPoll(
 {
     H &handler = *reinterpret_cast<H *>(clientd);
     AtomicBuffer atomicBuffer(const_cast<std::uint8_t *>(buffer), length);
-    Header headerWrapper(header, nullptr);
+    Header headerWrapper{header};
 
     ControlledPollAction action = handler(atomicBuffer, 0, static_cast<std::int32_t>(length), headerWrapper);
     return static_cast<aeron_controlled_fragment_handler_action_t>(action);
@@ -271,6 +272,17 @@ public:
     inline bool isEndOfStream() const
     {
         return aeron_image_is_end_of_stream(m_image);
+    }
+
+    /**
+     * The position the stream reached when EOS was received from the publisher. The position will be
+     * INT64_MAX until the stream ends and EOS is set.
+     *
+     * @return position the stream reached when EOS was received from the publisher.
+     */
+    inline std::int64_t endOfStreamPosition() const
+    {
+        return aeron_image_end_of_stream_position(m_image);
     }
 
     /**

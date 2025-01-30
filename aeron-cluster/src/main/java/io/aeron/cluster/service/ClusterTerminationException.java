@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,6 +24,9 @@ public class ClusterTerminationException extends AgentTerminationException
 {
     private static final long serialVersionUID = -2705156056823180407L;
 
+    /**
+     * Is expected termination?
+     */
     private final boolean isExpected;
 
     /**

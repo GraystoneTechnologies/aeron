@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -50,6 +50,9 @@ public final class EventLogAgent
      * Event reader {@link Agent} which consumes the {@link EventConfiguration#EVENT_RING_BUFFER} to output log events.
      */
     public static final String READER_CLASSNAME_PROP_NAME = READER_CLASSNAME;
+    /**
+     * Default value for the log reader agent.
+     */
     public static final String READER_CLASSNAME_DEFAULT = "io.aeron.agent.EventLogReaderAgent";
 
     private static final long SLEEP_PERIOD_MS = 1L;
@@ -68,7 +71,7 @@ public final class EventLogAgent
      */
     public static void premain(final String agentArgs, final Instrumentation instrumentation)
     {
-        startLogging(AgentBuilder.RedefinitionStrategy.DISABLED, instrumentation, ConfigOption.fromSystemProperties());
+        startLogging(instrumentation, ConfigOption.fromSystemProperties());
     }
 
     /**
@@ -79,23 +82,15 @@ public final class EventLogAgent
      */
     public static void agentmain(final String agentArgs, final Instrumentation instrumentation)
     {
-        if (Strings.isEmpty(agentArgs))
-        {
-            startLogging(
-                AgentBuilder.RedefinitionStrategy.RETRANSFORMATION,
-                instrumentation,
-                ConfigOption.fromSystemProperties());
-        }
-        else if (STOP_COMMAND.equals(agentArgs))
+        if (STOP_COMMAND.equals(agentArgs))
         {
             stopLogging();
         }
         else
         {
-            startLogging(
-                AgentBuilder.RedefinitionStrategy.RETRANSFORMATION,
-                instrumentation,
-                ConfigOption.parseAgentArgs(agentArgs));
+            final Map<String, String> configOptions = Strings.isEmpty(agentArgs) ? fromSystemProperties() :
+                parseAgentArgs(agentArgs);
+            startLogging(instrumentation, configOptions);
         }
     }
 
@@ -133,9 +128,7 @@ public final class EventLogAgent
     }
 
     private static synchronized void startLogging(
-        final AgentBuilder.RedefinitionStrategy redefinitionStrategy,
-        final Instrumentation instrumentation,
-        final Map<String, String> configOptions)
+        final Instrumentation instrumentation, final Map<String, String> configOptions)
     {
         if (null != logTransformer)
         {
@@ -152,7 +145,9 @@ public final class EventLogAgent
             .with(TypeValidation.DISABLED))
             .disableClassFormatChanges()
             .with(new AgentBuilderListener())
-            .with(redefinitionStrategy);
+            .with(AgentBuilder.RedefinitionStrategy.RETRANSFORMATION)
+            .with(AgentBuilder.RedefinitionStrategy.DiscoveryStrategy.Reiterating.INSTANCE);
+
         final AgentBuilder initialAgentBuilder = agentBuilder;
 
         for (final ComponentLogger componentLogger : loggers)

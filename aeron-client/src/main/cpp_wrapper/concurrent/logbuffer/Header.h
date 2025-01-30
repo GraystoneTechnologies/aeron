@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,9 +35,7 @@ using namespace aeron::util;
 class Header
 {
 public:
-    Header(aeron_header_t *header, void *context) :
-        m_header(header),
-        m_context(context)
+    explicit Header(aeron_header_t *header) : m_header(header)
     {
         if (aeron_header_values(m_header, &m_headerValues) < 0)
         {
@@ -166,13 +164,17 @@ public:
      */
     inline void *context() const
     {
-        return m_context;
+        return aeron_header_context(m_header);
+    }
+
+    aeron_header_t *hdr()
+    {
+        return m_header;
     }
 
 private:
     aeron_header_t *m_header = nullptr;
     aeron_header_values_t m_headerValues = {};
-    void *m_context = nullptr;
 };
 
 }}}

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,9 +23,9 @@ import org.agrona.concurrent.status.ReadablePosition;
 public interface Subscribable
 {
     /**
-     * Registration Id that is in use by the subscribable.
+     * Registration ID that is in use by the subscribable.
      *
-     * @return registration Id for subscribable.
+     * @return registration ID for subscribable.
      */
     long subscribableRegistrationId();
 

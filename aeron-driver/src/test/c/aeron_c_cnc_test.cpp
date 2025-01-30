@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -261,7 +261,7 @@ TEST_F(CncTest, shouldGetLossReport)
         {
         }
 
-        AERON_GET_VOLATILE(retransmits, *retransmitsSentCounter);
+        AERON_GET_ACQUIRE(retransmits, *retransmitsSentCounter);
     }
 
     ASSERT_TRUE(0 < aeron_cnc_loss_reporter_read(m_cnc, countingLossReader, &lossCallbackCounter)) << aeron_errmsg();

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 package io.aeron.driver;
 
+import io.aeron.Aeron;
 import io.aeron.CommonContext;
 import io.aeron.DriverProxy;
 import io.aeron.ErrorCode;
@@ -23,41 +24,53 @@ import io.aeron.driver.buffer.TestLogFactory;
 import io.aeron.driver.exceptions.InvalidChannelException;
 import io.aeron.driver.media.ReceiveChannelEndpoint;
 import io.aeron.driver.media.ReceiveChannelEndpointThreadLocals;
+import io.aeron.driver.media.UdpChannel;
+import io.aeron.driver.media.WildcardPortManager;
 import io.aeron.driver.status.DutyCycleStallTracker;
 import io.aeron.driver.status.SystemCounterDescriptor;
 import io.aeron.driver.status.SystemCounters;
+import io.aeron.exceptions.AeronEvent;
 import io.aeron.logbuffer.HeaderWriter;
 import io.aeron.logbuffer.LogBufferDescriptor;
+import io.aeron.protocol.SetupFlyweight;
 import io.aeron.protocol.StatusMessageFlyweight;
 import io.aeron.test.Tests;
 import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
 import org.agrona.ErrorHandler;
+import org.agrona.IoUtil;
 import org.agrona.concurrent.CachedEpochClock;
 import org.agrona.concurrent.CachedNanoClock;
-import org.agrona.concurrent.ManyToOneConcurrentArrayQueue;
+import org.agrona.concurrent.ManyToOneConcurrentLinkedQueue;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.ringbuffer.ManyToOneRingBuffer;
 import org.agrona.concurrent.ringbuffer.RingBuffer;
 import org.agrona.concurrent.status.AtomicCounter;
 import org.agrona.concurrent.status.CountersManager;
 import org.agrona.concurrent.status.CountersReader;
+import org.hamcrest.CoreMatchers;
 import org.hamcrest.Matchers;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.stubbing.Answer;
 
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
+import java.nio.MappedByteBuffer;
+import java.nio.file.Path;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongConsumer;
 
+import static io.aeron.CommonContext.*;
 import static io.aeron.ErrorCode.*;
 import static io.aeron.driver.Configuration.*;
+import static io.aeron.driver.DriverConductor.EXECUTOR_SHUTDOWN_TIMEOUT_SECONDS;
 import static io.aeron.driver.status.ClientHeartbeatTimestamp.HEARTBEAT_TYPE_ID;
 import static io.aeron.driver.status.SystemCounterDescriptor.*;
 import static io.aeron.logbuffer.FrameDescriptor.FRAME_ALIGNMENT;
@@ -107,7 +120,7 @@ class DriverConductorTest
     private final ByteBuffer conductorBuffer = ByteBuffer.allocateDirect(CONDUCTOR_BUFFER_LENGTH_DEFAULT);
     private final UnsafeBuffer counterKeyAndLabel = new UnsafeBuffer(new byte[BUFFER_LENGTH]);
 
-    private final RingBuffer toDriverCommands = new ManyToOneRingBuffer(new UnsafeBuffer(conductorBuffer));
+    private final RingBuffer toDriverCommands = spy(new ManyToOneRingBuffer(new UnsafeBuffer(conductorBuffer)));
     private final ClientProxy mockClientProxy = mock(ClientProxy.class);
 
     private final ErrorHandler mockErrorHandler = mock(ErrorHandler.class);
@@ -115,7 +128,7 @@ class DriverConductorTest
 
     private final SenderProxy senderProxy = mock(SenderProxy.class);
     private final ReceiverProxy receiverProxy = mock(ReceiverProxy.class);
-    private final DriverConductorProxy driverConductorProxy = mock(DriverConductorProxy.class);
+    private final DriverConductorProxy mockDriverConductorProxy = mock(DriverConductorProxy.class);
     private ReceiveChannelEndpoint receiveChannelEndpoint = null;
 
     private final CachedNanoClock nanoClock = new CachedNanoClock();
@@ -124,6 +137,7 @@ class DriverConductorTest
     private SystemCounters spySystemCounters;
 
     private CountersManager spyCountersManager;
+    private MediaDriver.Context ctx;
     private DriverProxy driverProxy;
     private DriverConductor driverConductor;
 
@@ -138,12 +152,12 @@ class DriverConductorTest
         };
 
     @BeforeEach
-    void before()
+    void before(@TempDir final Path dir)
     {
         counterKeyAndLabel.putInt(COUNTER_KEY_OFFSET, 42);
         counterKeyAndLabel.putStringAscii(COUNTER_LABEL_OFFSET, COUNTER_LABEL);
 
-        spyCountersManager = spy(Tests.newCountersMananger(BUFFER_LENGTH));
+        spyCountersManager = spy(Tests.newCountersManager(BUFFER_LENGTH));
         spySystemCounters = spy(new SystemCounters(spyCountersManager));
 
         when(spySystemCounters.get(SystemCounterDescriptor.ERRORS)).thenReturn(mockErrorCounter);
@@ -159,14 +173,14 @@ class DriverConductorTest
             spySystemCounters.get(NAME_RESOLVER_TIME_THRESHOLD_EXCEEDED),
             1_000_000_000);
 
-        final MediaDriver.Context ctx = new MediaDriver.Context()
+        ctx = new MediaDriver.Context()
             .tempBuffer(new UnsafeBuffer(new byte[METADATA_LENGTH]))
             .timerIntervalNs(DEFAULT_TIMER_INTERVAL_NS)
             .publicationTermBufferLength(TERM_BUFFER_LENGTH)
             .ipcTermBufferLength(TERM_BUFFER_LENGTH)
             .unicastFlowControlSupplier(Configuration.unicastFlowControlSupplier())
             .multicastFlowControlSupplier(Configuration.multicastFlowControlSupplier())
-            .driverCommandQueue(new ManyToOneConcurrentArrayQueue<>(Configuration.CMD_QUEUE_CAPACITY))
+            .driverCommandQueue(new ManyToOneConcurrentLinkedQueue<>())
             .errorHandler(mockErrorHandler)
             .logFactory(new TestLogFactory())
             .countersManager(spyCountersManager)
@@ -184,13 +198,18 @@ class DriverConductorTest
             .systemCounters(spySystemCounters)
             .receiverProxy(receiverProxy)
             .senderProxy(senderProxy)
-            .driverConductorProxy(driverConductorProxy)
+            .driverConductorProxy(mockDriverConductorProxy)
             .receiveChannelEndpointThreadLocals(new ReceiveChannelEndpointThreadLocals())
             .conductorCycleThresholdNs(600_000_000)
             .nameResolver(DefaultNameResolver.INSTANCE)
             .threadingMode(ThreadingMode.DEDICATED)
             .conductorDutyCycleTracker(conductorDutyCycleTracker)
-            .nameResolverTimeTracker(nameResolverTimeTracker);
+            .nameResolverTimeTracker(nameResolverTimeTracker)
+            .senderPortManager(new WildcardPortManager(WildcardPortManager.EMPTY_PORT_RANGE, true))
+            .receiverPortManager(new WildcardPortManager(WildcardPortManager.EMPTY_PORT_RANGE, false))
+            .asyncTaskExecutor(CALLER_RUNS_TASK_EXECUTOR)
+            .asyncTaskExecutorThreads(0)
+            .cncByteBuffer(IoUtil.mapNewFile(dir.resolve("test.cnc").toFile(), 1024));
 
         driverProxy = new DriverProxy(toDriverCommands, toDriverCommands.nextCorrelationId());
         driverConductor = new DriverConductor(ctx);
@@ -331,6 +350,7 @@ class DriverConductorTest
         driverProxy.removeSubscription(id);
 
         driverConductor.doWork();
+        driverConductor.doWork();
 
         verify(receiverProxy).registerReceiveChannelEndpoint(any());
         verify(receiverProxy).closeReceiveChannelEndpoint(any());
@@ -412,6 +432,7 @@ class DriverConductorTest
         driverProxy.removeSubscription(id2);
 
         driverConductor.doWork();
+        driverConductor.doWork();
 
         assertEquals(1, receiveChannelEndpoint.distinctSubscriptionCount());
     }
@@ -442,6 +463,7 @@ class DriverConductorTest
         driverProxy.removeSubscription(id3);
 
         driverConductor.doWork();
+        driverConductor.doWork();
 
         assertEquals(1, receiveChannelEndpoint.distinctSubscriptionCount());
 
@@ -458,6 +480,7 @@ class DriverConductorTest
         final long id = driverProxy.addPublication(CHANNEL_4000, STREAM_ID_1);
         driverProxy.removePublication(id + 1);
 
+        driverConductor.doWork();
         driverConductor.doWork();
 
         final InOrder inOrder = inOrder(senderProxy, mockClientProxy);
@@ -493,6 +516,7 @@ class DriverConductorTest
         final long id1 = driverProxy.addSubscription(CHANNEL_4000, STREAM_ID_1);
         driverProxy.removeSubscription(id1 + 100);
 
+        driverConductor.doWork();
         driverConductor.doWork();
 
         final InOrder inOrder = inOrder(receiverProxy, mockClientProxy);
@@ -591,7 +615,7 @@ class DriverConductorTest
         when(msg.consumptionTermOffset()).thenReturn(0);
         when(msg.receiverWindowLength()).thenReturn(10);
 
-        publication.onStatusMessage(msg, new InetSocketAddress("localhost", 4059));
+        publication.onStatusMessage(msg, new InetSocketAddress("localhost", 4059), mockDriverConductorProxy);
         appendUnfragmentedMessage(
             rawLog, index, 0, termId, headerWriter, srcBuffer, 0, 256);
 
@@ -601,7 +625,7 @@ class DriverConductorTest
             () -> nanoClock.nanoTime() >= CLIENT_LIVENESS_TIMEOUT_NS * 1.25,
             (timeNs) ->
             {
-                publication.onStatusMessage(msg, new InetSocketAddress("localhost", 4059));
+                publication.onStatusMessage(msg, new InetSocketAddress("localhost", 4059), mockDriverConductorProxy);
                 publication.updateHasReceivers(timeNs);
             });
 
@@ -676,7 +700,7 @@ class DriverConductorTest
         final InetSocketAddress sourceAddress = new InetSocketAddress("localhost", 4400);
         final int initialTermId = 1;
         final int activeTermId = 2;
-        final int termOffset = 100;
+        final int termOffset = 160;
 
         driverProxy.addSubscription(CHANNEL_4000, STREAM_ID_1);
 
@@ -686,11 +710,11 @@ class DriverConductorTest
         verify(receiverProxy).registerReceiveChannelEndpoint(captor1.capture());
         receiveChannelEndpoint = captor1.getValue();
 
-        receiveChannelEndpoint.openChannel(driverConductorProxy);
+        receiveChannelEndpoint.openChannel(mockDriverConductorProxy);
 
         driverConductor.onCreatePublicationImage(
             SESSION_ID, STREAM_ID_1, initialTermId, activeTermId, termOffset, TERM_BUFFER_LENGTH, MTU_LENGTH, 0,
-            mock(InetSocketAddress.class), sourceAddress, receiveChannelEndpoint);
+            (short)0, mock(InetSocketAddress.class), sourceAddress, receiveChannelEndpoint);
 
         final ArgumentCaptor<PublicationImage> captor2 = ArgumentCaptor.forClass(PublicationImage.class);
         verify(receiverProxy).newPublicationImage(eq(receiveChannelEndpoint), captor2.capture());
@@ -716,11 +740,11 @@ class DriverConductorTest
         verify(receiverProxy).registerReceiveChannelEndpoint(captor.capture());
         receiveChannelEndpoint = captor.getValue();
 
-        receiveChannelEndpoint.openChannel(driverConductorProxy);
+        receiveChannelEndpoint.openChannel(mockDriverConductorProxy);
 
         driverConductor.onCreatePublicationImage(
             SESSION_ID, STREAM_ID_2, 1, 1, 0, TERM_BUFFER_LENGTH, MTU_LENGTH, 0,
-            mock(InetSocketAddress.class), sourceAddress, receiveChannelEndpoint);
+            (short)0, mock(InetSocketAddress.class), sourceAddress, receiveChannelEndpoint);
 
         verify(receiverProxy, never()).newPublicationImage(any(), any());
         verify(mockClientProxy, never()).onAvailableImage(
@@ -740,11 +764,11 @@ class DriverConductorTest
         verify(receiverProxy).registerReceiveChannelEndpoint(captor1.capture());
         receiveChannelEndpoint = captor1.getValue();
 
-        receiveChannelEndpoint.openChannel(driverConductorProxy);
+        receiveChannelEndpoint.openChannel(mockDriverConductorProxy);
 
         driverConductor.onCreatePublicationImage(
             SESSION_ID, STREAM_ID_1, 1, 1, 0, TERM_BUFFER_LENGTH, MTU_LENGTH, 0,
-            mock(InetSocketAddress.class), sourceAddress, receiveChannelEndpoint);
+            (short)0, mock(InetSocketAddress.class), sourceAddress, receiveChannelEndpoint);
 
         final ArgumentCaptor<PublicationImage> captor2 = ArgumentCaptor.forClass(PublicationImage.class);
         verify(receiverProxy).newPublicationImage(eq(receiveChannelEndpoint), captor2.capture());
@@ -773,11 +797,11 @@ class DriverConductorTest
         verify(receiverProxy).registerReceiveChannelEndpoint(captor1.capture());
         receiveChannelEndpoint = captor1.getValue();
 
-        receiveChannelEndpoint.openChannel(driverConductorProxy);
+        receiveChannelEndpoint.openChannel(mockDriverConductorProxy);
 
         driverConductor.onCreatePublicationImage(
             SESSION_ID, STREAM_ID_1, 1, 1, 0, TERM_BUFFER_LENGTH, MTU_LENGTH, 0,
-            mock(InetSocketAddress.class), sourceAddress, receiveChannelEndpoint);
+            (short)0, mock(InetSocketAddress.class), sourceAddress, receiveChannelEndpoint);
 
         final ArgumentCaptor<PublicationImage> captor2 = ArgumentCaptor.forClass(PublicationImage.class);
         verify(receiverProxy).newPublicationImage(eq(receiveChannelEndpoint), captor2.capture());
@@ -822,11 +846,11 @@ class DriverConductorTest
         verify(receiverProxy).registerReceiveChannelEndpoint(captor1.capture());
         receiveChannelEndpoint = captor1.getValue();
 
-        receiveChannelEndpoint.openChannel(driverConductorProxy);
+        receiveChannelEndpoint.openChannel(mockDriverConductorProxy);
 
         driverConductor.onCreatePublicationImage(
             SESSION_ID, STREAM_ID_1, 1, 1, 0, TERM_BUFFER_LENGTH, MTU_LENGTH, 0,
-            mock(InetSocketAddress.class), sourceAddress, receiveChannelEndpoint);
+            (short)0, mock(InetSocketAddress.class), sourceAddress, receiveChannelEndpoint);
 
         final ArgumentCaptor<PublicationImage> captor2 = ArgumentCaptor.forClass(PublicationImage.class);
         verify(receiverProxy).newPublicationImage(eq(receiveChannelEndpoint), captor2.capture());
@@ -882,6 +906,7 @@ class DriverConductorTest
         final long idSub = driverProxy.addSubscription(CHANNEL_IPC, STREAM_ID_1);
 
         driverConductor.doWork();
+        driverConductor.doWork();
 
         final IpcPublication ipcPublication = driverConductor.getSharedIpcPublication(STREAM_ID_1);
         assertNotNull(ipcPublication);
@@ -900,6 +925,7 @@ class DriverConductorTest
     {
         final long idSub = driverProxy.addSubscription(CHANNEL_IPC, STREAM_ID_1);
         final long idPubOne = driverProxy.addPublication(CHANNEL_IPC, STREAM_ID_1);
+        driverConductor.doWork();
         driverConductor.doWork();
 
         final IpcPublication ipcPublicationOne = driverConductor.getSharedIpcPublication(STREAM_ID_1);
@@ -935,6 +961,7 @@ class DriverConductorTest
         final long idSub = driverProxy.addSubscription(CHANNEL_IPC, STREAM_ID_1);
         final long idPub = driverProxy.addPublication(CHANNEL_IPC, STREAM_ID_1);
 
+        driverConductor.doWork();
         driverConductor.doWork();
 
         final IpcPublication ipcPublication = driverConductor.getSharedIpcPublication(STREAM_ID_1);
@@ -1000,6 +1027,8 @@ class DriverConductorTest
         final long idAdd2 = driverProxy.addPublication(CHANNEL_IPC, STREAM_ID_1);
         driverProxy.removeSubscription(idAdd1);
 
+        driverConductor.doWork();
+        driverConductor.doWork();
         driverConductor.doWork();
 
         IpcPublication ipcPublication = driverConductor.getSharedIpcPublication(STREAM_ID_1);
@@ -1069,6 +1098,7 @@ class DriverConductorTest
         final long idSpy = driverProxy.addSubscription(spyForChannel(CHANNEL_4000), STREAM_ID_1);
 
         driverConductor.doWork();
+        driverConductor.doWork();
 
         final ArgumentCaptor<NetworkPublication> captor = ArgumentCaptor.forClass(NetworkPublication.class);
         verify(senderProxy, times(1)).newNetworkPublication(captor.capture());
@@ -1089,6 +1119,7 @@ class DriverConductorTest
         final long idSpy = driverProxy.addSubscription(spyForChannel(CHANNEL_4000), STREAM_ID_1);
         driverProxy.addPublication(CHANNEL_4000, STREAM_ID_1);
 
+        driverConductor.doWork();
         driverConductor.doWork();
 
         final ArgumentCaptor<NetworkPublication> captor = ArgumentCaptor.forClass(NetworkPublication.class);
@@ -1133,6 +1164,7 @@ class DriverConductorTest
         driverProxy.addSubscription(spyForChannel(CHANNEL_4000), STREAM_ID_1);
 
         driverConductor.doWork();
+        driverConductor.doWork();
 
         final ArgumentCaptor<NetworkPublication> captor = ArgumentCaptor.forClass(NetworkPublication.class);
         verify(senderProxy, times(1)).newNetworkPublication(captor.capture());
@@ -1151,6 +1183,7 @@ class DriverConductorTest
         driverProxy.addPublication(CHANNEL_4000, STREAM_ID_1);
         driverProxy.addSubscription(spyForChannel(CHANNEL_4000), STREAM_ID_1);
 
+        driverConductor.doWork();
         driverConductor.doWork();
 
         final ArgumentCaptor<NetworkPublication> captor = ArgumentCaptor.forClass(NetworkPublication.class);
@@ -1549,6 +1582,7 @@ class DriverConductorTest
         driverProxy.addSubscription(channelIpcAndSessionId, STREAM_ID_1);
 
         driverConductor.doWork();
+        driverConductor.doWork();
 
         final IpcPublication ipcPublication = driverConductor.getSharedIpcPublication(STREAM_ID_1);
         assertNotNull(ipcPublication);
@@ -1568,6 +1602,7 @@ class DriverConductorTest
         driverProxy.addSubscription(channelIpcAndSessionId, STREAM_ID_1);
         driverProxy.addPublication(channelIpcAndSessionId, STREAM_ID_1);
 
+        driverConductor.doWork();
         driverConductor.doWork();
 
         final IpcPublication ipcPublication = driverConductor.getSharedIpcPublication(STREAM_ID_1);
@@ -1610,6 +1645,7 @@ class DriverConductorTest
         driverProxy.addPublication(CHANNEL_IPC + sessionIdPubParam, STREAM_ID_1);
 
         driverConductor.doWork();
+        driverConductor.doWork();
 
         final IpcPublication ipcPublication = driverConductor.getSharedIpcPublication(STREAM_ID_1);
         assertNotNull(ipcPublication);
@@ -1626,6 +1662,7 @@ class DriverConductorTest
         driverProxy.addPublication(CHANNEL_4000 + sessionIdParam, STREAM_ID_1);
         driverProxy.addSubscription(spyForChannel(CHANNEL_4000 + sessionIdParam), STREAM_ID_1);
 
+        driverConductor.doWork();
         driverConductor.doWork();
 
         final ArgumentCaptor<NetworkPublication> captor = ArgumentCaptor.forClass(NetworkPublication.class);
@@ -1667,8 +1704,8 @@ class DriverConductorTest
         final int sessionId = -4097;
         final String sessionIdParam = "|" + CommonContext.SESSION_ID_PARAM_NAME + "=" + sessionId;
         driverProxy.addSubscription(spyForChannel(CHANNEL_4000 + sessionIdParam), STREAM_ID_1);
+        driverConductor.doWork();
         driverProxy.addPublication(CHANNEL_4000 + sessionIdParam, STREAM_ID_1);
-
         driverConductor.doWork();
 
         final ArgumentCaptor<NetworkPublication> captor = ArgumentCaptor.forClass(NetworkPublication.class);
@@ -1692,6 +1729,7 @@ class DriverConductorTest
         driverProxy.addSubscription(spyForChannel(CHANNEL_4000 + sessionIdSubParam), STREAM_ID_1);
         driverProxy.addPublication(CHANNEL_4000 + sessionIdPubParam, STREAM_ID_1);
 
+        driverConductor.doWork();
         driverConductor.doWork();
 
         final ArgumentCaptor<NetworkPublication> captor = ArgumentCaptor.forClass(NetworkPublication.class);
@@ -1732,6 +1770,7 @@ class DriverConductorTest
         final long id2 = driverProxy.addPublication(CHANNEL_TAG_ID_1, STREAM_ID_2);
 
         driverConductor.doWork();
+        driverConductor.doWork();
         verify(mockErrorHandler, never()).onError(any());
 
         verify(senderProxy).registerSendChannelEndpoint(any());
@@ -1753,6 +1792,7 @@ class DriverConductorTest
         final long id2 = driverProxy.addSubscription(CHANNEL_TAG_ID_1, STREAM_ID_1);
 
         driverConductor.doWork();
+        driverConductor.doWork();
         verify(mockErrorHandler, never()).onError(any());
 
         verify(receiverProxy).registerReceiveChannelEndpoint(any());
@@ -1760,6 +1800,7 @@ class DriverConductorTest
         driverProxy.removeSubscription(id1);
         driverProxy.removeSubscription(id2);
 
+        driverConductor.doWork();
         driverConductor.doWork();
 
         verify(receiverProxy).closeReceiveChannelEndpoint(any());
@@ -1772,12 +1813,14 @@ class DriverConductorTest
         final long id2 = driverProxy.addSubscription(CHANNEL_SUB_CONTROL_MODE_MANUAL, STREAM_ID_1);
 
         driverConductor.doWork();
+        driverConductor.doWork();
 
         verify(receiverProxy, times(2)).registerReceiveChannelEndpoint(any());
 
         driverProxy.removeSubscription(id1);
         driverProxy.removeSubscription(id2);
 
+        driverConductor.doWork();
         driverConductor.doWork();
 
         verify(receiverProxy, times(2)).closeReceiveChannelEndpoint(any());
@@ -1791,6 +1834,7 @@ class DriverConductorTest
         driverProxy.addPublication(CHANNEL_4000_TAG_ID_1, STREAM_ID_1);
         final long idSpy = driverProxy.addSubscription(spyForChannel(CHANNEL_TAG_ID_1), STREAM_ID_1);
 
+        driverConductor.doWork();
         driverConductor.doWork();
 
         final ArgumentCaptor<NetworkPublication> captor = ArgumentCaptor.forClass(NetworkPublication.class);
@@ -1812,6 +1856,7 @@ class DriverConductorTest
         final long idSpy = driverProxy.addSubscription(spyForChannel(CHANNEL_TAG_ID_1), STREAM_ID_1);
         driverProxy.addPublication(CHANNEL_4000_TAG_ID_1, STREAM_ID_1);
 
+        driverConductor.doWork();
         driverConductor.doWork();
 
         final ArgumentCaptor<NetworkPublication> captor = ArgumentCaptor.forClass(NetworkPublication.class);
@@ -1849,6 +1894,137 @@ class DriverConductorTest
         assertEquals(3, thresholdExceeded.get());
     }
 
+    @Test
+    void shouldThrowExceptionWhenSendDestinationHasControlModeResponseSet()
+    {
+        final Exception exception = assertThrowsExactly(InvalidChannelException.class,
+            () -> driverConductor.onAddSendDestination(13, "aeron:udp?control-mode=response", 19)
+        );
+
+        assertThat(exception.getMessage(), containsString(MDC_CONTROL_MODE_PARAM_NAME));
+        assertThat(exception.getMessage(), containsString(CONTROL_MODE_RESPONSE));
+    }
+
+    @Test
+    void shouldThrowExceptionWhenSendDestinationHasResponseCorrelationIdSet()
+    {
+        final Exception exception = assertThrowsExactly(InvalidChannelException.class,
+            () -> driverConductor.onAddSendDestination(4, "aeron:udp?response-correlation-id=1234", 8)
+        );
+
+        assertThat(exception.getMessage(), containsString(RESPONSE_CORRELATION_ID_PARAM_NAME));
+    }
+
+    @Test
+    void shouldThrowExceptionWhenRcvDestinationHasControlModeResponseSet()
+    {
+        final Exception exception = assertThrowsExactly(InvalidChannelException.class,
+            () -> driverConductor.onAddRcvDestination(5, "aeron:udp?control-mode=response", 7)
+        );
+
+        assertEquals(
+            "ERROR - destinations may not specify " + MDC_CONTROL_MODE_PARAM_NAME + "=" + CONTROL_MODE_RESPONSE,
+            exception.getMessage());
+    }
+
+    @Test
+    void shouldThrowExceptionWhenRcvDestinationHasResponseCorrelationIdSet()
+    {
+        final Exception exception = assertThrowsExactly(InvalidChannelException.class,
+            () -> driverConductor.onAddRcvDestination(
+            42, "aeron:udp?endpoint=localhost:8080|response-correlation-id=1234", 1)
+        );
+
+        assertThat(
+            exception.getMessage(),
+            CoreMatchers.startsWith("ERROR - destinations must not contain the key: response-correlation-id"));
+    }
+
+    @Test
+    void onCloseMustShutdownAsyncExecutor(@TempDir final Path dir) throws InterruptedException
+    {
+        final ExecutorService asyncTaskExecutor = mock(ExecutorService.class);
+        final DriverConductor conductor = new DriverConductor(ctx.clone()
+            .cncByteBuffer(IoUtil.mapNewFile(dir.resolve("some.txt").toFile(), 64))
+            .asyncTaskExecutor(asyncTaskExecutor));
+
+        conductor.onClose();
+
+        final InOrder inOrder = inOrder(asyncTaskExecutor);
+        inOrder.verify(asyncTaskExecutor).shutdownNow();
+        inOrder.verify(asyncTaskExecutor).awaitTermination(EXECUTOR_SHUTDOWN_TIMEOUT_SECONDS, SECONDS);
+        inOrder.verifyNoMoreInteractions();
+    }
+
+    @Test
+    void onCloseHandlesExceptionFromClosingAsyncExecutor(@TempDir final Path dir)
+    {
+        final ExecutorService asyncTaskExecutor = mock(ExecutorService.class);
+        final IllegalStateException closeException = new IllegalStateException("executor failed");
+        doThrow(closeException).when(asyncTaskExecutor).shutdownNow();
+        final DriverConductor conductor = new DriverConductor(ctx.clone()
+            .cncByteBuffer(IoUtil.mapNewFile(dir.resolve("some.txt").toFile(), 64))
+            .asyncTaskExecutor(asyncTaskExecutor));
+
+        conductor.onClose();
+
+        final InOrder inOrder = inOrder(asyncTaskExecutor, mockErrorHandler);
+        inOrder.verify(asyncTaskExecutor).shutdownNow();
+        inOrder.verify(mockErrorHandler).onError(closeException);
+        inOrder.verifyNoMoreInteractions();
+    }
+
+    @Test
+    void onCloseHandlesExceptionFromClosingAsyncExecutor2(@TempDir final Path dir) throws InterruptedException
+    {
+        final ExecutorService asyncTaskExecutor = mock(ExecutorService.class);
+        final IllegalStateException closeException = new IllegalStateException("executor failed");
+        doThrow(closeException).when(asyncTaskExecutor).awaitTermination(anyLong(), any(TimeUnit.class));
+        final DriverConductor conductor = new DriverConductor(ctx.clone()
+            .cncByteBuffer(IoUtil.mapNewFile(dir.resolve("some.txt").toFile(), 64))
+            .asyncTaskExecutor(asyncTaskExecutor));
+
+        conductor.onClose();
+
+        final InOrder inOrder = inOrder(asyncTaskExecutor, mockErrorHandler);
+        inOrder.verify(asyncTaskExecutor).shutdownNow();
+        inOrder.verify(asyncTaskExecutor).awaitTermination(EXECUTOR_SHUTDOWN_TIMEOUT_SECONDS, SECONDS);
+        inOrder.verify(mockErrorHandler).onError(closeException);
+        inOrder.verifyNoMoreInteractions();
+    }
+
+    @Test
+    void onCloseShouldNotifyIfExecutorDoesNotCloseOnTime(@TempDir final Path dir) throws InterruptedException
+    {
+        final ExecutorService asyncTaskExecutor = mock(ExecutorService.class);
+        final DriverConductor conductor = new DriverConductor(ctx.clone()
+            .cncByteBuffer(IoUtil.mapNewFile(dir.resolve("some.txt").toFile(), 64))
+            .asyncTaskExecutor(asyncTaskExecutor));
+
+        conductor.onClose();
+
+        final InOrder inOrder = inOrder(asyncTaskExecutor, mockErrorHandler);
+        inOrder.verify(asyncTaskExecutor).shutdownNow();
+        inOrder.verify(asyncTaskExecutor).awaitTermination(EXECUTOR_SHUTDOWN_TIMEOUT_SECONDS, SECONDS);
+        inOrder.verify(mockErrorHandler).onError(argThat(
+            arg -> arg instanceof AeronEvent &&
+            arg.getMessage().equals("WARN - failed to shutdown async task executor")));
+        inOrder.verifyNoMoreInteractions();
+    }
+
+    @Test
+    void onCloseShouldCallForceOnTheCncByteBuffer(@TempDir final Path dir)
+    {
+        final MappedByteBuffer cncByteBuffer = spy(IoUtil.mapNewFile(dir.resolve("test.cnc").toFile(), 1024));
+        final DriverConductor conductor = new DriverConductor(ctx.clone().cncByteBuffer(cncByteBuffer));
+
+        conductor.onClose();
+
+        final InOrder inOrder = inOrder(toDriverCommands, cncByteBuffer);
+        inOrder.verify(toDriverCommands).consumerHeartbeatTime(Aeron.NULL_VALUE);
+        inOrder.verify(cncByteBuffer).force();
+    }
+
     private void doWorkUntil(final BooleanSupplier condition, final LongConsumer timeConsumer)
     {
         while (!condition.getAsBoolean())
@@ -1879,12 +2055,12 @@ class DriverConductorTest
 
     private static AtomicCounter clientHeartbeatCounter(final CountersReader countersReader)
     {
-        for (int i = 0, size = countersReader.maxCounterId(); i < size; i++)
+        for (int counterId = 0, maxId = countersReader.maxCounterId(); counterId <= maxId; counterId++)
         {
-            final int counterState = countersReader.getCounterState(i);
-            if (counterState == RECORD_ALLOCATED && countersReader.getCounterTypeId(i) == HEARTBEAT_TYPE_ID)
+            final int counterState = countersReader.getCounterState(counterId);
+            if (counterState == RECORD_ALLOCATED && countersReader.getCounterTypeId(counterId) == HEARTBEAT_TYPE_ID)
             {
-                return new AtomicCounter(countersReader.valuesBuffer(), i);
+                return new AtomicCounter(countersReader.valuesBuffer(), counterId);
             }
             else if (RECORD_UNUSED == counterState)
             {
@@ -1917,5 +2093,75 @@ class DriverConductorTest
         termBuffer.putBytes(termOffset + HEADER_LENGTH, srcBuffer, srcOffset, length);
 
         frameLengthOrdered(termBuffer, termOffset, frameLength);
+    }
+
+    @Test
+    void shouldInferFeedbackGeneratorBasedOnMulticastAddress()
+    {
+        final MediaDriver.Context context = new MediaDriver.Context()
+            .multicastFeedbackDelayGenerator(new OptimalMulticastDelayGenerator(10, 10))
+            .unicastFeedbackDelayGenerator(new StaticDelayGenerator(10));
+        final UdpChannel udpChannel = UdpChannel.parse("aeron:udp?endpoint=224.20.30.39:24326");
+
+        final FeedbackDelayGenerator feedbackDelayGenerator = DriverConductor.resolveDelayGenerator(
+            context, udpChannel, InferableBoolean.INFER, (short)0);
+
+        assertSame(context.multicastFeedbackDelayGenerator(), feedbackDelayGenerator);
+    }
+
+    @Test
+    void shouldInferFeedbackGeneratorBasedOnUnicastAddress()
+    {
+        final MediaDriver.Context context = new MediaDriver.Context()
+            .multicastFeedbackDelayGenerator(new OptimalMulticastDelayGenerator(10, 10))
+            .unicastFeedbackDelayGenerator(new StaticDelayGenerator(10));
+        final UdpChannel udpChannel = UdpChannel.parse("aeron:udp?endpoint=192.168.0.1:24326");
+
+        final FeedbackDelayGenerator feedbackDelayGenerator = DriverConductor.resolveDelayGenerator(
+            context, udpChannel, InferableBoolean.INFER, (short)0);
+
+        assertSame(context.unicastFeedbackDelayGenerator(), feedbackDelayGenerator);
+    }
+
+    @Test
+    void shouldFixMulticastFeedbackGeneratorBasedOnReceiverGroupConsideration()
+    {
+        final MediaDriver.Context context = new MediaDriver.Context()
+            .multicastFeedbackDelayGenerator(new OptimalMulticastDelayGenerator(10, 10))
+            .unicastFeedbackDelayGenerator(new StaticDelayGenerator(10));
+        final UdpChannel udpChannel = UdpChannel.parse("aeron:udp?endpoint=192.168.0.1:24326");
+
+        final FeedbackDelayGenerator feedbackDelayGenerator = DriverConductor.resolveDelayGenerator(
+            context, udpChannel, InferableBoolean.FORCE_TRUE, (short)0);
+
+        assertSame(context.multicastFeedbackDelayGenerator(), feedbackDelayGenerator);
+    }
+
+    @Test
+    void shouldFixUnicastFeedbackGeneratorBasedOnReceiverGroupConsideration()
+    {
+        final MediaDriver.Context context = new MediaDriver.Context()
+            .multicastFeedbackDelayGenerator(new OptimalMulticastDelayGenerator(10, 10))
+            .unicastFeedbackDelayGenerator(new StaticDelayGenerator(10));
+        final UdpChannel udpChannel = UdpChannel.parse("aeron:udp?endpoint=192.168.0.1:24326");
+
+        final FeedbackDelayGenerator feedbackDelayGenerator = DriverConductor.resolveDelayGenerator(
+            context, udpChannel, InferableBoolean.FORCE_FALSE, (short)0);
+
+        assertSame(context.unicastFeedbackDelayGenerator(), feedbackDelayGenerator);
+    }
+
+    @Test
+    void shouldInferFeedbackGeneratorBasedOnReceiverGroupFlag()
+    {
+        final MediaDriver.Context context = new MediaDriver.Context()
+            .multicastFeedbackDelayGenerator(new OptimalMulticastDelayGenerator(10, 10))
+            .unicastFeedbackDelayGenerator(new StaticDelayGenerator(10));
+        final UdpChannel udpChannel = UdpChannel.parse("aeron:udp?endpoint=192.168.0.1:24326");
+
+        final FeedbackDelayGenerator feedbackDelayGenerator = DriverConductor.resolveDelayGenerator(
+            context, udpChannel, InferableBoolean.INFER, SetupFlyweight.GROUP_FLAG);
+
+        assertSame(context.multicastFeedbackDelayGenerator(), feedbackDelayGenerator);
     }
 }

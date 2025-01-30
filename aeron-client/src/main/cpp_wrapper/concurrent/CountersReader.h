@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -103,6 +103,39 @@ public:
         void *handler_ptr = const_cast<void *>(reinterpret_cast<const void *>(&handler));
 
         aeron_counters_reader_foreach_counter(m_countersReader, forEachCounter<handler_type>, handler_ptr);
+    }
+
+    inline std::int32_t findByTypeIdAndRegistrationId(
+        const std::int32_t typeId, const std::int64_t registrationId) const
+    {
+        std::int32_t id = NULL_COUNTER_ID;
+
+        forEach(
+            [&](std::int32_t counterId, std::int32_t counterTypeId, const AtomicBuffer &keyBuffer, const std::string &label)
+            {
+                if (NULL_COUNTER_ID == id && typeId == counterTypeId && registrationId == getCounterRegistrationId(counterId))
+                {
+                    id = counterId;
+                }
+            });
+
+        return id;
+    }
+
+    inline std::int32_t findByRegistrationId(const std::int64_t registrationId) const
+    {
+        std::int32_t id = NULL_COUNTER_ID;
+
+        forEach(
+            [&](std::int32_t counterId, std::int32_t counterTypeId, const AtomicBuffer &keyBuffer, const std::string &label)
+            {
+                if (NULL_COUNTER_ID == id && registrationId == getCounterRegistrationId(counterId))
+                {
+                    id = counterId;
+                }
+            });
+
+        return id;
     }
 
     inline std::int32_t maxCounterId() const
@@ -227,26 +260,31 @@ public:
         return { m_buffers.metadata, m_buffers.metadata_length };
     }
 
-    static const std::int32_t NULL_COUNTER_ID = AERON_NULL_COUNTER_ID;
+    static constexpr std::int32_t NULL_COUNTER_ID = AERON_NULL_COUNTER_ID;
 
-    static const std::int32_t RECORD_UNUSED = AERON_COUNTER_RECORD_UNUSED;
-    static const std::int32_t RECORD_ALLOCATED = AERON_COUNTER_RECORD_ALLOCATED;
-    static const std::int32_t RECORD_RECLAIMED = AERON_COUNTER_RECORD_RECLAIMED;
+    static constexpr std::int32_t RECORD_UNUSED = AERON_COUNTER_RECORD_UNUSED;
+    static constexpr std::int32_t RECORD_ALLOCATED = AERON_COUNTER_RECORD_ALLOCATED;
+    static constexpr std::int32_t RECORD_RECLAIMED = AERON_COUNTER_RECORD_RECLAIMED;
 
-    static const std::int64_t DEFAULT_REGISTRATION_ID = AERON_COUNTER_REGISTRATION_ID_DEFAULT;
-    static const std::int64_t NOT_FREE_TO_REUSE = AERON_COUNTER_NOT_FREE_TO_REUSE;
+    static constexpr std::int64_t DEFAULT_REGISTRATION_ID = AERON_COUNTER_REGISTRATION_ID_DEFAULT;
+    static constexpr std::int64_t NOT_FREE_TO_REUSE = AERON_COUNTER_NOT_FREE_TO_REUSE;
 
-    static const util::index_t COUNTER_LENGTH = AERON_COUNTER_VALUE_LENGTH;
-    static const util::index_t REGISTRATION_ID_OFFSET = AERON_COUNTER_REGISTRATION_ID_OFFSET;
+    static constexpr util::index_t COUNTER_LENGTH = AERON_COUNTER_VALUE_LENGTH;
+    static constexpr util::index_t REGISTRATION_ID_OFFSET = AERON_COUNTER_REGISTRATION_ID_OFFSET;
 
-    static const util::index_t METADATA_LENGTH = AERON_COUNTER_METADATA_LENGTH;
-    static const util::index_t TYPE_ID_OFFSET = AERON_COUNTER_TYPE_ID_OFFSET;
-    static const util::index_t FREE_FOR_REUSE_DEADLINE_OFFSET = AERON_COUNTER_FREE_FOR_REUSE_DEADLINE_OFFSET;
-    static const util::index_t KEY_OFFSET = AERON_COUNTER_KEY_OFFSET;
-    static const util::index_t LABEL_LENGTH_OFFSET = AERON_COUNTER_LABEL_LENGTH_OFFSET;
+    static constexpr util::index_t METADATA_LENGTH = AERON_COUNTER_METADATA_LENGTH;
+    static constexpr util::index_t TYPE_ID_OFFSET = AERON_COUNTER_TYPE_ID_OFFSET;
+    static constexpr util::index_t FREE_FOR_REUSE_DEADLINE_OFFSET = AERON_COUNTER_FREE_FOR_REUSE_DEADLINE_OFFSET;
+    static constexpr util::index_t KEY_OFFSET = AERON_COUNTER_KEY_OFFSET;
+    static constexpr util::index_t LABEL_LENGTH_OFFSET = AERON_COUNTER_LABEL_LENGTH_OFFSET;
 
-    static const std::int32_t MAX_LABEL_LENGTH = AERON_COUNTER_MAX_LABEL_LENGTH;
-    static const std::int32_t MAX_KEY_LENGTH = AERON_COUNTER_MAX_KEY_LENGTH;
+    static constexpr std::int32_t MAX_LABEL_LENGTH = AERON_COUNTER_MAX_LABEL_LENGTH;
+    static constexpr std::int32_t MAX_KEY_LENGTH = AERON_COUNTER_MAX_KEY_LENGTH;
+
+    inline aeron_counters_reader_t *countersReader() const
+    {
+        return m_countersReader;
+    }
 
 protected:
     aeron_counters_reader_t *m_countersReader;

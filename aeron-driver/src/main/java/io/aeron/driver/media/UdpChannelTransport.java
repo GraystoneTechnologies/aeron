@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package io.aeron.driver.media;
 
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.status.SystemCounterDescriptor;
+import io.aeron.exceptions.AeronEvent;
 import io.aeron.exceptions.AeronException;
 import io.aeron.protocol.HeaderFlyweight;
 import io.aeron.status.ChannelEndpointStatus;
@@ -79,9 +80,10 @@ public abstract class UdpChannelTransport implements AutoCloseable
     protected SelectionKey selectionKey;
 
     private UdpTransportPoller transportPoller;
-    private final InetSocketAddress bindAddress;
+    private InetSocketAddress bindAddress;
     private final InetSocketAddress endPointAddress;
     private final AtomicCounter invalidPackets;
+    private final PortManager portManager;
 
     /**
      * Can be used to check if the transport is closed so an operation does not proceed.
@@ -99,6 +101,7 @@ public abstract class UdpChannelTransport implements AutoCloseable
      * @param bindAddress        for listening on.
      * @param connectAddress     for sending data to.
      * @param context            for configuration.
+     * @param portManager        for port binding.
      * @param socketRcvbufLength set SO_RCVBUF for socket, 0 for OS default.
      * @param socketSndbufLength set SO_SNDBUF for socket, 0 for OS default.
      */
@@ -107,13 +110,15 @@ public abstract class UdpChannelTransport implements AutoCloseable
         final InetSocketAddress endPointAddress,
         final InetSocketAddress bindAddress,
         final InetSocketAddress connectAddress,
+        final PortManager portManager,
         final MediaDriver.Context context,
         final int socketRcvbufLength,
         final int socketSndbufLength)
     {
         this.context = context;
         this.udpChannel = udpChannel;
-        this.errorHandler = context.errorHandler();
+        this.errorHandler = context.countedErrorHandler();
+        this.portManager = portManager;
         this.endPointAddress = endPointAddress;
         this.bindAddress = bindAddress;
         this.connectAddress = connectAddress;
@@ -129,6 +134,7 @@ public abstract class UdpChannelTransport implements AutoCloseable
      * @param endPointAddress to which data will be sent.
      * @param bindAddress     for listening on.
      * @param connectAddress  for sending data to.
+     * @param portManager     for port binding.
      * @param context         for configuration.
      */
     protected UdpChannelTransport(
@@ -136,6 +142,7 @@ public abstract class UdpChannelTransport implements AutoCloseable
         final InetSocketAddress endPointAddress,
         final InetSocketAddress bindAddress,
         final InetSocketAddress connectAddress,
+        final PortManager portManager,
         final MediaDriver.Context context)
     {
         this(
@@ -143,6 +150,7 @@ public abstract class UdpChannelTransport implements AutoCloseable
             endPointAddress,
             bindAddress,
             connectAddress,
+            portManager,
             context,
             udpChannel.socketRcvbufLengthOrDefault(context.socketRcvbufLength()),
             udpChannel.socketSndbufLengthOrDefault(context.socketSndbufLength()));
@@ -154,11 +162,28 @@ public abstract class UdpChannelTransport implements AutoCloseable
      * @param bytesToSend expected to be sent to the network.
      * @param ex          experienced.
      * @param destination to which the send operation was addressed.
+     * @see #onSendError(IOException, InetSocketAddress, ErrorHandler)
+     * @deprecated {@link #onSendError(IOException, InetSocketAddress, ErrorHandler)} is used instead.
      */
+    @Deprecated(forRemoval = true, since = "1.46.6")
     public static void sendError(final int bytesToSend, final IOException ex, final InetSocketAddress destination)
     {
         throw new AeronException(
             "failed to send " + bytesToSend + " byte packet to " + destination, ex, AeronException.Category.WARN);
+    }
+
+    /**
+     * Report an {@link AeronEvent} with a message for a send error.
+     *
+     * @param ex           experienced.
+     * @param destination  to which the send operation was addressed.
+     * @param errorHandler to report error to.
+     */
+    public static void onSendError(
+        final IOException ex, final InetSocketAddress destination, final ErrorHandler errorHandler)
+    {
+        errorHandler.onError(new AeronEvent(
+            "failed to send datagram to " + destination + ", cause: " + ex, AeronException.Category.WARN));
     }
 
     /**
@@ -199,6 +224,7 @@ public abstract class UdpChannelTransport implements AutoCloseable
             }
             else
             {
+                bindAddress = portManager.getManagedPort(udpChannel, bindAddress);
                 sendDatagramChannel.bind(bindAddress);
             }
 
@@ -334,6 +360,8 @@ public abstract class UdpChannelTransport implements AutoCloseable
             {
                 transportPoller.selectNowWithoutProcessing();
             }
+
+            portManager.freeManagedPort(bindAddress);
         }
     }
 
@@ -403,6 +431,21 @@ public abstract class UdpChannelTransport implements AutoCloseable
      */
     @SuppressWarnings("unused")
     public void receiveHook(final UnsafeBuffer buffer, final int length, final InetSocketAddress address)
+    {
+    }
+
+    /**
+     * Useful hook for logging resend calls.
+     *
+     * @param sessionId  to resend
+     * @param streamId   to resend
+     * @param termId     to resend
+     * @param termOffset to resend
+     * @param length     to resend
+     */
+    @SuppressWarnings("unused")
+    public void resendHook(
+        final int sessionId, final int streamId, final int termId, final int termOffset, final int length)
     {
     }
 

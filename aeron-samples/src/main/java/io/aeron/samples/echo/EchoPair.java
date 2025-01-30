@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,7 +28,7 @@ import org.agrona.DirectBuffer;
  */
 public class EchoPair implements ControlledFragmentHandler, AutoCloseable
 {
-    public static final int FRAGMENT_LIMIT = 10;
+    private static final int FRAGMENT_LIMIT = 10;
 
     private final long correlationId;
     private final Subscription subscription;
@@ -45,9 +45,10 @@ public class EchoPair implements ControlledFragmentHandler, AutoCloseable
 
     /**
      * Construct the echo pair.
-     * @param correlationId user supplied correlation id
-     * @param subscription to read fragments from
-     * @param publication to send fragments back to
+     *
+     * @param correlationId user supplied correlation id.
+     * @param subscription  to read fragments from.
+     * @param publication   to send fragments back to.
      */
     public EchoPair(final long correlationId, final Subscription subscription, final Publication publication)
     {
@@ -61,28 +62,28 @@ public class EchoPair implements ControlledFragmentHandler, AutoCloseable
      */
     public Action onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header)
     {
-        final long offer = publication.offer(buffer, offset, length);
-        if (Publication.NOT_CONNECTED == offer)
+        final long offerPosition = publication.offer(buffer, offset, length);
+        if (Publication.NOT_CONNECTED == offerPosition)
         {
             notConnectedCount++;
             return Action.ABORT;
         }
-        else if (Publication.BACK_PRESSURED == offer)
+        else if (Publication.BACK_PRESSURED == offerPosition)
         {
             backPressureCount++;
             return Action.ABORT;
         }
-        else if (Publication.ADMIN_ACTION == offer)
+        else if (Publication.ADMIN_ACTION == offerPosition)
         {
             adminActionCount++;
             return Action.ABORT;
         }
-        else if (Publication.CLOSED == offer)
+        else if (Publication.CLOSED == offerPosition)
         {
             closedCount++;
             return Action.CONTINUE;
         }
-        else if (Publication.MAX_POSITION_EXCEEDED == offer)
+        else if (Publication.MAX_POSITION_EXCEEDED == offerPosition)
         {
             maxSessionExceededCount++;
             return Action.CONTINUE;
@@ -98,7 +99,7 @@ public class EchoPair implements ControlledFragmentHandler, AutoCloseable
     /**
      * Poll subscription of the echo pair.
      *
-     * @return number of fragments processed
+     * @return number of fragments processed.
      */
     public int poll()
     {
@@ -106,8 +107,9 @@ public class EchoPair implements ControlledFragmentHandler, AutoCloseable
     }
 
     /**
-     * Get the correlationId
-     * @return user supplied correlationId
+     * Get the correlationId.
+     *
+     * @return user supplied correlationId.
      */
     public long correlationId()
     {
@@ -125,18 +127,19 @@ public class EchoPair implements ControlledFragmentHandler, AutoCloseable
     }
 
     /**
-     * Close the echo pair
+     * Close the echo pair.
      */
     public void close()
     {
         CloseHelper.quietCloseAll(publication, subscription);
     }
 
-    private class EchoMonitor implements EchoMonitorMBean
+    private final class EchoMonitor implements EchoMonitorMBean
     {
         /**
-         * Get the correaltionId
-         * @return correlationId
+         * Get the correlationId.
+         *
+         * @return correlationId.
          */
         public long getCorrelationId()
         {
@@ -146,7 +149,7 @@ public class EchoPair implements ControlledFragmentHandler, AutoCloseable
         /**
          * Number of times echo pair has experienced back pressure when copying to the publication.
          *
-         * @return number of back pressure events
+         * @return number of back pressure events.
          */
         public long getBackPressureCount()
         {
@@ -156,7 +159,7 @@ public class EchoPair implements ControlledFragmentHandler, AutoCloseable
         /**
          * Number of fragments processed.
          *
-         * @return number of fragments
+         * @return number of fragments.
          */
         public long getFragmentCount()
         {
@@ -164,7 +167,7 @@ public class EchoPair implements ControlledFragmentHandler, AutoCloseable
         }
 
         /**
-         * Number of bytes processed
+         * Number of bytes processed.
          *
          * @return number of bytes.
          */

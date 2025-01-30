@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,12 +24,12 @@ namespace aeron { namespace concurrent { namespace status {
 
 namespace ChannelEndpointStatus
 {
-static const std::int64_t CHANNEL_ENDPOINT_INITIALIZING = 0;
-static const std::int64_t CHANNEL_ENDPOINT_ERRORED = -1;
-static const std::int64_t CHANNEL_ENDPOINT_ACTIVE = 1;
-static const std::int64_t CHANNEL_ENDPOINT_CLOSING = 2;
+static constexpr std::int64_t CHANNEL_ENDPOINT_INITIALIZING = 0;
+static constexpr std::int64_t CHANNEL_ENDPOINT_ERRORED = -1;
+static constexpr std::int64_t CHANNEL_ENDPOINT_ACTIVE = 1;
+static constexpr std::int64_t CHANNEL_ENDPOINT_CLOSING = 2;
 
-static const std::int32_t NO_ID_ALLOCATED = -1;
+static constexpr std::int32_t NO_ID_ALLOCATED = -1;
 }
 
 class StatusIndicatorReader

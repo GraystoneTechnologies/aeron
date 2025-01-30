@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,8 +21,11 @@ import io.aeron.cluster.client.ClusterException;
 import io.aeron.cluster.codecs.mark.ClusterComponentType;
 import io.aeron.cluster.codecs.mark.MarkFileHeaderDecoder;
 import io.aeron.cluster.codecs.mark.MarkFileHeaderEncoder;
+import io.aeron.cluster.codecs.mark.MessageHeaderDecoder;
+import io.aeron.cluster.codecs.mark.MessageHeaderEncoder;
 import io.aeron.cluster.codecs.mark.VarAsciiEncodingEncoder;
 import org.agrona.CloseHelper;
+import org.agrona.IoUtil;
 import org.agrona.MarkFile;
 import org.agrona.SemanticVersion;
 import org.agrona.SystemUtil;
@@ -32,11 +35,10 @@ import org.agrona.concurrent.UnsafeBuffer;
 
 import java.io.File;
 import java.io.PrintStream;
+import java.nio.MappedByteBuffer;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.function.Consumer;
-
-import static io.aeron.Aeron.NULL_VALUE;
 
 /**
  * Used to indicate if a cluster service is running and what configuration it is using. Errors encountered by
@@ -44,25 +46,67 @@ import static io.aeron.Aeron.NULL_VALUE;
  */
 public final class ClusterMarkFile implements AutoCloseable
 {
+    /**
+     * Major version.
+     */
     public static final int MAJOR_VERSION = 0;
+    /**
+     * Minor version.
+     */
     public static final int MINOR_VERSION = 3;
+    /**
+     * Patch version.
+     */
     public static final int PATCH_VERSION = 0;
+    /**
+     * Full semantic version.
+     */
     public static final int SEMANTIC_VERSION = SemanticVersion.compose(MAJOR_VERSION, MINOR_VERSION, PATCH_VERSION);
-
+    /**
+     * Length of the {@code header} section.
+     */
     public static final int HEADER_LENGTH = 8 * 1024;
+    /**
+     * Special version to indicate that component failed to start.
+     */
     public static final int VERSION_FAILED = -1;
+    /**
+     * Min length for the error log buffer.
+     */
     public static final int ERROR_BUFFER_MIN_LENGTH = 1024 * 1024;
+    /**
+     * Max allowed length for the error log buffer.
+     */
     public static final int ERROR_BUFFER_MAX_LENGTH = Integer.MAX_VALUE - HEADER_LENGTH;
-
+    /**
+     * File extension used by the mark file.
+     */
     public static final String FILE_EXTENSION = ".dat";
+    /**
+     * File extension used by the link file.
+     */
+    public static final String LINK_FILE_EXTENSION = ".lnk";
+    /**
+     * Mark file name.
+     */
     public static final String FILENAME = "cluster-mark" + FILE_EXTENSION;
+    /**
+     * Link file name.
+     */
+    public static final String LINK_FILENAME = "cluster-mark" + LINK_FILE_EXTENSION;
+    /**
+     * Service mark file name.
+     */
     public static final String SERVICE_FILENAME_PREFIX = "cluster-mark-service-";
+
+    private static final int HEADER_OFFSET = MessageHeaderDecoder.ENCODED_LENGTH;
 
     private final MarkFileHeaderDecoder headerDecoder = new MarkFileHeaderDecoder();
     private final MarkFileHeaderEncoder headerEncoder = new MarkFileHeaderEncoder();
     private final MarkFile markFile;
     private final UnsafeBuffer buffer;
     private final UnsafeBuffer errorBuffer;
+    private final int headerOffset;
 
     /**
      * Create new {@link MarkFile} for a cluster service but check if an existing service is active.
@@ -88,40 +132,59 @@ public final class ClusterMarkFile implements AutoCloseable
         final boolean markFileExists = file.exists();
         final int totalFileLength = HEADER_LENGTH + errorBufferLength;
 
-        markFile = new MarkFile(
-            file,
-            markFileExists,
-            MarkFileHeaderDecoder.versionEncodingOffset(),
-            MarkFileHeaderDecoder.activityTimestampEncodingOffset(),
-            totalFileLength,
-            timeoutMs,
-            epochClock,
-            (version) ->
-            {
-                if (VERSION_FAILED == version && markFileExists)
-                {
-                    System.err.println("mark file version -1 indicates error on previous startup.");
-                }
-                else if (SemanticVersion.major(version) != MAJOR_VERSION)
-                {
-                    throw new ClusterException("mark file major version " + SemanticVersion.major(version) +
-                        " does not match software: " + MAJOR_VERSION);
-                }
-            },
-            null);
+        final MessageHeaderDecoder messageHeaderDecoder = new MessageHeaderDecoder();
 
-        buffer = markFile.buffer();
-        errorBuffer = new UnsafeBuffer(this.buffer, HEADER_LENGTH, errorBufferLength);
-
-        headerEncoder.wrap(buffer, 0);
-        headerDecoder.wrap(buffer, 0, MarkFileHeaderDecoder.BLOCK_LENGTH, MarkFileHeaderDecoder.SCHEMA_VERSION);
-
+        final long candidateTermId;
         if (markFileExists)
         {
+            final int headerOffset = headerOffset(file);
+            final MarkFile markFile = new MarkFile(
+                file,
+                true,
+                headerOffset + MarkFileHeaderDecoder.versionEncodingOffset(),
+                headerOffset + MarkFileHeaderDecoder.activityTimestampEncodingOffset(),
+                totalFileLength,
+                timeoutMs,
+                epochClock,
+                (version) ->
+                {
+                    if (VERSION_FAILED == version)
+                    {
+                        System.err.println("mark file version -1 indicates error on previous startup.");
+                    }
+                    else if (SemanticVersion.major(version) != MAJOR_VERSION)
+                    {
+                        throw new ClusterException("mark file major version " + SemanticVersion.major(version) +
+                            " does not match software: " + MAJOR_VERSION);
+                    }
+                },
+                null);
+            final UnsafeBuffer buffer = markFile.buffer();
+
             if (buffer.capacity() != totalFileLength)
             {
                 throw new ClusterException(
                     "ClusterMarkFile capacity=" + buffer.capacity() + " < expectedCapacity=" + totalFileLength);
+            }
+
+            if (0 != headerOffset)
+            {
+                headerDecoder.wrapAndApplyHeader(buffer, 0, messageHeaderDecoder);
+            }
+            else
+            {
+                headerDecoder.wrap(buffer, 0, MarkFileHeaderDecoder.BLOCK_LENGTH, MarkFileHeaderDecoder.SCHEMA_VERSION);
+            }
+
+            final ClusterComponentType existingType = headerDecoder.componentType();
+
+            if (existingType != ClusterComponentType.UNKNOWN && existingType != type)
+            {
+                if (existingType != ClusterComponentType.BACKUP || ClusterComponentType.CONSENSUS_MODULE != type)
+                {
+                    throw new ClusterException(
+                        "existing Mark file type " + existingType + " not same as required type " + type);
+                }
             }
 
             final int existingErrorBufferLength = headerDecoder.errorBufferLength();
@@ -130,28 +193,61 @@ public final class ClusterMarkFile implements AutoCloseable
 
             saveExistingErrors(file, existingErrorBuffer, type, CommonContext.fallbackLogger());
             existingErrorBuffer.setMemory(0, existingErrorBufferLength, (byte)0);
+
+            candidateTermId = headerDecoder.candidateTermId();
+
+            if (0 != headerOffset)
+            {
+                this.markFile = markFile;
+                this.buffer = buffer;
+            }
+            else
+            {
+                CloseHelper.close(markFile);
+                this.markFile = new MarkFile(
+                    file,
+                    false,
+                    HEADER_OFFSET + MarkFileHeaderDecoder.versionEncodingOffset(),
+                    HEADER_OFFSET + MarkFileHeaderDecoder.activityTimestampEncodingOffset(),
+                    totalFileLength,
+                    timeoutMs,
+                    epochClock,
+                    null,
+                    null);
+                this.buffer = markFile.buffer();
+                this.buffer.setMemory(0, headerDecoder.headerLength(), (byte)0);
+            }
         }
         else
         {
-            headerEncoder.candidateTermId(NULL_VALUE);
+            markFile = new MarkFile(
+                file,
+                false,
+                HEADER_OFFSET + MarkFileHeaderDecoder.versionEncodingOffset(),
+                HEADER_OFFSET + MarkFileHeaderDecoder.activityTimestampEncodingOffset(),
+                totalFileLength,
+                timeoutMs,
+                epochClock,
+                null,
+                null);
+            buffer = markFile.buffer();
+            candidateTermId = Aeron.NULL_VALUE;
         }
 
-        final ClusterComponentType existingType = headerDecoder.componentType();
+        headerOffset = HEADER_OFFSET;
 
-        if (existingType != ClusterComponentType.NULL && existingType != type)
-        {
-            if (existingType != ClusterComponentType.BACKUP || ClusterComponentType.CONSENSUS_MODULE != type)
-            {
-                throw new ClusterException(
-                    "existing Mark file type " + existingType + " not same as required type " + type);
-            }
-        }
+        errorBuffer = new UnsafeBuffer(buffer, HEADER_LENGTH, errorBufferLength);
 
-        headerEncoder.componentType(type);
-        headerEncoder.headerLength(HEADER_LENGTH);
-        headerEncoder.errorBufferLength(errorBufferLength);
-        headerEncoder.pid(SystemUtil.getPid());
-        headerEncoder.startTimestamp(epochClock.time());
+        headerEncoder
+            .wrapAndApplyHeader(buffer, 0, new MessageHeaderEncoder())
+            .componentType(type)
+            .startTimestamp(epochClock.time())
+            .pid(SystemUtil.getPid())
+            .candidateTermId(candidateTermId)
+            .headerLength(HEADER_LENGTH)
+            .errorBufferLength(errorBufferLength);
+
+        headerDecoder.wrapAndApplyHeader(buffer, 0, messageHeaderDecoder);
     }
 
     /**
@@ -170,35 +266,46 @@ public final class ClusterMarkFile implements AutoCloseable
         final long timeoutMs,
         final Consumer<String> logger)
     {
-        markFile = new MarkFile(
-            directory,
-            filename,
-            MarkFileHeaderDecoder.versionEncodingOffset(),
-            MarkFileHeaderDecoder.activityTimestampEncodingOffset(),
-            timeoutMs,
-            epochClock,
-            (version) ->
-            {
-                if (SemanticVersion.major(version) != MAJOR_VERSION)
-                {
-                    throw new ClusterException(
-                        "mark file major version " + SemanticVersion.major(version) +
-                        " does not match software: " + MAJOR_VERSION);
-                }
-            },
-            logger);
+        this(openExistingMarkFile(directory, filename, epochClock, timeoutMs, logger));
+    }
 
+    ClusterMarkFile(final MarkFile markFile)
+    {
+        this.markFile = markFile;
         buffer = markFile.buffer();
-        headerDecoder.wrap(buffer, 0, MarkFileHeaderDecoder.BLOCK_LENGTH, MarkFileHeaderDecoder.SCHEMA_VERSION);
+
+        headerOffset = headerOffset(buffer);
+        if (0 != headerOffset)
+        {
+            headerEncoder.wrap(buffer, headerOffset);
+            headerDecoder.wrapAndApplyHeader(buffer, 0, new MessageHeaderDecoder());
+        }
+        else
+        {
+            headerEncoder.wrap(buffer, 0);
+            headerDecoder.wrap(buffer, 0, MarkFileHeaderDecoder.BLOCK_LENGTH, MarkFileHeaderDecoder.SCHEMA_VERSION);
+        }
+
         errorBuffer = new UnsafeBuffer(buffer, headerDecoder.headerLength(), headerDecoder.errorBufferLength());
     }
 
     /**
-     * Determines if this path name matches the service mark file name pattern
+     * Get the parent directory containing the mark file.
      *
-     * @param path       to examine
-     * @param attributes ignored, only needed for BiPredicate signature matching
-     * @return true if the name matches
+     * @return parent directory of the mark file.
+     * @see MarkFile#parentDirectory()
+     */
+    public File parentDirectory()
+    {
+        return markFile.parentDirectory();
+    }
+
+    /**
+     * Determines if this path name matches the service mark file name pattern.
+     *
+     * @param path       to examine.
+     * @param attributes ignored, only needed for BiPredicate signature matching.
+     * @return true if the name matches.
      */
     public static boolean isServiceMarkFile(final Path path, final BasicFileAttributes attributes)
     {
@@ -210,7 +317,7 @@ public final class ClusterMarkFile implements AutoCloseable
      * Determines if this path name matches the consensus module file name pattern.
      *
      * @param path       to examine.
-     * @param attributes ignored, only needed for BiPredicate signature matching,
+     * @param attributes ignored, only needed for BiPredicate signature matching.
      * @return true if the name matches.
      */
     public static boolean isConsensusModuleMarkFile(final Path path, final BasicFileAttributes attributes)
@@ -223,7 +330,14 @@ public final class ClusterMarkFile implements AutoCloseable
      */
     public void close()
     {
-        CloseHelper.close(markFile);
+        if (!markFile.isClosed())
+        {
+            CloseHelper.close(markFile);
+            final UnsafeBuffer emptyBuffer = new UnsafeBuffer();
+            headerEncoder.wrap(emptyBuffer, 0);
+            headerDecoder.wrap(emptyBuffer, 0, 0, 0);
+            errorBuffer.wrap(emptyBuffer, 0, 0);
+        }
     }
 
     /**
@@ -237,14 +351,15 @@ public final class ClusterMarkFile implements AutoCloseable
     }
 
     /**
-     * Get the current value of a candidate term id if a vote is placed in an election.
+     * Get the current value of a candidate term id if a vote is placed in an election with volatile semantics.
      *
      * @return the current candidate term id within an election after voting or {@link Aeron#NULL_VALUE} if
      * no voting phase of an election is currently active.
      */
     public long candidateTermId()
     {
-        return buffer.getLongVolatile(MarkFileHeaderDecoder.candidateTermIdEncodingOffset());
+        return markFile.isClosed() ? Aeron.NULL_VALUE :
+            buffer.getLongVolatile(headerOffset + MarkFileHeaderDecoder.candidateTermIdEncodingOffset());
     }
 
     /**
@@ -254,7 +369,7 @@ public final class ClusterMarkFile implements AutoCloseable
      */
     public int memberId()
     {
-        return buffer.getInt(MarkFileHeaderDecoder.memberIdEncodingOffset());
+        return markFile.isClosed() ? Aeron.NULL_VALUE : headerDecoder.memberId();
     }
 
     /**
@@ -264,7 +379,10 @@ public final class ClusterMarkFile implements AutoCloseable
      */
     public void memberId(final int memberId)
     {
-        buffer.putInt(MarkFileHeaderEncoder.memberIdEncodingOffset(), memberId);
+        if (!markFile.isClosed())
+        {
+            headerEncoder.memberId(memberId);
+        }
     }
 
     /**
@@ -274,7 +392,7 @@ public final class ClusterMarkFile implements AutoCloseable
      */
     public int clusterId()
     {
-        return buffer.getInt(MarkFileHeaderDecoder.clusterIdEncodingOffset());
+        return markFile.isClosed() ? Aeron.NULL_VALUE : headerDecoder.clusterId();
     }
 
     /**
@@ -284,7 +402,10 @@ public final class ClusterMarkFile implements AutoCloseable
      */
     public void clusterId(final int clusterId)
     {
-        buffer.putInt(MarkFileHeaderEncoder.clusterIdEncodingOffset(), clusterId);
+        if (!markFile.isClosed())
+        {
+            headerEncoder.clusterId(clusterId);
+        }
     }
 
     /**
@@ -292,7 +413,10 @@ public final class ClusterMarkFile implements AutoCloseable
      */
     public void signalReady()
     {
-        markFile.signalReady(SEMANTIC_VERSION);
+        if (!markFile.isClosed())
+        {
+            markFile.signalReady(SEMANTIC_VERSION);
+        }
     }
 
     /**
@@ -300,7 +424,10 @@ public final class ClusterMarkFile implements AutoCloseable
      */
     public void signalFailedStart()
     {
-        markFile.signalReady(VERSION_FAILED);
+        if (!markFile.isClosed())
+        {
+            markFile.signalReady(VERSION_FAILED);
+        }
     }
 
     /**
@@ -323,7 +450,7 @@ public final class ClusterMarkFile implements AutoCloseable
      */
     public long activityTimestampVolatile()
     {
-        return markFile.timestampVolatile();
+        return markFile.isClosed() ? Aeron.NULL_VALUE : markFile.timestampVolatile();
     }
 
     /**
@@ -390,6 +517,7 @@ public final class ClusterMarkFile implements AutoCloseable
         final String authenticator)
     {
         final int length =
+            HEADER_OFFSET +
             MarkFileHeaderEncoder.BLOCK_LENGTH +
             (5 * VarAsciiEncodingEncoder.lengthEncodingLength()) +
             (null == aeronDirectory ? 0 : aeronDirectory.length()) +
@@ -417,25 +545,45 @@ public final class ClusterMarkFile implements AutoCloseable
     }
 
     /**
+     * The filename to be used for the link file given a service id.
+     *
+     * @param serviceId of the service the {@link ClusterMarkFile} represents.
+     * @return the filename to be used for the link file given a service id.
+     */
+    public static String linkFilenameForService(final int serviceId)
+    {
+        return SERVICE_FILENAME_PREFIX + serviceId + LINK_FILE_EXTENSION;
+    }
+
+    /**
      * The control properties for communicating between the consensus module and the services.
      *
      * @return the control properties for communicating between the consensus module and the services.
      */
     public ClusterNodeControlProperties loadControlProperties()
     {
-        final MarkFileHeaderDecoder decoder = new MarkFileHeaderDecoder();
-        decoder.wrap(
-            headerDecoder.buffer(),
-            headerDecoder.initialOffset(),
-            MarkFileHeaderDecoder.BLOCK_LENGTH,
-            MarkFileHeaderDecoder.SCHEMA_VERSION);
-
+        headerDecoder.sbeRewind();
         return new ClusterNodeControlProperties(
-            decoder.memberId(),
-            decoder.serviceStreamId(),
-            decoder.consensusModuleStreamId(),
-            decoder.aeronDirectory(),
-            decoder.controlChannel());
+            headerDecoder.memberId(),
+            headerDecoder.serviceStreamId(),
+            headerDecoder.consensusModuleStreamId(),
+            headerDecoder.aeronDirectory(),
+            headerDecoder.controlChannel());
+    }
+
+    /**
+     * Forces any changes made to the mark file's content to be written to the storage device containing the mapped
+     * file.
+     *
+     * @since 1.44.0
+     */
+    public void force()
+    {
+        if (!markFile.isClosed())
+        {
+            final MappedByteBuffer mappedByteBuffer = markFile.mappedByteBuffer();
+            mappedByteBuffer.force();
+        }
     }
 
     /**
@@ -447,5 +595,55 @@ public final class ClusterMarkFile implements AutoCloseable
             "semanticVersion=" + SemanticVersion.toString(SEMANTIC_VERSION) +
             ", markFile=" + markFile.markFile() +
             '}';
+    }
+
+    private static int headerOffset(final File file)
+    {
+        final MappedByteBuffer mappedByteBuffer = IoUtil.mapExistingFile(file, FILENAME);
+        try
+        {
+            final UnsafeBuffer unsafeBuffer =
+                new UnsafeBuffer(mappedByteBuffer, 0, HEADER_OFFSET);
+            return headerOffset(unsafeBuffer);
+        }
+        finally
+        {
+            IoUtil.unmap(mappedByteBuffer);
+        }
+    }
+
+    private static int headerOffset(final UnsafeBuffer headerBuffer)
+    {
+        final MessageHeaderDecoder decoder = new MessageHeaderDecoder();
+        decoder.wrap(headerBuffer, 0);
+        return MarkFileHeaderDecoder.TEMPLATE_ID == decoder.templateId() &&
+            MarkFileHeaderDecoder.SCHEMA_ID == decoder.schemaId() ? HEADER_OFFSET : 0;
+    }
+
+    private static MarkFile openExistingMarkFile(
+        final File directory,
+        final String filename,
+        final EpochClock epochClock,
+        final long timeoutMs,
+        final Consumer<String> logger)
+    {
+        final int headerOffset = headerOffset(new File(directory, filename));
+        return new MarkFile(
+            directory,
+            filename,
+            headerOffset + MarkFileHeaderDecoder.versionEncodingOffset(),
+            headerOffset + MarkFileHeaderDecoder.activityTimestampEncodingOffset(),
+            timeoutMs,
+            epochClock,
+            (version) ->
+            {
+                if (SemanticVersion.major(version) != MAJOR_VERSION)
+                {
+                    throw new ClusterException(
+                        "mark file major version " + SemanticVersion.major(version) +
+                            " does not match software: " + MAJOR_VERSION);
+                }
+            },
+            logger);
     }
 }

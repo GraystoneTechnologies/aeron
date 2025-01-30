@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ import io.aeron.archive.codecs.ListRecordingRequestDecoder;
 import io.aeron.archive.codecs.MessageHeaderEncoder;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.ringbuffer.ManyToOneRingBuffer;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -29,6 +30,8 @@ import java.time.temporal.ChronoUnit;
 
 import static io.aeron.agent.AgentTests.verifyLogHeader;
 import static io.aeron.agent.ArchiveEventCode.*;
+import static io.aeron.agent.ArchiveEventEncoder.replicationSessionDoneLength;
+import static io.aeron.agent.ArchiveEventEncoder.replicationSessionStateChangeLength;
 import static io.aeron.agent.ArchiveEventLogger.CONTROL_REQUEST_EVENTS;
 import static io.aeron.agent.CommonEventEncoder.*;
 import static io.aeron.agent.EventConfiguration.MAX_EVENT_LENGTH;
@@ -38,6 +41,7 @@ import static java.nio.ByteOrder.LITTLE_ENDIAN;
 import static org.agrona.BitUtil.*;
 import static org.agrona.concurrent.ringbuffer.RecordDescriptor.*;
 import static org.agrona.concurrent.ringbuffer.RingBufferDescriptor.*;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.params.provider.EnumSource.Mode.EXCLUDE;
 import static org.junit.jupiter.params.provider.EnumSource.Mode.INCLUDE;
@@ -62,7 +66,8 @@ class ArchiveEventLoggerTest
         mode = EXCLUDE,
         names = {
             "CMD_OUT_RESPONSE", "REPLICATION_SESSION_STATE_CHANGE",
-            "CONTROL_SESSION_STATE_CHANGE", "REPLAY_SESSION_ERROR", "CATALOG_RESIZE"
+            "CONTROL_SESSION_STATE_CHANGE", "REPLAY_SESSION_ERROR", "CATALOG_RESIZE",
+            "REPLICATION_SESSION_DONE", "REPLAY_SESSION_STATE_CHANGE", "RECORDING_SESSION_STATE_CHANGE"
         })
     void logControlRequest(final ArchiveEventCode eventCode)
     {
@@ -143,8 +148,16 @@ class ArchiveEventLoggerTest
     @EnumSource(
         value = ArchiveEventCode.class,
         mode = EXCLUDE,
-        names = { "CMD_OUT_RESPONSE", "REPLICATION_SESSION_STATE_CHANGE",
-            "CONTROL_SESSION_STATE_CHANGE", "REPLAY_SESSION_ERROR", "CATALOG_RESIZE" })
+        names = {
+            "CMD_OUT_RESPONSE",
+            "REPLICATION_SESSION_STATE_CHANGE",
+            "CONTROL_SESSION_STATE_CHANGE",
+            "REPLAY_SESSION_ERROR",
+            "CATALOG_RESIZE",
+            "RECORDING_SIGNAL",
+            "REPLICATION_SESSION_DONE",
+            "REPLAY_SESSION_STATE_CHANGE",
+            "RECORDING_SESSION_STATE_CHANGE" })
     void controlRequestEvents(final ArchiveEventCode eventCode)
     {
         assertTrue(CONTROL_REQUEST_EVENTS.contains(eventCode));
@@ -155,6 +168,7 @@ class ArchiveEventLoggerTest
         value = ArchiveEventCode.class,
         mode = INCLUDE,
         names = { "CMD_OUT_RESPONSE", "REPLICATION_SESSION_STATE_CHANGE",
+            "REPLAY_SESSION_STATE_CHANGE", "RECORDING_SESSION_STATE_CHANGE",
             "CONTROL_SESSION_STATE_CHANGE", "REPLAY_SESSION_ERROR", "CATALOG_RESIZE" })
     void nonControlRequestEvents(final ArchiveEventCode eventCode)
     {
@@ -162,26 +176,26 @@ class ArchiveEventLoggerTest
     }
 
     @Test
-    void logSessionStateChange()
+    void logControlSessionStateChange()
     {
         final int offset = ALIGNMENT * 4;
         logBuffer.putLong(CAPACITY + TAIL_POSITION_OFFSET, offset);
         final ChronoUnit from = ChronoUnit.CENTURIES;
         final ChronoUnit to = ChronoUnit.MICROS;
         final long id = 555_000_000_000L;
-        final long position = 827342L;
         final String payload = from.name() + STATE_SEPARATOR + to.name();
-        final int captureLength = 2 * SIZE_OF_LONG + SIZE_OF_INT + payload.length();
+        final String reason = "test reason to check";
+        final int captureLength = SIZE_OF_LONG + SIZE_OF_INT + payload.length() + SIZE_OF_INT + reason.length();
 
-        logger.logSessionStateChange(CONTROL_SESSION_STATE_CHANGE, from, to, id, position);
+        logger.logControlSessionStateChange(from, to, id, reason);
 
         verifyLogHeader(
             logBuffer, offset, CONTROL_SESSION_STATE_CHANGE.toEventCodeId(), captureLength, captureLength);
         assertEquals(id, logBuffer.getLong(encodedMsgOffset(offset + LOG_HEADER_LENGTH), LITTLE_ENDIAN));
         assertEquals(
-            position, logBuffer.getLong(encodedMsgOffset(offset + LOG_HEADER_LENGTH + SIZE_OF_LONG), LITTLE_ENDIAN));
-        assertEquals(
-            payload, logBuffer.getStringAscii(encodedMsgOffset(offset + LOG_HEADER_LENGTH + 2 * SIZE_OF_LONG)));
+            payload, logBuffer.getStringAscii(encodedMsgOffset(offset + LOG_HEADER_LENGTH + SIZE_OF_LONG)));
+        assertEquals(reason, logBuffer.getStringAscii(encodedMsgOffset(
+            offset + LOG_HEADER_LENGTH + SIZE_OF_LONG + SIZE_OF_INT + payload.length())));
     }
 
     @Test
@@ -220,5 +234,100 @@ class ArchiveEventLoggerTest
             logBuffer.getLong(encodedMsgOffset(offset + LOG_HEADER_LENGTH), LITTLE_ENDIAN));
         assertEquals(newCatalogLength,
             logBuffer.getLong(encodedMsgOffset(offset + LOG_HEADER_LENGTH + SIZE_OF_LONG), LITTLE_ENDIAN));
+    }
+
+    @Test
+    void logReplicationSessionDone()
+    {
+        final long controlSessionId = 232345;
+        final long replicationId = 456456;
+        final long srcRecordingId = 345123;
+        final long replayPosition = 2345;
+        final long srcStopPosition = 3245;
+        final long dstRecordingId = 435675346;
+        final long dstStopPosition = 5685623;
+        final long position = 3425234;
+        final boolean isClosed = true;
+        final boolean isEndOfStream = true;
+        final boolean isSynced = false;
+
+        final int offset = ALIGNMENT * 3;
+        logBuffer.putLong(CAPACITY + TAIL_POSITION_OFFSET, offset);
+
+        logger.logReplicationSessionDone(
+            controlSessionId,
+            replicationId,
+            srcRecordingId,
+            replayPosition,
+            srcStopPosition,
+            dstRecordingId,
+            dstStopPosition,
+            position,
+            isClosed,
+            isEndOfStream,
+            isSynced);
+
+        verifyLogHeader(
+            logBuffer,
+            offset,
+            REPLICATION_SESSION_DONE.toEventCodeId(),
+            replicationSessionDoneLength(),
+            replicationSessionDoneLength());
+
+        final StringBuilder sb = new StringBuilder();
+        ArchiveEventDissector.dissectReplicationSessionDone(
+            logBuffer, encodedMsgOffset(offset), sb);
+
+        final String expectedMessagePattern =
+            "\\[[0-9]+\\.[0-9]+] ARCHIVE: REPLICATION_SESSION_DONE \\[67/67]: controlSessionId=" + controlSessionId +
+            " replicationId=" + replicationId + " srcRecordingId=" + srcRecordingId +
+            " replayPosition=" + replayPosition + " srcStopPosition=" + srcStopPosition +
+            " dstRecordingId=" + dstRecordingId + " dstStopPosition=" + dstStopPosition + " position=" + position +
+            " isClosed=" + isClosed + " isEndOfStream=" + isEndOfStream + " isSynced=" + isSynced;
+
+        assertThat(sb.toString(), Matchers.matchesPattern(expectedMessagePattern));
+    }
+
+    @Test
+    void logReplicationSessionStateChange()
+    {
+        final ChronoUnit oldState = ChronoUnit.ERAS;
+        final ChronoUnit newState = ChronoUnit.MILLENNIA;
+        final long replicationId = 456456;
+        final long srcRecordingId = 345123;
+        final long dstRecordingId = 435675346;
+        final long position = 3425234;
+        final String reason = "some text goes here";
+
+        final int offset = ALIGNMENT * 3;
+        logBuffer.putLong(CAPACITY + TAIL_POSITION_OFFSET, offset);
+
+        logger.logReplicationSessionStateChange(
+            oldState,
+            newState,
+            replicationId,
+            srcRecordingId,
+            dstRecordingId,
+            position,
+            reason);
+
+        verifyLogHeader(
+            logBuffer,
+            offset,
+            REPLICATION_SESSION_STATE_CHANGE.toEventCodeId(),
+            replicationSessionStateChangeLength(oldState, newState, reason),
+            replicationSessionStateChangeLength(oldState, newState, reason));
+
+        final StringBuilder sb = new StringBuilder();
+        ArchiveEventDissector.dissectReplicationSessionStateChange(
+            logBuffer, encodedMsgOffset(offset), sb);
+
+        final String expectedMessagePattern =
+            "\\[[0-9]+\\.[0-9]+] ARCHIVE: REPLICATION_SESSION_STATE_CHANGE \\[76/76]:" +
+            " replicationId=" + replicationId + " srcRecordingId=" + srcRecordingId +
+            " dstRecordingId=" + dstRecordingId + " position=" + position +
+            " " + oldState.name() + " -> " + newState.name() + " reason=\"" + reason + "\"";
+
+        assertThat(sb.toString(), Matchers.matchesPattern(expectedMessagePattern));
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -335,9 +335,9 @@ public class DataHeaderFlyweight extends HeaderFlyweight
     }
 
     /**
-     * Return offset in buffer for data
+     * Return offset in buffer for data.
      *
-     * @return offset of data in the buffer
+     * @return offset of data in the buffer.
      */
     public int dataOffset()
     {

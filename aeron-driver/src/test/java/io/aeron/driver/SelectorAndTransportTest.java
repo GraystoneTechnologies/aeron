@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -75,10 +75,12 @@ class SelectorAndTransportTest
 
     private final DataPacketDispatcher mockDispatcher = mock(DataPacketDispatcher.class);
     private final NetworkPublication mockPublication = mock(NetworkPublication.class);
+    private final DriverConductorProxy mockDriverConductorProxy = mock(DriverConductorProxy.class);
     private final ErrorHandler errorHandler = mock(ErrorHandler.class);
 
     private final DataTransportPoller dataTransportPoller = new DataTransportPoller(errorHandler);
-    private final ControlTransportPoller controlTransportPoller = new ControlTransportPoller(errorHandler);
+    private final ControlTransportPoller controlTransportPoller = new ControlTransportPoller(
+        errorHandler, mockDriverConductorProxy);
     private SendChannelEndpoint sendChannelEndpoint;
     private ReceiveChannelEndpoint receiveChannelEndpoint;
 
@@ -88,7 +90,9 @@ class SelectorAndTransportTest
         .cachedNanoClock(nanoClock)
         .senderCachedNanoClock(nanoClock)
         .receiverCachedNanoClock(nanoClock)
-        .receiveChannelEndpointThreadLocals(new ReceiveChannelEndpointThreadLocals());
+        .receiveChannelEndpointThreadLocals(new ReceiveChannelEndpointThreadLocals())
+        .senderPortManager(new WildcardPortManager(WildcardPortManager.EMPTY_PORT_RANGE, true))
+        .receiverPortManager(new WildcardPortManager(WildcardPortManager.EMPTY_PORT_RANGE, false));
 
     @BeforeEach
     void setup()
@@ -304,7 +308,7 @@ class SelectorAndTransportTest
                 controlMessagesReceived.value++;
                 return null;
             })
-            .when(mockPublication).onStatusMessage(any(), any());
+            .when(mockPublication).onStatusMessage(any(), any(), any());
 
         receiveChannelEndpoint = new ReceiveChannelEndpoint(
             RCV_DST, mockDispatcher, mockReceiveStatusIndicator, context);

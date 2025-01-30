@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -418,7 +418,7 @@ int aeron_agent_start(aeron_agent_runner_t *runner)
         return -1;
     }
 
-    pthread_attr_t attr;
+    aeron_thread_attr_t attr;
     int pthread_result;
     if ((pthread_result = aeron_thread_attr_init(&attr)) != 0)
     {
@@ -445,7 +445,7 @@ int aeron_agent_stop(aeron_agent_runner_t *runner)
         return -1;
     }
 
-    AERON_PUT_ORDERED(runner->running, false);
+    AERON_SET_RELEASE(runner->running, false);
 
     if (AERON_AGENT_STATE_STARTED == runner->state)
     {

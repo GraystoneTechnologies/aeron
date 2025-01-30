@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,6 +34,9 @@ extern "C"
 #define AERON_CLIENT_ERROR_BUFFER_FULL (-1003)
 #define AERON_CLIENT_MAX_LOCAL_ADDRESS_STR_LEN (64)
 
+#define AERON_RESPONSE_ADDRESS_TYPE_IPV4 (0x1)
+#define AERON_RESPONSE_ADDRESS_TYPE_IPV6 (0x2)
+
 typedef struct aeron_context_stct aeron_context_t;
 typedef struct aeron_stct aeron_t;
 typedef struct aeron_buffer_claim_stct aeron_buffer_claim_t;
@@ -64,6 +67,23 @@ typedef struct aeron_header_values_stct
     size_t position_bits_to_shift;
 }
 aeron_header_values_t;
+
+struct aeron_publication_error_values_stct
+{
+    int64_t registration_id;
+    int64_t destination_registration_id;
+    int32_t session_id;
+    int32_t stream_id;
+    int64_t receiver_id;
+    int64_t group_tag;
+    int16_t address_type;
+    uint16_t source_port;
+    uint8_t source_address[16];
+    int32_t error_code;
+    int32_t error_message_length;
+    uint8_t error_message[1];
+};
+typedef struct aeron_publication_error_values_stct aeron_publication_error_values_t;
 #pragma pack(pop)
 
 typedef struct aeron_subscription_stct aeron_subscription_t;
@@ -78,11 +98,13 @@ typedef struct aeron_client_registering_resource_stct aeron_async_add_exclusive_
 typedef struct aeron_client_registering_resource_stct aeron_async_add_subscription_t;
 typedef struct aeron_client_registering_resource_stct aeron_async_add_counter_t;
 typedef struct aeron_client_registering_resource_stct aeron_async_destination_t;
+typedef struct aeron_client_registering_resource_stct aeron_async_destination_by_id_t;
 
 typedef struct aeron_image_fragment_assembler_stct aeron_image_fragment_assembler_t;
 typedef struct aeron_image_controlled_fragment_assembler_stct aeron_image_controlled_fragment_assembler_t;
 typedef struct aeron_fragment_assembler_stct aeron_fragment_assembler_t;
 typedef struct aeron_controlled_fragment_assembler_stct aeron_controlled_fragment_assembler_t;
+
 
 /**
  * Environment variables and functions used for setting values of an aeron_context_t.
@@ -109,15 +131,49 @@ uint64_t aeron_context_get_keepalive_interval_ns(aeron_context_t *context);
 int aeron_context_set_resource_linger_duration_ns(aeron_context_t *context, uint64_t value);
 uint64_t aeron_context_get_resource_linger_duration_ns(aeron_context_t *context);
 
+#define AERON_CLIENT_IDLE_SLEEP_DURATION_ENV_VAR "AERON_CLIENT_IDLE_SLEEP_DURATION"
+
+uint64_t aeron_context_get_idle_sleep_duration_ns(aeron_context_t *context);
+int aeron_context_set_idle_sleep_duration_ns(aeron_context_t *context, uint64_t value);
+
 #define AERON_CLIENT_PRE_TOUCH_MAPPED_MEMORY_ENV_VAR "AERON_CLIENT_PRE_TOUCH_MAPPED_MEMORY"
 
 int aeron_context_set_pre_touch_mapped_memory(aeron_context_t *context, bool value);
 bool aeron_context_get_pre_touch_mapped_memory(aeron_context_t *context);
 
+#define AERON_CLIENT_NAME_ENV_VAR "AERON_CLIENT_NAME"
+
+int aeron_context_set_client_name(aeron_context_t *context, const char *value);
+const char *aeron_context_get_client_name(aeron_context_t *context);
+
 /**
  * The error handler to be called when an error occurs.
  */
 typedef void (*aeron_error_handler_t)(void *clientd, int errcode, const char *message);
+
+/**
+ * The error frame handler to be called when the driver notifies the client about an error frame being received.
+ * The data passed to this callback will only be valid for the lifetime of the callback. The user should use
+ * <code>aeron_publication_error_values_copy</code> if they require the data to live longer than that.
+ */
+typedef void (*aeron_publication_error_frame_handler_t)(void *clientd, aeron_publication_error_values_t *error_frame);
+
+/**
+ * Copy an existing aeron_publication_error_values_t to the supplied pointer. The caller is responsible for freeing the
+ * allocated memory using aeron_publication_error_values_delete when the copy is not longer required.
+ *
+ * @param dst to copy the values to.
+ * @param src to copy the values from.
+ * @return 0 if this is successful, -1 otherwise. Will set aeron_errcode() and aeron_errmsg() on failure.
+ */
+int aeron_publication_error_values_copy(aeron_publication_error_values_t **dst, aeron_publication_error_values_t *src);
+
+/**
+ * Delete a instance of aeron_publication_error_values_t that was created when making a copy
+ * (aeron_publication_error_values_copy). This should not be use on the pointer received via the aeron_frame_handler_t.
+ * @param to_delete to be deleted.
+ */
+void aeron_publication_error_values_delete(aeron_publication_error_values_t *to_delete);
 
 /**
  * Generalised notification callback.
@@ -127,6 +183,10 @@ typedef void (*aeron_notification_t)(void *clientd);
 int aeron_context_set_error_handler(aeron_context_t *context, aeron_error_handler_t handler, void *clientd);
 aeron_error_handler_t aeron_context_get_error_handler(aeron_context_t *context);
 void *aeron_context_get_error_handler_clientd(aeron_context_t *context);
+
+int aeron_context_set_publication_error_frame_handler(aeron_context_t *context, aeron_publication_error_frame_handler_t handler, void *clientd);
+aeron_publication_error_frame_handler_t aeron_context_get_publication_error_frame_handler(aeron_context_t *context);
+void *aeron_context_get_publication_error_frame_handler_clientd(aeron_context_t *context);
 
 /**
  * Function called by aeron_client_t to deliver notification that the media driver has added an aeron_publication_t
@@ -426,7 +486,7 @@ int aeron_async_add_exclusive_publication_poll(
  * @param on_available_image_handler to be called when images become available on the subscription.
  * @param on_available_image_clientd to be passed when images become available on the subscription.
  * @param on_unavailable_image_handler to be called when images go unavailable on the subscription.
- * @param on_available_image_clientd to be called when images go unavailable on the subscription.
+ * @param on_unavailable_image_clientd to be passed when images go unavailable on the subscription.
  * @return 0 for success or -1 for an error.
  */
 int aeron_async_add_subscription(
@@ -481,13 +541,38 @@ int aeron_async_add_counter(
     size_t label_buffer_length);
 
 /**
- * Poll the completion of the aeron_async_add_counter call.
+ * Poll the completion of the <code>aeron_async_add_counter</code> or <code>aeron_async_add_static_counter</code> calls.
  *
  * @param counter to set if completed successfully.
  * @param async to check for completion.
  * @return 0 for not complete (try again), 1 for completed successfully, or -1 for an error.
  */
 int aeron_async_add_counter_poll(aeron_counter_t **counter, aeron_async_add_counter_t *async);
+
+/**
+ * Asynchronously allocates or returns an existing static counter instance using specified <code>type_id</code> and
+ * <code>registration_id</code>. Such counter cannot be deleted and its lifecycle is decoupled from the client that created it.
+ * Returns an object to use to determine when the counter is available.
+ *
+ * @param async object to use for polling completion.
+ * @param client to add the counter to.
+ * @param type_id for the counter.
+ * @param key_buffer for the counter.
+ * @param key_buffer_length for the counter.
+ * @param label_buffer for the counter.
+ * @param label_buffer_length for the counter.
+ * @param registration_id that uniquely identifies the counter.
+ * @return 0 for success or -1 for an error.
+ */
+int aeron_async_add_static_counter(
+    aeron_async_add_counter_t **async,
+    aeron_t *client,
+    int32_t type_id,
+    const uint8_t *key_buffer,
+    size_t key_buffer_length,
+    const char *label_buffer,
+    size_t label_buffer_length,
+    int64_t registration_id);
 
 typedef struct aeron_on_available_counter_pair_stct
 {
@@ -590,7 +675,8 @@ typedef struct aeron_counter_value_descriptor_stct
     int64_t counter_value;
     int64_t registration_id;
     int64_t owner_id;
-    uint8_t pad1[(2 * AERON_COUNTER_CACHE_LINE_LENGTH) - (3 * sizeof(int64_t))];
+    int64_t reference_id;
+    uint8_t pad1[(2 * AERON_COUNTER_CACHE_LINE_LENGTH) - (4 * sizeof(int64_t))];
 }
 aeron_counter_value_descriptor_t;
 
@@ -618,6 +704,7 @@ aeron_counter_metadata_descriptor_t;
 
 #define AERON_COUNTER_MAX_LABEL_LENGTH sizeof(((aeron_counter_metadata_descriptor_t *)NULL)->label)
 #define AERON_COUNTER_MAX_KEY_LENGTH sizeof(((aeron_counter_metadata_descriptor_t *)NULL)->key)
+#define AERON_COUNTER_MAX_CLIENT_NAME_LENGTH (100)
 
 #define AERON_COUNTER_RECORD_UNUSED (0)
 #define AERON_COUNTER_RECORD_ALLOCATED (1)
@@ -626,6 +713,7 @@ aeron_counter_metadata_descriptor_t;
 #define AERON_COUNTER_REGISTRATION_ID_DEFAULT INT64_C(0)
 #define AERON_COUNTER_NOT_FREE_TO_REUSE (INT64_MAX)
 #define AERON_COUNTER_OWNER_ID_DEFAULT INT64_C(0)
+#define AERON_COUNTER_REFERENCE_ID_DEFAULT INT64_C(0)
 
 #define AERON_NULL_COUNTER_ID (-1)
 
@@ -680,6 +768,17 @@ void aeron_counters_reader_foreach_counter(
     aeron_counters_reader_t *counters_reader, aeron_counters_reader_foreach_counter_func_t func, void *clientd);
 
 /**
+ * Iterate over allocated counters and find the first matching a given type id and registration id.
+ *
+ * @param counters_reader
+ * @param type_id to find.
+ * @param registration_id to find.
+ * @return the counter id if found otherwise AERON_NULL_COUNTER_ID.
+ */
+int32_t aeron_counters_reader_find_by_type_id_and_registration_id(
+    aeron_counters_reader_t *counters_reader, int32_t type_id, int64_t registration_id);
+
+/**
  * Get the current max counter id.
  *
  * @param reader to query
@@ -700,7 +799,7 @@ int64_t *aeron_counters_reader_addr(aeron_counters_reader_t *counters_reader, in
  * Get the registration id assigned to a counter.
  *
  * @param counters_reader representing the this pointer.
- * @param counter_id      for which the registration id requested.
+ * @param counter_id      for which the registration id is requested.
  * @param registration_id pointer for value to be set on success.
  * @return -1 on failure, 0 on success.
  */
@@ -711,12 +810,24 @@ int aeron_counters_reader_counter_registration_id(
  * Get the owner id assigned to a counter which will typically be the client id.
  *
  * @param counters_reader representing the this pointer.
- * @param counter_id      for which the registration id requested.
+ * @param counter_id      for which the owner id is requested.
  * @param owner_id        pointer for value to be set on success.
  * @return -1 on failure, 0 on success.
  */
 int aeron_counters_reader_counter_owner_id(
     aeron_counters_reader_t *counters_reader, int32_t counter_id, int64_t *owner_id);
+
+/**
+ * Get the reference id assigned to a counter which will typically be the registration id of an associated Image,
+ * Subscription, Publication, etc.
+ *
+ * @param counters_reader representing the this pointer.
+ * @param counter_id      for which the reference id is requested.
+ * @param reference_id    pointer for value to be set on success.
+ * @return -1 on failure, 0 on success.
+ */
+int aeron_counters_reader_counter_reference_id(
+    aeron_counters_reader_t *counters_reader, int32_t counter_id, int64_t *reference_id);
 
 /**
  * Get the state for a counter.
@@ -738,6 +849,17 @@ int aeron_counters_reader_counter_state(aeron_counters_reader_t *counters_reader
  */
 int aeron_counters_reader_counter_type_id(
     aeron_counters_reader_t *counters_reader, int32_t counter_id, int32_t *type_id);
+
+/**
+ * Get a pointer to the key of a counter's metadata
+ *
+ * @param counters_reader that contains the counter
+ * @param counter_id to find
+ * @param key_p out pointer set to location of metadata key
+ * @return -1 on failure, 0 on success.
+ */
+int aeron_counters_reader_metadata_key(
+    aeron_counters_reader_t *counters_reader, int32_t counter_id, uint8_t **key_p);
 
 /**
  * Get the label for a counter.
@@ -901,7 +1023,7 @@ typedef struct aeron_publication_constants_stct
     /**
      * Maximum length of a message payload that fits within a message fragment.
      *
-     * This is he MTU length minus the message fragment header length.
+     * This is the MTU length minus the message fragment header length.
      */
     size_t max_payload_length;
 
@@ -1074,6 +1196,20 @@ int aeron_publication_async_remove_destination(
     aeron_async_destination_t **async, aeron_t *client, aeron_publication_t *publication, const char *uri);
 
 /**
+ * Remove a destination manually from a multi-destination-cast publication.
+ *
+ * @param async object to use for polling completion.
+ * @param publication to remove destination from.
+ * @param destination_registration_id for the destination to remove.
+ * @return 0 for success and -1 for error.
+ */
+int aeron_publication_async_remove_destination_by_id(
+    aeron_async_destination_t **async,
+    aeron_t *client,
+    aeron_publication_t *publication,
+    int64_t destination_registration_id);
+
+/**
  * Poll the completion of the add/remove of a destination to/from a publication.
  *
  * @param async to check for completion.
@@ -1108,6 +1244,20 @@ int aeron_exclusive_publication_async_remove_destination(
     aeron_t *client,
     aeron_exclusive_publication_t *publication,
     const char *uri);
+
+/**
+ * Remove a destination manually from a multi-destination-cast publication.
+ *
+ * @param async object to use for polling completion.
+ * @param publication to remove destination from.
+ * @param destination_registration_id for the destination to remove.
+ * @return 0 for success and -1 for error.
+ */
+int aeron_exclusive_publication_async_remove_destination_by_id(
+    aeron_async_destination_t **async,
+    aeron_t *client,
+    aeron_exclusive_publication_t *publication,
+    int64_t destination_registration_id);
 
 /**
  * Poll the completion of the add/remove of a destination to/from an exclusive publication.
@@ -1438,6 +1588,21 @@ int64_t aeron_header_position(aeron_header_t *header);
  */
 size_t aeron_header_position_bits_to_shift(aeron_header_t *header);
 
+/**
+ * Calculates the offset of the frame immediately after this one.
+ *
+ * @return the offset of the next frame.
+ */
+int32_t aeron_header_next_term_offset(aeron_header_t *header);
+
+/**
+ * Get a pointer to the context associated with this message. Only valid during poll handling. Is normally a
+ * pointer to an Image instance.
+ *
+ * @return a pointer to the context associated with this message.
+ */
+void *aeron_header_context(aeron_header_t *header);
+
 typedef struct aeron_subscription_constants_stct
 {
     /**
@@ -1578,6 +1743,7 @@ aeron_image_t *aeron_subscription_image_at_index(aeron_subscription_t *subscript
  *
  * @param subscription to iterate over.
  * @param handler to be called for each image.
+ * @param clientd to be passed to the handler.
  */
 void aeron_subscription_for_each_image(
     aeron_subscription_t *subscription, void (*handler)(aeron_image_t *image, void *clientd), void *clientd);
@@ -1705,7 +1871,7 @@ int aeron_subscription_resolved_endpoint(aeron_subscription_t *subscription, con
 
 /**
  * Retrieves the channel URI for this subscription with any wildcard ports filled in. If the channel is not UDP or
- * does not have a wildcard port (`0`), then it will return the original URI.
+ * does not have a wildcard port (<code>0</code>), then it will return the original URI.
  *
  * @param subscription to query
  * @param uri buffer to hold the resolved uri
@@ -1823,6 +1989,15 @@ int aeron_image_set_position(aeron_image_t *image, int64_t position);
  * @return true if at the end of the stream or false if not.
  */
 bool aeron_image_is_end_of_stream(aeron_image_t *image);
+
+/**
+ * The position the stream reached when EOS was received from the publisher. The position will be
+ * INT64_MAX until the stream ends and EOS is set.
+ *
+ * @param image to check.
+ * @return position the stream reached when EOS was received from the publisher.
+ */
+int64_t aeron_image_end_of_stream_position(aeron_image_t *image);
 
 /**
  * Count of observed active transports within the image liveness timeout.
@@ -2019,7 +2194,7 @@ int aeron_image_controlled_fragment_assembler_delete(aeron_image_controlled_frag
  * @param header representing the meta data for the data.
  * @return The action to be taken with regard to the stream position after the callback.
  */
-aeron_controlled_fragment_handler_action_t aeron_controlled_image_fragment_assembler_handler(
+aeron_controlled_fragment_handler_action_t aeron_image_controlled_fragment_assembler_handler(
     void *clientd, const uint8_t *buffer, size_t length, aeron_header_t *header);
 
 /**
@@ -2147,6 +2322,13 @@ bool aeron_counter_is_closed(aeron_counter_t *counter);
 const char *aeron_version_full(void);
 
 /**
+ * Return version text.
+ *
+ * @return version text.
+ */
+const char *aeron_version_text(void);
+
+/**
  * Return major version number.
  *
  * @return major version number.
@@ -2166,6 +2348,13 @@ int aeron_version_minor(void);
  * @return patch version number.
  */
 int aeron_version_patch(void);
+
+/**
+ * Return the git sha for the current build.
+ *
+ * @return git version
+ */
+const char *aeron_version_gitsha(void);
 
 /**
  * Clock function used by aeron.
@@ -2257,7 +2446,7 @@ const char *aeron_errmsg(void);
  *
  * @param path buffer to store the path.
  * @param path_length space available in the buffer
- * @return -1 if there is an issue or the number of bytes written to path excluding the terminator `\0`. If this
+ * @return -1 if there is an issue or the number of bytes written to path excluding the terminator <code>\0</code>. If this
  * is equal to or greater than the path_length then the path has been truncated.
  */
 int aeron_default_path(char *path, size_t path_length);

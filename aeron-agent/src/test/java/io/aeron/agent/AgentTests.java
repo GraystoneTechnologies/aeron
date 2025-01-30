@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -63,7 +63,8 @@ final class AgentTests
         final int captureLength,
         final int length)
     {
-        assertEquals(HEADER_LENGTH + LOG_HEADER_LENGTH + captureLength,
+        assertEquals(
+            HEADER_LENGTH + LOG_HEADER_LENGTH + captureLength,
             logBuffer.getInt(lengthOffset(recordOffset), LITTLE_ENDIAN));
         assertEquals(eventCodeId, logBuffer.getInt(typeOffset(recordOffset), LITTLE_ENDIAN));
         assertEquals(captureLength, logBuffer.getInt(encodedMsgOffset(recordOffset), LITTLE_ENDIAN));

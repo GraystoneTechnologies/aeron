@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,15 +15,37 @@
  */
 package io.aeron.cluster;
 
-import io.aeron.Aeron;
-import io.aeron.ChannelUri;
-import io.aeron.ConcurrentPublication;
-import io.aeron.Counter;
-import io.aeron.ExclusivePublication;
-import io.aeron.Subscription;
-import io.aeron.UnavailableImageHandler;
+import static io.aeron.AeronCounters.*;
+import static io.aeron.cluster.ClusterControl.ToggleState.*;
+import static io.aeron.cluster.ConsensusModule.CLUSTER_ACTION_FLAGS_STANDBY_SNAPSHOT;
+import static io.aeron.cluster.ConsensusModule.Configuration.SESSION_LIMIT_MSG;
+import static io.aeron.cluster.ConsensusModuleAgent.SLOW_TICK_INTERVAL_NS;
+import static io.aeron.cluster.client.AeronCluster.Configuration.PROTOCOL_SEMANTIC_VERSION;
+import static java.lang.Boolean.TRUE;
+import static org.agrona.concurrent.status.CountersReader.COUNTER_LENGTH;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+import java.util.concurrent.TimeUnit;
+import java.util.function.LongConsumer;
+
+import io.aeron.cluster.client.ClusterEvent;
+import org.agrona.collections.MutableLong;
+import org.agrona.concurrent.AgentInvoker;
+import org.agrona.concurrent.CountedErrorHandler;
+import org.agrona.concurrent.NoOpIdleStrategy;
+import org.agrona.concurrent.status.AtomicCounter;
+import org.agrona.concurrent.status.CountersManager;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
+import org.mockito.Mockito;
+
+import io.aeron.*;
 import io.aeron.archive.client.AeronArchive;
-import io.aeron.archive.client.ControlResponsePoller;
 import io.aeron.cluster.codecs.CloseReason;
 import io.aeron.cluster.codecs.ClusterAction;
 import io.aeron.cluster.codecs.EventCode;
@@ -37,39 +59,14 @@ import io.aeron.status.ReadableCounter;
 import io.aeron.test.TestContexts;
 import io.aeron.test.Tests;
 import io.aeron.test.cluster.TestClusterClock;
-import org.agrona.collections.MutableLong;
-import org.agrona.concurrent.AgentInvoker;
-import org.agrona.concurrent.CountedErrorHandler;
-import org.agrona.concurrent.NoOpIdleStrategy;
-import org.agrona.concurrent.status.AtomicCounter;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
-import org.mockito.ArgumentCaptor;
-import org.mockito.InOrder;
-import org.mockito.MockedStatic;
-import org.mockito.Mockito;
 
-import java.util.concurrent.TimeUnit;
-import java.util.function.LongConsumer;
-
-import static io.aeron.cluster.ClusterControl.ToggleState.*;
-import static io.aeron.cluster.ConsensusModule.Configuration.SESSION_LIMIT_MSG;
-import static io.aeron.cluster.ConsensusModuleAgent.SLOW_TICK_INTERVAL_NS;
-import static io.aeron.cluster.client.AeronCluster.Configuration.PROTOCOL_SEMANTIC_VERSION;
-import static java.lang.Boolean.TRUE;
-import static java.util.Collections.emptyList;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.Mockito.*;
-
-public class ConsensusModuleAgentTest
+class ConsensusModuleAgentTest
 {
     private static final long SLOW_TICK_INTERVAL_MS = TimeUnit.NANOSECONDS.toMillis(SLOW_TICK_INTERVAL_NS);
     private static final String RESPONSE_CHANNEL_ONE = "aeron:udp?endpoint=localhost:11111";
     private static final String RESPONSE_CHANNEL_TWO = "aeron:udp?endpoint=localhost:22222";
+    private static final int SCHEMA_ID = 17;
+    private static final int UPDATE_INTERVAL_MS = 19;
 
     private final EgressPublisher mockEgressPublisher = mock(EgressPublisher.class);
     private final LogPublisher mockLogPublisher = mock(LogPublisher.class);
@@ -78,6 +75,8 @@ public class ConsensusModuleAgentTest
     private final ExclusivePublication mockExclusivePublication = mock(ExclusivePublication.class);
     private final Counter mockTimedOutClientCounter = mock(Counter.class);
     private final LongConsumer mockTimeConsumer = mock(LongConsumer.class);
+    private final CountersManager countersManager = Tests.newCountersManager(2 * COUNTER_LENGTH);
+    private long registrationId = 20;
 
     private final ConsensusModule.Context ctx = TestContexts.localhostConsensusModule()
         .errorHandler(Tests::onError)
@@ -86,7 +85,10 @@ public class ConsensusModuleAgentTest
         .moduleStateCounter(mock(Counter.class))
         .commitPositionCounter(mock(Counter.class))
         .controlToggleCounter(mock(Counter.class))
+        .nodeControlToggleCounter(mock(Counter.class))
         .clusterNodeRoleCounter(mock(Counter.class))
+        .electionCounter(mock(Counter.class))
+        .leadershipTermIdCounter(mock(Counter.class))
         .timedOutClientCounter(mockTimedOutClientCounter)
         .clusterTimeConsumerSupplier((ctx) -> mockTimeConsumer)
         .idleStrategySupplier(NoOpIdleStrategy::new)
@@ -101,14 +103,20 @@ public class ConsensusModuleAgentTest
         .egressPublisher(mockEgressPublisher)
         .dutyCycleTracker(new DutyCycleTracker());
 
+    private Counter newCounter(final String name, final int typeId)
+    {
+        final AtomicCounter atomicCounter = countersManager.newCounter(name, typeId);
+        return new Counter(countersManager, ++registrationId, atomicCounter.id());
+    }
+
     @BeforeEach
-    public void before()
+    void before()
     {
         when(mockAeron.conductorAgentInvoker()).thenReturn(mock(AgentInvoker.class));
         when(mockEgressPublisher.sendEvent(any(), anyLong(), anyInt(), any(), any())).thenReturn(TRUE);
         when(mockLogPublisher.appendSessionClose(anyInt(), any(), anyLong(), anyLong(), any())).thenReturn(TRUE);
         when(mockLogPublisher.appendSessionOpen(any(), anyLong(), anyLong())).thenReturn(128L);
-        when(mockLogPublisher.appendClusterAction(anyLong(), anyLong(), any(ClusterAction.class)))
+        when(mockLogPublisher.appendClusterAction(anyLong(), anyLong(), any(ClusterAction.class), anyInt()))
             .thenReturn(TRUE);
         when(mockAeron.addPublication(anyString(), anyInt())).thenReturn(mockResponsePublication);
         when(mockAeron.getPublication(anyLong())).thenReturn(mockResponsePublication);
@@ -117,20 +125,11 @@ public class ConsensusModuleAgentTest
         when(mockAeron.addSubscription(anyString(), anyInt(), eq(null), any(UnavailableImageHandler.class)))
             .thenReturn(mock(Subscription.class));
         when(mockResponsePublication.isConnected()).thenReturn(TRUE);
+        when(mockResponsePublication.availableWindow()).thenReturn(Long.MAX_VALUE);
     }
 
     @Test
-    public void shouldGenerateRoleNameWhenNotSet()
-    {
-        final TestClusterClock clock = new TestClusterClock(TimeUnit.MILLISECONDS);
-        ctx.epochClock(clock).clusterClock(clock);
-
-        final ConsensusModuleAgent agent = new ConsensusModuleAgent(ctx);
-        assertEquals("consensus-module_0_0", agent.roleName());
-    }
-
-    @Test
-    public void shouldUseAssignedRoleName()
+    void shouldUseAssignedRoleName()
     {
         final String expectedRoleName = "test-role-name";
         final TestClusterClock clock = new TestClusterClock(TimeUnit.MILLISECONDS);
@@ -143,7 +142,7 @@ public class ConsensusModuleAgentTest
     }
 
     @Test
-    public void shouldLimitActiveSessions()
+    void shouldLimitActiveSessions()
     {
         final TestClusterClock clock = new TestClusterClock(TimeUnit.MILLISECONDS);
         ctx.maxConcurrentSessions(1)
@@ -158,7 +157,7 @@ public class ConsensusModuleAgentTest
         Tests.setField(agent, "appendPosition", mock(ReadableCounter.class));
         agent.onSessionConnect(correlationIdOne, 2, PROTOCOL_SEMANTIC_VERSION, RESPONSE_CHANNEL_ONE, new byte[0]);
 
-        clock.update(17, TimeUnit.MILLISECONDS);
+        clock.update(UPDATE_INTERVAL_MS, TimeUnit.MILLISECONDS);
         agent.doWork();
         verify(mockTimeConsumer).accept(clock.time());
 
@@ -175,7 +174,7 @@ public class ConsensusModuleAgentTest
     }
 
     @Test
-    public void shouldCloseInactiveSession()
+    void shouldCloseInactiveSession()
     {
         final TestClusterClock clock = new TestClusterClock(TimeUnit.MILLISECONDS);
         final long startMs = SLOW_TICK_INTERVAL_MS;
@@ -214,7 +213,7 @@ public class ConsensusModuleAgentTest
     }
 
     @Test
-    public void shouldCloseTerminatedSession()
+    void shouldCloseTerminatedSession()
     {
         final TestClusterClock clock = new TestClusterClock(TimeUnit.MILLISECONDS);
         final long startMs = SLOW_TICK_INTERVAL_MS;
@@ -254,80 +253,49 @@ public class ConsensusModuleAgentTest
     }
 
     @Test
-    public void shouldSuspendThenResume()
+    void shouldSuspendThenResume()
     {
         final TestClusterClock clock = new TestClusterClock(TimeUnit.MILLISECONDS);
+        final Counter stateCounter = newCounter("state counter", CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID);
+        final Counter controlToggle = newCounter("control toggle", CLUSTER_CONTROL_TOGGLE_TYPE_ID);
 
-        final MutableLong stateValue = new MutableLong();
-        final Counter mockState = mock(Counter.class);
-        when(mockState.get()).thenAnswer((invocation) -> stateValue.value);
-        doAnswer(
-            (invocation) ->
-            {
-                stateValue.value = invocation.getArgument(0);
-                return null;
-            })
-            .when(mockState).set(anyLong());
+        controlToggle.set(NEUTRAL.code());
 
-        final MutableLong controlValue = new MutableLong(NEUTRAL.code());
-        final Counter mockControlToggle = mock(Counter.class);
-        when(mockControlToggle.get()).thenAnswer((invocation) -> controlValue.value);
-
-        doAnswer(
-            (invocation) ->
-            {
-                controlValue.value = invocation.getArgument(0);
-                return null;
-            })
-            .when(mockControlToggle).set(anyLong());
-
-        doAnswer(
-            (invocation) ->
-            {
-                final long expected = invocation.getArgument(0);
-                if (expected == controlValue.value)
-                {
-                    controlValue.value = invocation.getArgument(1);
-                    return true;
-                }
-                return false;
-            })
-            .when(mockControlToggle).compareAndSet(anyLong(), anyLong());
-
-        ctx.moduleStateCounter(mockState);
-        ctx.controlToggleCounter(mockControlToggle);
-        ctx.epochClock(clock).clusterClock(clock);
+        ctx.moduleStateCounter(stateCounter)
+            .controlToggleCounter(controlToggle)
+            .epochClock(clock)
+            .clusterClock(clock);
 
         final ConsensusModuleAgent agent = new ConsensusModuleAgent(ctx);
         Tests.setField(agent, "appendPosition", mock(ReadableCounter.class));
 
-        assertEquals(ConsensusModule.State.INIT.code(), stateValue.get());
+        assertEquals(ConsensusModule.State.INIT.code(), stateCounter.get());
 
         agent.state(ConsensusModule.State.ACTIVE);
         agent.role(Cluster.Role.LEADER);
-        assertEquals(ConsensusModule.State.ACTIVE.code(), stateValue.get());
+        assertEquals(ConsensusModule.State.ACTIVE.code(), stateCounter.get());
 
-        SUSPEND.toggle(mockControlToggle);
+        SUSPEND.toggle(controlToggle);
         clock.update(SLOW_TICK_INTERVAL_MS, TimeUnit.MILLISECONDS);
         agent.doWork();
 
-        assertEquals(ConsensusModule.State.SUSPENDED.code(), stateValue.get());
-        assertEquals(SUSPEND.code(), controlValue.get());
+        assertEquals(ConsensusModule.State.SUSPENDED.code(), stateCounter.get());
+        assertEquals(SUSPEND.code(), controlToggle.get());
 
-        RESUME.toggle(mockControlToggle);
+        RESUME.toggle(controlToggle);
         clock.update(SLOW_TICK_INTERVAL_MS * 2, TimeUnit.MILLISECONDS);
         agent.doWork();
 
-        assertEquals(ConsensusModule.State.ACTIVE.code(), stateValue.get());
-        assertEquals(NEUTRAL.code(), controlValue.get());
+        assertEquals(ConsensusModule.State.ACTIVE.code(), stateCounter.get());
+        assertEquals(NEUTRAL.code(), controlToggle.get());
 
         final InOrder inOrder = Mockito.inOrder(mockLogPublisher);
-        inOrder.verify(mockLogPublisher).appendClusterAction(anyLong(), anyLong(), eq(ClusterAction.SUSPEND));
-        inOrder.verify(mockLogPublisher).appendClusterAction(anyLong(), anyLong(), eq(ClusterAction.RESUME));
+        inOrder.verify(mockLogPublisher).appendClusterAction(anyLong(), anyLong(), eq(ClusterAction.SUSPEND), anyInt());
+        inOrder.verify(mockLogPublisher).appendClusterAction(anyLong(), anyLong(), eq(ClusterAction.RESUME), anyInt());
     }
 
     @Test
-    public void shouldThrowClusterTerminationExceptionUponShutdown()
+    void shouldThrowClusterTerminationExceptionUponShutdown()
     {
         final TestClusterClock clock = new TestClusterClock(TimeUnit.MILLISECONDS);
         final CountedErrorHandler countedErrorHandler = mock(CountedErrorHandler.class);
@@ -357,19 +325,27 @@ public class ConsensusModuleAgentTest
 
     @ParameterizedTest
     @CsvSource(value = {
-        "null, aeron:udp?endpoint=acme:2040, aeron:udp?endpoint=acme:2040",
-        ", aeron:ipc, aeron:ipc",
-        "aeron:udp?endpoint=host1:5050|interface=eth0|mtu=1440, aeron:udp?endpoint=localhost:8080|mtu=8000, " +
-            "aeron:udp?endpoint=localhost:8080|interface=eth0|mtu=1440",
-        "aeron:udp?endpoint=node0:21300|eos=false, aeron:udp?mtu=8000|interface=if1|eos=true|ttl=100, " +
-            "aeron:udp?endpoint=node0:21300|eos=false"
+        "false, null, aeron:udp?endpoint=acme:2040, aeron:udp?endpoint=acme:2040",
+        "true, aeron:udp?endpoint=host:port, aeron:ipc, aeron:ipc",
+        "false, null, aeron:ipc, aeron:ipc",
+        "false, aeron:udp?endpoint=host:port, aeron:ipc, aeron:udp?endpoint=host:port",
+        "false, aeron:udp?endpoint=host1:5050|interface=eth0|mtu=1440, " +
+            "aeron:udp?endpoint=localhost:8080|mtu=8k|alias=test, " +
+            "aeron:udp?endpoint=host1:5050|interface=eth0|mtu=1440|alias=test",
+        "false, aeron:udp?endpoint=node0:21300|eos=false, aeron:udp?mtu=8000|interface=if1|eos=true|ttl=100, " +
+            "aeron:udp?endpoint=node0:21300|eos=false|mtu=8000|interface=if1|ttl=100"
     }, nullValues = "null")
     void responseChannelIsBuiltBasedOnTheEgressChannel(
-        final String egressChannel, final String responseChannel, final String expectedResponseChannel)
+        final boolean isIpcIngressAllowed,
+        final String egressChannel,
+        final String responseChannel,
+        final String expectedResponseChannel)
     {
         final TestClusterClock clock = new TestClusterClock(TimeUnit.MILLISECONDS);
-        ctx.epochClock(clock).clusterClock(clock);
-        ctx.egressChannel(egressChannel);
+        ctx.epochClock(clock)
+            .clusterClock(clock)
+            .egressChannel(egressChannel)
+            .isIpcIngressAllowed(isIpcIngressAllowed);
 
         final ConsensusModuleAgent agent = new ConsensusModuleAgent(ctx);
         agent.state(ConsensusModule.State.ACTIVE);
@@ -387,33 +363,41 @@ public class ConsensusModuleAgentTest
     }
 
     @Test
-    @Disabled
-    void shouldSkipRecoveryWhenUsingBootStrapState()
+    void shouldPublishLogMessageButNotSnapshotOnStandbySnapshot()
     {
-        try (MockedStatic<AeronArchive> aeronArchiveStaticMock = mockStatic(AeronArchive.class))
-        {
-            final AeronArchive aeronArchiveMock = mock(AeronArchive.class);
-            final ControlResponsePoller mockControlResponsePoller = mock(ControlResponsePoller.class);
-            final Subscription subscription = mock(Subscription.class);
-            final RecordingLog recordingLog = mock(RecordingLog.class);
-            ctx.recordingLog(recordingLog);
-            aeronArchiveStaticMock.when(() -> AeronArchive.connect(any(AeronArchive.Context.class)))
-                .thenReturn(aeronArchiveMock);
-            when(aeronArchiveMock.controlResponsePoller()).thenReturn(mockControlResponsePoller);
-            when(mockControlResponsePoller.subscription()).thenReturn(subscription);
+        final TestClusterClock clock = new TestClusterClock(TimeUnit.MILLISECONDS);
+        final Counter stateCounter = newCounter("state counter", CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID);
+        final Counter controlToggle = newCounter("control toggle", CLUSTER_CONTROL_TOGGLE_TYPE_ID);
 
-            final ConsensusModuleStateExport consensusModuleStateExport = new ConsensusModuleStateExport(
-                1, 2, 3, 4, 5, emptyList(), emptyList(), emptyList());
+        controlToggle.set(NEUTRAL.code());
 
-            final TestClusterClock clock = new TestClusterClock(TimeUnit.MILLISECONDS);
-            ctx
-                .bootstrapState(consensusModuleStateExport)
-                .epochClock(clock)
-                .clusterClock(clock);
+        ctx.moduleStateCounter(stateCounter)
+            .controlToggleCounter(controlToggle)
+            .epochClock(clock)
+            .clusterClock(clock);
 
-            final ConsensusModuleAgent consensusModuleAgent = new ConsensusModuleAgent(ctx);
-            consensusModuleAgent.onStart();
-        }
+        final ConsensusModuleAgent agent = new ConsensusModuleAgent(ctx);
+        Tests.setField(agent, "appendPosition", mock(ReadableCounter.class));
+
+        assertEquals(ConsensusModule.State.INIT.code(), stateCounter.get());
+
+        agent.state(ConsensusModule.State.ACTIVE);
+        agent.role(Cluster.Role.LEADER);
+        assertEquals(ConsensusModule.State.ACTIVE.code(), stateCounter.get());
+
+        assertTrue(STANDBY_SNAPSHOT.toggle(controlToggle));
+        clock.update(SLOW_TICK_INTERVAL_MS, TimeUnit.MILLISECONDS);
+        agent.doWork();
+
+        assertEquals(ConsensusModule.State.ACTIVE.code(), stateCounter.get());
+        assertEquals(NEUTRAL.code(), stateCounter.get());
+
+        final InOrder inOrder = Mockito.inOrder(mockLogPublisher);
+        inOrder.verify(mockLogPublisher).appendClusterAction(
+            anyLong(), anyLong(), eq(ClusterAction.SNAPSHOT), eq(CLUSTER_ACTION_FLAGS_STANDBY_SNAPSHOT));
+
+        agent.onReplayClusterAction(-1, 2048, 0, ClusterAction.SNAPSHOT, CLUSTER_ACTION_FLAGS_STANDBY_SNAPSHOT);
+        assertEquals(ConsensusModule.State.ACTIVE.code(), stateCounter.get());
     }
 
     @Test
@@ -450,7 +434,7 @@ public class ConsensusModuleAgentTest
     }
 
     @Test
-    void onCommmitPositionShouldUpdateTimeOfLastLeaderMessageReceived()
+    void onCommitPositionShouldUpdateTimeOfLastLeaderMessageReceived()
     {
         final TestClusterClock clock = new TestClusterClock(TimeUnit.NANOSECONDS);
         ctx.clusterClock(clock)
@@ -466,5 +450,65 @@ public class ConsensusModuleAgentTest
         consensusModuleAgent.onCommitPosition(leadershipTermId, 555, 0);
 
         assertEquals(444, consensusModuleAgent.timeOfLastLeaderUpdateNs());
+    }
+
+    @Test
+    void shouldDelegateHandlingToRegisteredExtension()
+    {
+        final ConsensusModuleExtension consensusModuleExtension = mock(ConsensusModuleExtension.class, "used adapter");
+        when(consensusModuleExtension.supportedSchemaId()).thenReturn(SCHEMA_ID);
+        final TestClusterClock clock = new TestClusterClock(TimeUnit.MILLISECONDS);
+        ctx.epochClock(clock)
+            .clusterClock(clock)
+            .consensusModuleExtension(consensusModuleExtension);
+
+        final ConsensusModuleAgent agent = new ConsensusModuleAgent(ctx);
+        agent.onExtensionMessage(0, 1, SCHEMA_ID, 0, null, 0, 0, null);
+
+        verify(consensusModuleExtension)
+            .onIngressExtensionMessage(0, 1, SCHEMA_ID, 0, null, 0, 0, null);
+    }
+
+    @Test
+    void shouldThrowExceptionOnUnknownSchemaAndNoAdapter()
+    {
+        final TestClusterClock clock = new TestClusterClock(TimeUnit.MILLISECONDS);
+        final CountedErrorHandler mockErrorHandler = mock(CountedErrorHandler.class);
+        ctx.countedErrorHandler(mockErrorHandler)
+            .epochClock(clock)
+            .clusterClock(clock);
+
+        final ConsensusModuleAgent agent = new ConsensusModuleAgent(ctx);
+
+        agent.onExtensionMessage(0, 0, SCHEMA_ID, 0, null, 0, 0, null);
+        verify(mockErrorHandler).onError(any(ClusterEvent.class));
+    }
+
+    @Test
+    void shouldHandlePaddingMessageAtEndOfTerm()
+    {
+        final TestClusterClock clock = new TestClusterClock(TimeUnit.MILLISECONDS);
+        final Counter stateCounter = newCounter("state counter", CLUSTER_CONSENSUS_MODULE_STATE_TYPE_ID);
+        final Counter controlToggle = newCounter("control toggle", CLUSTER_CONTROL_TOGGLE_TYPE_ID);
+
+        controlToggle.set(NEUTRAL.code());
+
+        ctx.moduleStateCounter(stateCounter)
+            .controlToggleCounter(controlToggle)
+            .epochClock(clock)
+            .clusterClock(clock);
+
+        final ConsensusModuleAgent agent = new ConsensusModuleAgent(ctx);
+        Tests.setField(agent, "appendPosition", mock(ReadableCounter.class));
+
+        assertEquals(ConsensusModule.State.INIT.code(), stateCounter.get());
+
+        agent.state(ConsensusModule.State.ACTIVE);
+        agent.role(Cluster.Role.LEADER);
+        assertEquals(ConsensusModule.State.ACTIVE.code(), stateCounter.get());
+
+        final LogAdapter mockLogAdapter = mock(LogAdapter.class);
+
+        agent.replayLogPoll(mockLogAdapter, 65536);
     }
 }

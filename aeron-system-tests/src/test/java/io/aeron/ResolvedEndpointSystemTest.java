@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -265,7 +265,7 @@ class ResolvedEndpointSystemTest
     @InterruptAfter(5)
     void shouldAllowSystemAssignedPortOnDynamicMultiDestinationPublication()
     {
-        final String mdcUri = "aeron:udp?control=localhost:0";
+        final String mdcUri = "aeron:udp?control=localhost:0|control-mode=dynamic";
 
         try (Publication pub = client.addPublication(mdcUri, STREAM_ID))
         {

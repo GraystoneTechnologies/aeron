@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 package io.aeron.archive;
 
 import io.aeron.Aeron;
+import io.aeron.AeronCounters;
 import io.aeron.Counter;
 import io.aeron.test.Tests;
 import org.agrona.MutableDirectBuffer;
@@ -44,7 +45,7 @@ class ArchiveCountersTest
         final long archiveId = -1832178932131546L;
         final String expectedLabel = name + " - archiveId=" + archiveId;
         final Aeron aeron = mock(Aeron.class);
-        final MutableDirectBuffer tempBuffer = new UnsafeBuffer(new byte[SIZE_OF_LONG + expectedLabel.length()]);
+        final MutableDirectBuffer tempBuffer = new UnsafeBuffer(new byte[200]);
         final Counter counter = mock(Counter.class);
         when(aeron.clientId()).thenReturn(archiveId);
         when(aeron.addCounter(typeId, tempBuffer, 0, SIZE_OF_LONG, tempBuffer, SIZE_OF_LONG, expectedLabel.length()))
@@ -58,23 +59,50 @@ class ArchiveCountersTest
         inOrder.verify(aeron).addCounter(anyInt(), any(), anyInt(), anyInt(), any(), anyInt(), anyInt());
         inOrder.verifyNoMoreInteractions();
         assertEquals(archiveId, tempBuffer.getLong(0));
-        assertEquals(expectedLabel,
-            tempBuffer.getStringWithoutLengthAscii(SIZE_OF_LONG, tempBuffer.capacity() - SIZE_OF_LONG));
+        assertEquals(expectedLabel, tempBuffer.getStringWithoutLengthAscii(SIZE_OF_LONG, expectedLabel.length()));
+    }
+
+    @Test
+    void allocateErrorCounter()
+    {
+        final long archiveId = 24623864;
+        final String expectedLabel = "Archive Errors - archiveId=" + archiveId + " " +
+            AeronCounters.formatVersionInfo(ArchiveVersion.VERSION, ArchiveVersion.GIT_SHA);
+        final Aeron aeron = mock(Aeron.class);
+        final MutableDirectBuffer tempBuffer = new UnsafeBuffer(new byte[200]);
+        final Counter counter = mock(Counter.class);
+        when(aeron.clientId()).thenReturn(archiveId);
+        when(aeron.addCounter(
+            AeronCounters.ARCHIVE_ERROR_COUNT_TYPE_ID,
+            tempBuffer,
+            0,
+            SIZE_OF_LONG,
+            tempBuffer,
+            SIZE_OF_LONG,
+            expectedLabel.length()))
+            .thenReturn(counter);
+
+        final Counter result = ArchiveCounters.allocateErrorCounter(aeron, tempBuffer, aeron.clientId());
+
+        assertSame(counter, result);
+        final InOrder inOrder = inOrder(aeron);
+        inOrder.verify(aeron).clientId();
+        inOrder.verify(aeron).addCounter(anyInt(), any(), anyInt(), anyInt(), any(), anyInt(), anyInt());
+        inOrder.verifyNoMoreInteractions();
+        assertEquals(archiveId, tempBuffer.getLong(0));
+        assertEquals(expectedLabel, tempBuffer.getStringWithoutLengthAscii(SIZE_OF_LONG, expectedLabel.length()));
     }
 
     @ParameterizedTest
     @CsvSource({ "5,8", "42,-10", "-19, 61312936129398123" })
     void findReturnsNullValueIfCounterNotFound(final int typeId, final long archiveId)
     {
-        final CountersManager countersManager = Tests.newCountersMananger(2 * COUNTER_LENGTH);
+        final CountersManager countersManager = Tests.newCountersManager(2 * COUNTER_LENGTH);
         assertEquals(1, countersManager.maxCounterId());
         countersManager.allocate(
             "test",
             42,
-            (keyBuffer) ->
-            {
-                keyBuffer.putLong(0, 61312936129398123L);
-            });
+            (keyBuffer) -> keyBuffer.putLong(0, 61312936129398123L));
 
         assertEquals(NULL_VALUE, ArchiveCounters.find(countersManager, typeId, archiveId));
     }
@@ -82,7 +110,7 @@ class ArchiveCountersTest
     @Test
     void findReturnsFirstMatchingCounter()
     {
-        final CountersManager countersManager = Tests.newCountersMananger(8 * COUNTER_LENGTH);
+        final CountersManager countersManager = Tests.newCountersManager(8 * COUNTER_LENGTH);
         final int typeId = 7;
         final long archiveId = Long.MIN_VALUE / 13;
         countersManager.allocate(

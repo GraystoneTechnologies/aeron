@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,7 +42,8 @@ abstract class ReceiveDestinationTransportLhsPadding extends UdpChannelTransport
         final int socketSndbufLength)
     {
         super(
-            udpChannel, endPointAddress, bindAddress, connectAddress, context, socketRcvbufLength, socketSndbufLength);
+            udpChannel, endPointAddress, bindAddress, connectAddress, context.receiverPortManager(),
+            context, socketRcvbufLength, socketSndbufLength);
     }
 }
 
@@ -168,14 +169,6 @@ public final class ReceiveDestinationTransport extends ReceiveDestinationTranspo
     }
 
     /**
-     * {@inheritDoc}
-     */
-    public void close()
-    {
-        super.close();
-    }
-
-    /**
      * Has the channel explicit control address.
      *
      * @return true if the channel has explicit control address.
@@ -253,5 +246,16 @@ public final class ReceiveDestinationTransport extends ReceiveDestinationTranspo
     public InetSocketAddress currentControlAddress()
     {
         return currentControlAddress;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public String toString()
+    {
+        return "ReceiveDestinationTransport{" +
+            "currentControlAddress=" + currentControlAddress +
+            ", localSocketAddressIndicator=" + localSocketAddressIndicator +
+            '}';
     }
 }

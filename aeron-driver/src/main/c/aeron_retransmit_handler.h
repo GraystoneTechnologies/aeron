@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,19 +39,25 @@ typedef struct aeron_retransmit_action_stct
 }
 aeron_retransmit_action_t;
 
-#define AERON_RETRANSMIT_HANDLER_MAX_RETRANSMITS (16)
+#define AERON_RETRANSMIT_HANDLER_MAX_RESEND (16)
+#define AERON_RETRANSMIT_HANDLER_MAX_RESEND_MAX (256)
 
 typedef int (*aeron_retransmit_handler_resend_func_t)(
     void *clientd, int32_t term_id, int32_t term_offset, size_t length);
 
 typedef struct aeron_retransmit_handler_stct
 {
-    aeron_retransmit_action_t retransmit_action_pool[AERON_RETRANSMIT_HANDLER_MAX_RETRANSMITS];
-    aeron_int64_to_ptr_hash_map_t active_retransmits_map;
+    aeron_retransmit_action_t *retransmit_action_pool;
     uint64_t delay_timeout_ns;
     uint64_t linger_timeout_ns;
 
     int64_t *invalid_packets_counter;
+
+    int active_retransmit_count;
+
+    bool has_group_semantics;
+    size_t max_retransmits;
+    int64_t *retransmit_overflow_counter;
 }
 aeron_retransmit_handler_t;
 
@@ -59,9 +65,12 @@ int aeron_retransmit_handler_init(
     aeron_retransmit_handler_t *handler,
     int64_t *invalid_packets_counter,
     uint64_t delay_timeout_ns,
-    uint64_t linger_timeout_ns);
+    uint64_t linger_timeout_ns,
+    bool has_group_semantics,
+    uint32_t max_retransmits,
+    int64_t *retransmit_overflow_counter);
 
-int aeron_retransmit_handler_close(aeron_retransmit_handler_t *handler);
+void aeron_retransmit_handler_close(aeron_retransmit_handler_t *handler);
 
 int aeron_retransmit_handler_on_nak(
     aeron_retransmit_handler_t *handler,
@@ -69,6 +78,8 @@ int aeron_retransmit_handler_on_nak(
     int32_t term_offset,
     size_t length,
     size_t term_length,
+    size_t mtu_length,
+    aeron_flow_control_strategy_t *flow_control,
     int64_t now_ns,
     aeron_retransmit_handler_resend_func_t resend,
     void *resend_clientd);

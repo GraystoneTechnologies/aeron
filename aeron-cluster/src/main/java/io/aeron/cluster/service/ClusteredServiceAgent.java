@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -45,6 +45,8 @@ import java.util.function.Consumer;
 import static io.aeron.Aeron.NULL_VALUE;
 import static io.aeron.archive.client.AeronArchive.NULL_POSITION;
 import static io.aeron.archive.codecs.SourceLocation.LOCAL;
+import static io.aeron.cluster.ConsensusModule.CLUSTER_ACTION_FLAGS_STANDBY_SNAPSHOT;
+import static io.aeron.cluster.ConsensusModule.CLUSTER_ACTION_FLAGS_DEFAULT;
 import static io.aeron.cluster.client.AeronCluster.SESSION_HEADER_LENGTH;
 import static io.aeron.cluster.service.ClusteredServiceContainer.Configuration.*;
 import static org.agrona.concurrent.status.CountersReader.NULL_COUNTER_ID;
@@ -59,7 +61,32 @@ abstract class ClusteredServiceAgentLhsPadding
 
 abstract class ClusteredServiceAgentHotFields extends ClusteredServiceAgentLhsPadding
 {
-    boolean isBackgroundInvocation;
+    static final int LIFECYCLE_CALLBACK_NONE = 0;
+    static final int LIFECYCLE_CALLBACK_ON_START = 1;
+    static final int LIFECYCLE_CALLBACK_ON_TERMINATE = 2;
+    static final int LIFECYCLE_CALLBACK_ON_ROLE_CHANGE = 3;
+    static final int LIFECYCLE_CALLBACK_DO_BACKGROUND_WORK = 4;
+
+    static String lifecycleName(final int activeLifecycleCallback)
+    {
+        switch (activeLifecycleCallback)
+        {
+            case LIFECYCLE_CALLBACK_NONE:
+                return "none";
+            case LIFECYCLE_CALLBACK_ON_START:
+                return "onStart";
+            case LIFECYCLE_CALLBACK_ON_TERMINATE:
+                return "onTerminate";
+            case LIFECYCLE_CALLBACK_ON_ROLE_CHANGE:
+                return "onRoleChange";
+            case LIFECYCLE_CALLBACK_DO_BACKGROUND_WORK:
+                return "doBackgroundWork";
+            default:
+                return "unknown";
+        }
+    }
+
+    int activeLifecycleCallback;
 }
 
 abstract class ClusteredServiceAgentRhsPadding extends ClusteredServiceAgentHotFields
@@ -110,8 +137,10 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
     private final Collection<ClientSession> unmodifiableClientSessions = Collections.unmodifiableCollection(sessions);
     private final BoundedLogAdapter logAdapter;
     private final DutyCycleTracker dutyCycleTracker;
+    private final SnapshotDurationTracker snapshotDurationTracker;
     private final String subscriptionAlias;
-    private String activeLifecycleCallbackName;
+    private final int standbySnapshotFlags;
+
     private ReadableCounter commitPosition;
     private ActiveLogEvent activeLogEvent;
     private Role role = Role.FOLLOWER;
@@ -132,12 +161,15 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
         epochClock = ctx.epochClock();
         nanoClock = ctx.nanoClock();
         dutyCycleTracker = ctx.dutyCycleTracker();
+        snapshotDurationTracker = ctx.snapshotDurationTracker();
         subscriptionAlias = "log-sc-" + ctx.serviceId();
 
         final String channel = ctx.controlChannel();
         consensusModuleProxy = new ConsensusModuleProxy(aeron.addPublication(channel, ctx.consensusModuleStreamId()));
         serviceAdapter = new ServiceAdapter(aeron.addSubscription(channel, ctx.serviceStreamId()), this);
         sessionMessageHeaderEncoder.wrapAndApplyHeader(headerBuffer, 0, new MessageHeaderEncoder());
+        this.standbySnapshotFlags = ctx.standbySnapshotEnabled() ? CLUSTER_ACTION_FLAGS_STANDBY_SNAPSHOT :
+            CLUSTER_ACTION_FLAGS_DEFAULT;
     }
 
     public void onStart()
@@ -149,6 +181,7 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
 
         recoverState(counters);
         dutyCycleTracker.update(nanoClock.nanoTime());
+        isServiceActive = true;
     }
 
     public void onClose()
@@ -186,6 +219,7 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
         }
 
         markFile.updateActivityTimestamp(NULL_VALUE);
+        markFile.force();
         ctx.close();
     }
 
@@ -214,15 +248,7 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
                 }
             }
 
-            try
-            {
-                isBackgroundInvocation = true;
-                workCount += service.doBackgroundWork(nowNs);
-            }
-            finally
-            {
-                isBackgroundInvocation = false;
-            }
+            workCount += invokeBackgroundWork(nowNs);
         }
         catch (final AgentTerminationException ex)
         {
@@ -288,11 +314,17 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
             return true;
         }
 
-        if (consensusModuleProxy.closeSession(clusterSessionId))
+        int attempts = 3;
+        do
         {
-            clientSession.markClosing();
-            return true;
+            if (consensusModuleProxy.closeSession(clusterSessionId))
+            {
+                clientSession.markClosing();
+                return true;
+            }
+            idle();
         }
+        while (--attempts > 0);
 
         return false;
     }
@@ -364,11 +396,7 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
     public void idle()
     {
         idleStrategy.idle();
-        if (Thread.currentThread().isInterrupted())
-        {
-            throw new AgentTerminationException("interrupted");
-        }
-        checkForClockTick(nanoClock.nanoTime());
+        doIdleWork();
     }
 
     public void idle(final int workCount)
@@ -376,11 +404,24 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
         idleStrategy.idle(workCount);
         if (workCount <= 0)
         {
-            if (Thread.currentThread().isInterrupted())
-            {
-                throw new AgentTerminationException("interrupted");
-            }
-            checkForClockTick(nanoClock.nanoTime());
+            doIdleWork();
+        }
+    }
+
+    private void doIdleWork()
+    {
+        if (Thread.currentThread().isInterrupted())
+        {
+            throw new AgentTerminationException("interrupted");
+        }
+
+        final long nowNs = nanoClock.nanoTime();
+
+        checkForClockTick(nowNs);
+
+        if (isServiceActive)
+        {
+            invokeBackgroundWork(nowNs);
         }
     }
 
@@ -478,34 +519,40 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
     {
         this.logPosition = logPosition;
         clusterTime = timestamp;
-        final ContainerClientSession session = sessionByIdMap.remove(clusterSessionId);
 
+        final ContainerClientSession session = sessionByIdMap.remove(clusterSessionId);
         if (null == session)
         {
-            throw new ClusterException(
-                "unknown clusterSessionId=" + clusterSessionId + " for close reason=" + closeReason +
-                " leadershipTermId=" + leadershipTermId + " logPosition=" + logPosition);
+            ctx.countedErrorHandler().onError(new ClusterEvent(
+                "unknown session close: clusterSessionId=" + clusterSessionId + " closeReason=" + closeReason +
+                " leadershipTermId=" + leadershipTermId + " logPosition=" + logPosition));
         }
-
-        for (int i = 0, size = sessions.size(); i < size; i++)
+        else
         {
-            if (sessions.get(i).id() == clusterSessionId)
+            for (int i = 0, size = sessions.size(); i < size; i++)
             {
-                sessions.remove(i);
-                break;
+                if (sessions.get(i).id() == clusterSessionId)
+                {
+                    sessions.remove(i);
+                    break;
+                }
             }
-        }
 
-        session.disconnect(ctx.countedErrorHandler());
-        service.onSessionClose(session, timestamp, closeReason);
+            session.disconnect(ctx.countedErrorHandler());
+            service.onSessionClose(session, timestamp, closeReason);
+        }
     }
 
     void onServiceAction(
-        final long leadershipTermId, final long logPosition, final long timestamp, final ClusterAction action)
+        final long leadershipTermId,
+        final long logPosition,
+        final long timestamp,
+        final ClusterAction action,
+        final int flags)
     {
         this.logPosition = logPosition;
         clusterTime = timestamp;
-        executeAction(action, logPosition, leadershipTermId);
+        executeAction(action, logPosition, leadershipTermId, flags);
     }
 
     void onNewLeadershipTermEvent(
@@ -540,18 +587,6 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
             logSessionId,
             timeUnit,
             appVersion);
-    }
-
-    void onMembershipChange(
-        final long logPosition, final long timestamp, final ChangeType changeType, final int memberId)
-    {
-        this.logPosition = logPosition;
-        clusterTime = timestamp;
-
-        if (memberId == this.memberId && changeType == ChangeType.QUIT)
-        {
-            terminate(true);
-        }
     }
 
     void addSession(
@@ -691,14 +726,14 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
         if (newRole != role)
         {
             role = newRole;
-            activeLifecycleCallbackName = "onRoleChange";
+            activeLifecycleCallback = LIFECYCLE_CALLBACK_ON_ROLE_CHANGE;
             try
             {
                 service.onRoleChange(newRole);
             }
             finally
             {
-                activeLifecycleCallbackName = null;
+                activeLifecycleCallback = LIFECYCLE_CALLBACK_NONE;
             }
         }
     }
@@ -710,9 +745,8 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
         clusterTime = RecoveryState.getTimestamp(counters, recoveryCounterId);
         final long leadershipTermId = RecoveryState.getLeadershipTermId(counters, recoveryCounterId);
         sessionMessageHeaderEncoder.leadershipTermId(leadershipTermId);
-        isServiceActive = true;
 
-        activeLifecycleCallbackName = "onStart";
+        activeLifecycleCallback = LIFECYCLE_CALLBACK_ON_START;
         try
         {
             if (NULL_VALUE != leadershipTermId)
@@ -726,11 +760,10 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
         }
         finally
         {
-            activeLifecycleCallbackName = null;
+            activeLifecycleCallback = LIFECYCLE_CALLBACK_NONE;
         }
 
         final long id = ackId++;
-        idleStrategy.reset();
         while (!consensusModuleProxy.ack(logPosition, clusterTime, id, aeron.clientId(), serviceId))
         {
             idle();
@@ -798,7 +831,6 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
             logSubscription = null;
 
             final long id = ackId++;
-            idleStrategy.reset();
             while (!consensusModuleProxy.ack(activeLog.logPosition, clusterTime, id, NULL_VALUE, serviceId))
             {
                 idle();
@@ -884,7 +916,7 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
                 break;
             }
 
-            if (fragments == 0)
+            if (0 == fragments)
             {
                 archive.checkForErrorResponse();
                 if (image.isClosed())
@@ -922,7 +954,11 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
             snapshotState(publication, logPosition, leadershipTermId);
             checkForClockTick(nanoClock.nanoTime());
             archive.checkForErrorResponse();
+
+            snapshotDurationTracker.onSnapshotBegin(nanoClock.nanoTime());
             service.onTakeSnapshot(publication);
+            snapshotDurationTracker.onSnapshotEnd(nanoClock.nanoTime());
+
             awaitRecordingComplete(recordingId, publication.position(), counters, counterId, archive);
 
             return recordingId;
@@ -974,29 +1010,53 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
         snapshotTaker.markEnd(SNAPSHOT_TYPE_ID, logPosition, leadershipTermId, 0, timeUnit, ctx.appVersion());
     }
 
-    private void executeAction(final ClusterAction action, final long logPosition, final long leadershipTermId)
+    private void executeAction(
+        final ClusterAction action,
+        final long logPosition,
+        final long leadershipTermId,
+        final int flags)
     {
-        if (ClusterAction.SNAPSHOT == action)
+        if (ClusterAction.SNAPSHOT == action && shouldSnapshot(flags))
         {
-            final long recordingId = onTakeSnapshot(logPosition, leadershipTermId);
+            long recordingId = NULL_VALUE;
+            Exception exception = null;
+            try
+            {
+                recordingId = onTakeSnapshot(logPosition, leadershipTermId);
+            }
+            catch (final Exception ex)
+            {
+                exception = ex;
+            }
+
             final long id = ackId++;
-            idleStrategy.reset();
             while (!consensusModuleProxy.ack(logPosition, clusterTime, id, recordingId, serviceId))
             {
                 idle();
             }
+
+            if (null != exception)
+            {
+                LangUtil.rethrowUnchecked(exception);
+            }
         }
+    }
+
+    private boolean shouldSnapshot(final int flags)
+    {
+        return CLUSTER_ACTION_FLAGS_DEFAULT == flags || 0 != (flags & standbySnapshotFlags);
     }
 
     private int awaitRecordingCounter(final int sessionId, final CountersReader counters, final AeronArchive archive)
     {
         idleStrategy.reset();
-        int counterId = RecordingPos.findCounterIdBySession(counters, sessionId);
+        final long archiveId = archive.archiveId();
+        int counterId = RecordingPos.findCounterIdBySession(counters, sessionId, archiveId);
         while (NULL_COUNTER_ID == counterId)
         {
             idle();
             archive.checkForErrorResponse();
-            counterId = RecordingPos.findCounterIdBySession(counters, sessionId);
+            counterId = RecordingPos.findCounterIdBySession(counters, sessionId, archiveId);
         }
 
         return counterId;
@@ -1074,14 +1134,16 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
             if (logPosition > requestedAckPosition)
             {
                 ctx.countedErrorHandler().onError(new ClusterEvent(
-                    "service terminate: logPosition=" + logPosition +
-                    " > requestedAckPosition=" + terminationPosition));
+                    "invalid ack request: logPosition=" + logPosition +
+                    " > requestedAckPosition=" + requestedAckPosition));
             }
 
-            if (consensusModuleProxy.ack(logPosition, clusterTime, ackId++, NULL_VALUE, serviceId))
+            final long id = ackId++;
+            while (!consensusModuleProxy.ack(logPosition, clusterTime, id, NULL_VALUE, serviceId))
             {
-                requestedAckPosition = NULL_POSITION;
+                idle();
             }
+            requestedAckPosition = NULL_POSITION;
         }
 
         return workCount;
@@ -1090,7 +1152,7 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
     private void terminate(final boolean isTerminationExpected)
     {
         isServiceActive = false;
-        activeLifecycleCallbackName = "onTerminate";
+        activeLifecycleCallback = LIFECYCLE_CALLBACK_ON_TERMINATE;
         try
         {
             service.onTerminate(this);
@@ -1101,7 +1163,7 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
         }
         finally
         {
-            activeLifecycleCallbackName = null;
+            activeLifecycleCallback = LIFECYCLE_CALLBACK_NONE;
         }
 
         try
@@ -1128,16 +1190,10 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
 
     private void checkForValidInvocation()
     {
-        if (null != activeLifecycleCallbackName)
+        if (LIFECYCLE_CALLBACK_NONE != activeLifecycleCallback)
         {
             throw new ClusterException(
-                "sending messages or scheduling timers is not allowed from " + activeLifecycleCallbackName);
-        }
-
-        if (isBackgroundInvocation)
-        {
-            throw new ClusterException(
-                "sending messages or scheduling timers is not allowed from ClusteredService.doBackgroundWork");
+                "sending messages or scheduling timers is not allowed from " + lifecycleName(activeLifecycleCallback));
         }
     }
 
@@ -1170,6 +1226,19 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
         }
     }
 
+    private int invokeBackgroundWork(final long nowNs)
+    {
+        activeLifecycleCallback = LIFECYCLE_CALLBACK_DO_BACKGROUND_WORK;
+        try
+        {
+            return service.doBackgroundWork(nowNs);
+        }
+        finally
+        {
+            activeLifecycleCallback = LIFECYCLE_CALLBACK_NONE;
+        }
+    }
+
     private void runTerminationHook()
     {
         try
@@ -1180,5 +1249,15 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
         {
             ctx.countedErrorHandler().onError(ex);
         }
+    }
+
+    private void logAck(
+        final int memberId,
+        final long logPosition,
+        final long clusterTime,
+        final long id,
+        final long recordingId,
+        final int serviceId)
+    {
     }
 }

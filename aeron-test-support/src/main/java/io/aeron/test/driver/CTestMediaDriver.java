@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,11 +32,10 @@ import org.agrona.concurrent.status.CountersReader;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
-
-import static java.util.Collections.emptyMap;
 
 public final class CTestMediaDriver implements TestMediaDriver
 {
@@ -190,7 +189,7 @@ public final class CTestMediaDriver implements TestMediaDriver
                 .keepAliveIntervalNs(TimeUnit.MILLISECONDS.toNanos(100))
                 .conclude();
             countersReader = new CountersReader(
-                aeronContext.countersMetaDataBuffer(), aeronContext.countersValuesBuffer());
+                aeronContext.countersMetaDataBuffer(), aeronContext.countersValuesBuffer(), StandardCharsets.US_ASCII);
         }
 
         return countersReader;
@@ -279,11 +278,26 @@ public final class CTestMediaDriver implements TestMediaDriver
         environment.put("AERON_DRIVER_SENDER_CYCLE_THRESHOLD", String.valueOf(context.senderCycleThresholdNs()));
         environment.put("AERON_DRIVER_RECEIVER_CYCLE_THRESHOLD", String.valueOf(context.receiverCycleThresholdNs()));
         environment.put("AERON_DRIVER_NAME_RESOLVER_THRESHOLD", String.valueOf(context.nameResolverThresholdNs()));
+        environment.put("AERON_DRIVER_ASYNC_EXECUTOR_THREADS", String.valueOf(context.asyncTaskExecutorThreads()));
+        final String senderWildcardPortRange = context.senderWildcardPortRange();
+        if (null != senderWildcardPortRange)
+        {
+            environment.put("AERON_SENDER_WILDCARD_PORT_RANGE", senderWildcardPortRange);
+        }
+        final String receiverWildcardPortRange = context.receiverWildcardPortRange();
+        if (null != receiverWildcardPortRange)
+        {
+            environment.put("AERON_RECEIVER_WILDCARD_PORT_RANGE", receiverWildcardPortRange);
+        }
+
+        environment.put("AERON_ENABLE_EXPERIMENTAL_FEATURES", String.valueOf(context.enableExperimentalFeatures()));
+
+        environment.put("AERON_DRIVER_STREAM_SESSION_LIMIT", String.valueOf(context.streamSessionLimit()));
 
         setFlowControlStrategy(environment, context);
         setLogging(environment);
         setTransportSecurity(environment);
-        setAdditionalEnvVars(environment, C_DRIVER_ADDITIONAL_ENV_VARS.get().getOrDefault(context, emptyMap()));
+        setAdditionalEnvVars(environment, getAdditionalEnvVarsMap(context));
 
         try
         {
@@ -329,7 +343,7 @@ public final class CTestMediaDriver implements TestMediaDriver
         throw new UnsupportedOperationException("Not supported in C media driver");
     }
 
-    public static void enableLossGenerationOnReceive(
+    public static void enableRandomLossOnReceive(
         final MediaDriver.Context context,
         final double rate,
         final long seed,
@@ -352,15 +366,64 @@ public final class CTestMediaDriver implements TestMediaDriver
         lossTransportEnv.put(UDP_CHANNEL_INCOMING_INTERCEPTORS_ENV_VAR, interceptor);
         lossTransportEnv.put("AERON_UDP_CHANNEL_TRANSPORT_BINDINGS_LOSS_ARGS", lossArgs);
 
-        // This is a bit of an ugly hack to decorate the MediaDriver.Context with additional information.
-        C_DRIVER_ADDITIONAL_ENV_VARS.get().put(context, lossTransportEnv);
+        getAdditionalEnvVarsMap(context).putAll(lossTransportEnv);
+    }
+
+    public static void enableFixedLossOnReceive(
+        final MediaDriver.Context context,
+        final int termId,
+        final int termOffset,
+        final int length)
+    {
+        final Object2ObjectHashMap<String, String> fixedLossTransportEnv = new Object2ObjectHashMap<>();
+
+        final String interceptor = "fixed-loss";
+        final String fixedLossArgs = "term-id=" + termId +
+            "|term-offset=" + termOffset +
+            "|length=" + length;
+
+        fixedLossTransportEnv.put(UDP_CHANNEL_INCOMING_INTERCEPTORS_ENV_VAR, interceptor);
+        fixedLossTransportEnv.put("AERON_UDP_CHANNEL_TRANSPORT_BINDINGS_FIXED_LOSS_ARGS", fixedLossArgs);
+
+        getAdditionalEnvVarsMap(context).putAll(fixedLossTransportEnv);
+    }
+
+    public static void enableMultiGapLossOnReceive(
+        final MediaDriver.Context context,
+        final int termId,
+        final int gapRadix,
+        final int gapLength,
+        final int totalGaps)
+    {
+        final Object2ObjectHashMap<String, String> multiGapLossTransportEnv = new Object2ObjectHashMap<>();
+
+        final String interceptor = "multi-gap-loss";
+        final String multiGapLossArgs = "term-id=" + termId +
+            "|gap-radix=" + gapRadix +
+            "|gap-length=" + gapLength +
+            "|total-gaps=" + totalGaps;
+
+        multiGapLossTransportEnv.put(UDP_CHANNEL_INCOMING_INTERCEPTORS_ENV_VAR, interceptor);
+        multiGapLossTransportEnv.put("AERON_UDP_CHANNEL_TRANSPORT_BINDINGS_MULTI_GAP_LOSS_ARGS", multiGapLossArgs);
+
+        getAdditionalEnvVarsMap(context).putAll(multiGapLossTransportEnv);
+    }
+
+    public static void dontCoalesceNaksOnReceiverByDefault(final MediaDriver.Context context)
+    {
+        getAdditionalEnvVarsMap(context).put("AERON_NAK_UNICAST_DELAY", "0");
+    }
+
+    public static Map<String, String> getAdditionalEnvVarsMap(final MediaDriver.Context context)
+    {
+        return C_DRIVER_ADDITIONAL_ENV_VARS.get().computeIfAbsent(context, c -> new IdentityHashMap<>());
     }
 
     private static void setLogging(final Map<String, String> environment)
     {
         environment.put("AERON_EVENT_LOG", System.getProperty(
             "aeron.event.log",
-            "admin,NAME_RESOLUTION_RESOLVE,FLOW_CONTROL_RECEIVER_ADDED,FLOW_CONTROL_RECEIVER_REMOVED"));
+            "admin"));
         environment.put("AERON_EVENT_LOG_DISABLE", System.getProperty("aeron.event.log.disable", ""));
 
         final String driverAgentPath = System.getProperty(DRIVER_AGENT_PATH_PROP_NAME);
@@ -483,7 +546,7 @@ public final class CTestMediaDriver implements TestMediaDriver
                 String exitMessage = "Process exited early";
                 if (!SystemUtil.isWindows())
                 {
-                    final int exitSignal = (0x7F & exitCode); // Essentially the same on Linux and MacOS.
+                    final int exitSignal = (0x7F & exitCode); // Essentially the same on Linux and macOS.
                     if (0 != exitSignal)
                     {
                         exitMessage += " - signal " + exitSignal;

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -38,7 +38,7 @@ class MinMulticastFlowControlTest
 
     private final UnsafeBuffer tempBuffer = new UnsafeBuffer(new byte[8192]);
     private final MinMulticastFlowControl flowControl = new MinMulticastFlowControl();
-    private final CountersManager countersManager = Tests.newCountersMananger(COUNTERS_BUFFER_LENGTH);
+    private final CountersManager countersManager = Tests.newCountersManager(COUNTERS_BUFFER_LENGTH);
 
     private static Stream<Arguments> validUris()
     {

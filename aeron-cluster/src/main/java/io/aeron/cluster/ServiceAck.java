@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,10 +20,12 @@ import io.aeron.cluster.client.ClusterException;
 import java.util.ArrayDeque;
 
 /**
- * State holder for ACKs from each of the services.
+ * State holder for ACKs from each of the {@link io.aeron.cluster.service.ClusteredService}s.
  */
 final class ServiceAck
 {
+    static final ServiceAck[] EMPTY_SERVICE_ACKS = new ServiceAck[0];
+
     private final long ackId;
     private final long logPosition;
     private final long relevantId;
@@ -52,23 +54,20 @@ final class ServiceAck
 
     static boolean hasReached(final long logPosition, final long ackId, final ArrayDeque<ServiceAck>[] queues)
     {
-        for (final ArrayDeque<ServiceAck> serviceAckQueue : queues)
+        for (int serviceId = 0, serviceCount = queues.length; serviceId < serviceCount; serviceId++)
         {
-            final ServiceAck serviceAck = serviceAckQueue.peek();
-
+            final ServiceAck serviceAck = queues[serviceId].peek();
             if (null == serviceAck)
             {
                 return false;
             }
 
-            if (serviceAck.ackId != ackId)
+            if (serviceAck.ackId != ackId || serviceAck.logPosition != logPosition)
             {
-                throw new ClusterException(ackId + " ack out of sequence " + serviceAck);
-            }
-
-            if (serviceAck.logPosition != logPosition)
-            {
-                throw new ClusterException(logPosition + " log position out of sequence " + serviceAck);
+                throw new ClusterException(
+                    "ack out of sequence: expected [ackId=" + ackId + ", logPosition=" + logPosition + "] vs " +
+                    "received [ackId=" + serviceAck.ackId + ", logPosition=" + serviceAck.logPosition +
+                    ", relevantId=" + serviceAck.relevantId + ", serviceId=" + serviceId + "]");
             }
         }
 
@@ -83,14 +82,14 @@ final class ServiceAck
         }
     }
 
-    @SuppressWarnings({"unchecked", "rawtypes"})
+    @SuppressWarnings({ "unchecked", "rawtypes" })
     static ArrayDeque<ServiceAck>[] newArrayOfQueues(final int serviceCount)
     {
         final ArrayDeque<ServiceAck>[] queues = new ArrayDeque[serviceCount];
 
-        for (int i = 0; i < serviceCount; i++)
+        for (int serviceId = 0; serviceId < serviceCount; serviceId++)
         {
-            queues[i] = new ArrayDeque<>();
+            queues[serviceId] = new ArrayDeque<>();
         }
 
         return queues;

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,7 +42,11 @@ final class ClientCommandAdapter implements ControlledMessageHandler
     private final RemoveMessageFlyweight removeMsgFlyweight = new RemoveMessageFlyweight();
     private final DestinationMessageFlyweight destinationMsgFlyweight = new DestinationMessageFlyweight();
     private final CounterMessageFlyweight counterMsgFlyweight = new CounterMessageFlyweight();
+    private final StaticCounterMessageFlyweight staticCounterMessageFlyweight = new StaticCounterMessageFlyweight();
     private final TerminateDriverFlyweight terminateDriverFlyweight = new TerminateDriverFlyweight();
+    private final RejectImageFlyweight rejectImageFlyweight = new RejectImageFlyweight();
+    private final DestinationByIdMessageFlyweight destinationByIdMessageFlyweight =
+        new DestinationByIdMessageFlyweight();
     private final DriverConductor conductor;
     private final RingBuffer toDriverCommands;
     private final ClientProxy clientProxy;
@@ -263,38 +267,67 @@ final class ClientCommandAdapter implements ControlledMessageHandler
                     break;
                 }
 
+                case ADD_STATIC_COUNTER:
+                {
+                    staticCounterMessageFlyweight.wrap(buffer, index);
+                    staticCounterMessageFlyweight.validateLength(msgTypeId, length);
+
+                    correlationId = staticCounterMessageFlyweight.correlationId();
+                    final long clientId = staticCounterMessageFlyweight.clientId();
+                    conductor.onAddStaticCounter(
+                        staticCounterMessageFlyweight.typeId(),
+                        buffer,
+                        index + staticCounterMessageFlyweight.keyBufferOffset(),
+                        staticCounterMessageFlyweight.keyBufferLength(),
+                        buffer,
+                        index + staticCounterMessageFlyweight.labelBufferOffset(),
+                        staticCounterMessageFlyweight.labelBufferLength(),
+                        staticCounterMessageFlyweight.registrationId(),
+                        correlationId,
+                        clientId);
+                    break;
+                }
+
+                case REJECT_IMAGE:
+                {
+                    rejectImageFlyweight.wrap(buffer, index);
+                    rejectImageFlyweight.validateLength(msgTypeId, length);
+                    correlationId = rejectImageFlyweight.correlationId();
+
+                    conductor.onRejectImage(
+                        rejectImageFlyweight.correlationId(),
+                        rejectImageFlyweight.imageCorrelationId(),
+                        rejectImageFlyweight.position(),
+                        rejectImageFlyweight.reason());
+                    break;
+                }
+
+                case REMOVE_DESTINATION_BY_ID:
+                {
+                    destinationByIdMessageFlyweight.wrap(buffer, index);
+                    destinationByIdMessageFlyweight.validateLength(msgTypeId, length);
+
+                    correlationId = destinationByIdMessageFlyweight.correlationId();
+                    conductor.onRemoveSendDestination(
+                        destinationByIdMessageFlyweight.resourceRegistrationId(),
+                        destinationByIdMessageFlyweight.destinationRegistrationId(),
+                        destinationByIdMessageFlyweight.correlationId());
+
+                    break;
+                }
+
                 default:
                 {
                     final ControlProtocolException ex = new ControlProtocolException(
                         ErrorCode.UNKNOWN_COMMAND_TYPE_ID, "command typeId=" + msgTypeId);
 
-                    recordError(ex);
-                    clientProxy.onError(correlationId, ex.errorCode(), ex.getMessage());
+                    onError(correlationId, ex);
                 }
             }
         }
-        catch (final ControlProtocolException ex)
-        {
-            recordError(ex);
-            clientProxy.onError(correlationId, ex.errorCode(), ex.getMessage());
-        }
-        catch (final StorageSpaceException ex)
-        {
-            recordError(ex);
-            clientProxy.onError(correlationId, STORAGE_SPACE, ex.getMessage());
-        }
         catch (final Exception ex)
         {
-            recordError(ex);
-            if (StorageSpaceException.isStorageSpaceError(ex))
-            {
-                clientProxy.onError(correlationId, STORAGE_SPACE, ex.getMessage());
-            }
-            else
-            {
-                final String errorMessage = ex.getClass().getName() + " : " + ex.getMessage();
-                clientProxy.onError(correlationId, GENERIC_ERROR, errorMessage);
-            }
+            onError(correlationId, ex);
         }
 
         return Action.CONTINUE;
@@ -316,13 +349,27 @@ final class ClientCommandAdapter implements ControlledMessageHandler
         }
     }
 
-    private void recordError(final Exception ex)
+    void onError(final long correlationId, final Exception error)
     {
         if (!errors.isClosed())
         {
             errors.increment();
         }
 
-        errorHandler.onError(ex);
+        errorHandler.onError(error);
+
+        if (error instanceof ControlProtocolException)
+        {
+            clientProxy.onError(correlationId, ((ControlProtocolException)error).errorCode(), error.getMessage());
+        }
+        else if (error instanceof StorageSpaceException || StorageSpaceException.isStorageSpaceError(error))
+        {
+            clientProxy.onError(correlationId, STORAGE_SPACE, error.getMessage());
+        }
+        else
+        {
+            final String errorMessage = error.getClass().getName() + " : " + error.getMessage();
+            clientProxy.onError(correlationId, GENERIC_ERROR, errorMessage);
+        }
     }
 }

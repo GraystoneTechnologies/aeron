@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,47 +25,53 @@
 namespace aeron
 {
 
-constexpr const char SPY_QUALIFIER[] = "aeron-spy";
-constexpr const char AERON_SCHEME[] = "aeron";
-constexpr const char AERON_PREFIX[] = "aeron:";
+static constexpr const char SPY_QUALIFIER[] = "aeron-spy";
+static constexpr const char AERON_SCHEME[] = "aeron";
+static constexpr const char AERON_PREFIX[] = "aeron:";
 
-constexpr const char IPC_MEDIA[] = "ipc";
-constexpr const char UDP_MEDIA[] = "udp";
-constexpr const char IPC_CHANNEL[] = "aeron:ipc";
-constexpr const char SPY_PREFIX[] = "aeron-spy:";
-constexpr const char ENDPOINT_PARAM_NAME[] = "endpoint";
-constexpr const char INTERFACE_PARAM_NAME[] = "interface";
-constexpr const char INITIAL_TERM_ID_PARAM_NAME[] = "init-term-id";
-constexpr const char TERM_ID_PARAM_NAME[] = "term-id";
-constexpr const char TERM_OFFSET_PARAM_NAME[] = "term-offset";
-constexpr const char TERM_LENGTH_PARAM_NAME[] = "term-length";
-constexpr const char MTU_LENGTH_PARAM_NAME[] = "mtu";
-constexpr const char TTL_PARAM_NAME[] = "ttl";
-constexpr const char MDC_CONTROL_PARAM_NAME[] = "control";
-constexpr const char MDC_CONTROL_MODE_PARAM_NAME[] = "control-mode";
-constexpr const char MDC_CONTROL_MODE_MANUAL[] = "manual";
-constexpr const char MDC_CONTROL_MODE_DYNAMIC[] = "dynamic";
-constexpr const char SESSION_ID_PARAM_NAME[] = "session-id";
-constexpr const char LINGER_PARAM_NAME[] = "linger";
-constexpr const char RELIABLE_STREAM_PARAM_NAME[] = "reliable";
-constexpr const char TAGS_PARAM_NAME[] = "tags";
-constexpr const char TAG_PREFIX[] = "tag:";
-constexpr const char SPARSE_PARAM_NAME[] = "sparse";
-constexpr const char ALIAS_PARAM_NAME[] = "alias";
-constexpr const char EOS_PARAM_NAME[] = "eos";
-constexpr const char TETHER_PARAM_NAME[] = "tether";
-constexpr const char GROUP_PARAM_NAME[] = "group";
-constexpr const char REJOIN_PARAM_NAME[] = "rejoin";
-constexpr const char CONGESTION_CONTROL_PARAM_NAME[] = "cc";
-constexpr const char FLOW_CONTROL_PARAM_NAME[] = "fc";
-constexpr const char GROUP_TAG_PARAM_NAME[] = "gtag";
-constexpr const char SPIES_SIMULATE_CONNECTION_PARAM_NAME[] = "ssc";
-constexpr const char SOCKET_SNDBUF_PARAM_NAME[] = "so-sndbuf";
-constexpr const char SOCKET_RCVBUF_PARAM_NAME[] = "so-rcvbuf";
-constexpr const char RECEIVER_WINDOW_LENGTH_PARAM_NAME[] = "rcv-wnd";
-constexpr const char MEDIA_RCV_TIMESTAMP_OFFSET_PARAM_NAME[] = "media-rcv-ts-offset";
-constexpr const char CHANNEL_RCV_TIMESTAMP_OFFSET_PARAM_NAME[] = "channel-rcv-ts-offset";
-constexpr const char CHANNEL_SND_TIMESTAMP_OFFSET_PARAM_NAME[] = "channel-snd-ts-offset";
+static constexpr const char IPC_MEDIA[] = "ipc";
+static constexpr const char UDP_MEDIA[] = "udp";
+static constexpr const char IPC_CHANNEL[] = "aeron:ipc";
+static constexpr const char SPY_PREFIX[] = "aeron-spy:";
+static constexpr const char ENDPOINT_PARAM_NAME[] = "endpoint";
+static constexpr const char INTERFACE_PARAM_NAME[] = "interface";
+static constexpr const char INITIAL_TERM_ID_PARAM_NAME[] = "init-term-id";
+static constexpr const char TERM_ID_PARAM_NAME[] = "term-id";
+static constexpr const char TERM_OFFSET_PARAM_NAME[] = "term-offset";
+static constexpr const char TERM_LENGTH_PARAM_NAME[] = "term-length";
+static constexpr const char MTU_LENGTH_PARAM_NAME[] = "mtu";
+static constexpr const char TTL_PARAM_NAME[] = "ttl";
+static constexpr const char MDC_CONTROL_PARAM_NAME[] = "control";
+static constexpr const char MDC_CONTROL_MODE_PARAM_NAME[] = "control-mode";
+static constexpr const char MDC_CONTROL_MODE_MANUAL[] = "manual";
+static constexpr const char MDC_CONTROL_MODE_DYNAMIC[] = "dynamic";
+static constexpr const char CONTROL_MODE_RESPONSE[] = "response";
+static constexpr const char SESSION_ID_PARAM_NAME[] = "session-id";
+static constexpr const char LINGER_PARAM_NAME[] = "linger";
+static constexpr const char RELIABLE_STREAM_PARAM_NAME[] = "reliable";
+static constexpr const char TAGS_PARAM_NAME[] = "tags";
+static constexpr const char TAG_PREFIX[] = "tag:";
+static constexpr const char SPARSE_PARAM_NAME[] = "sparse";
+static constexpr const char ALIAS_PARAM_NAME[] = "alias";
+static constexpr const char EOS_PARAM_NAME[] = "eos";
+static constexpr const char TETHER_PARAM_NAME[] = "tether";
+static constexpr const char GROUP_PARAM_NAME[] = "group";
+static constexpr const char REJOIN_PARAM_NAME[] = "rejoin";
+static constexpr const char CONGESTION_CONTROL_PARAM_NAME[] = "cc";
+static constexpr const char FLOW_CONTROL_PARAM_NAME[] = "fc";
+static constexpr const char GROUP_TAG_PARAM_NAME[] = "gtag";
+static constexpr const char SPIES_SIMULATE_CONNECTION_PARAM_NAME[] = "ssc";
+static constexpr const char SOCKET_SNDBUF_PARAM_NAME[] = "so-sndbuf";
+static constexpr const char SOCKET_RCVBUF_PARAM_NAME[] = "so-rcvbuf";
+static constexpr const char RECEIVER_WINDOW_LENGTH_PARAM_NAME[] = "rcv-wnd";
+static constexpr const char MEDIA_RCV_TIMESTAMP_OFFSET_PARAM_NAME[] = "media-rcv-ts-offset";
+static constexpr const char CHANNEL_RCV_TIMESTAMP_OFFSET_PARAM_NAME[] = "channel-rcv-ts-offset";
+static constexpr const char CHANNEL_SND_TIMESTAMP_OFFSET_PARAM_NAME[] = "channel-snd-ts-offset";
+static constexpr const char RESPONSE_CORRELATION_ID_PARAM_NAME[] = "response-correlation-id";
+static constexpr const char NAK_DELAY_PARAM_NAME[] = "nak-delay";
+static constexpr const char UNTETHERED_WINDOW_LIMIT_TIMEOUT_PARAM_NAME[] = "untethered-window-limit-timeout";
+static constexpr const char UNTETHERED_RESTING_TIMEOUT_PARAM_NAME[] = "untethered-resting-timeout";
+static constexpr const char MAX_RESEND_PARAM_NAME[] = "max-resend";
 
 using namespace aeron::util;
 
@@ -168,6 +174,12 @@ public:
     inline bool containsKey(const std::string &key)
     {
         return m_params->find(key) != m_params->end();
+    }
+    
+    inline bool hasControlModeResponse()
+    {
+        const std::string &controlMode = get(MDC_CONTROL_MODE_PARAM_NAME);
+        return !controlMode.empty() && CONTROL_MODE_RESPONSE == controlMode;
     }
 
     std::string toString()

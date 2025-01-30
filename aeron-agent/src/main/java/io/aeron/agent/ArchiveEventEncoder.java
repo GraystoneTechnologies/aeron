@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ import org.agrona.concurrent.UnsafeBuffer;
 
 import static io.aeron.agent.CommonEventEncoder.*;
 import static java.nio.ByteOrder.LITTLE_ENDIAN;
+import static org.agrona.BitUtil.SIZE_OF_BYTE;
 import static org.agrona.BitUtil.SIZE_OF_INT;
 import static org.agrona.BitUtil.SIZE_OF_LONG;
 
@@ -28,7 +29,7 @@ final class ArchiveEventEncoder
     {
     }
 
-    static <E extends Enum<E>> int encodeSessionStateChange(
+    static <E extends Enum<E>> int encodeReplaySessionStateChange(
         final UnsafeBuffer encodingBuffer,
         final int offset,
         final int captureLength,
@@ -36,21 +37,126 @@ final class ArchiveEventEncoder
         final E from,
         final E to,
         final long id,
-        final long position)
+        final long recordingId,
+        final long position,
+        final String reason)
     {
         int encodedLength = encodeLogHeader(encodingBuffer, offset, captureLength, length);
 
         encodingBuffer.putLong(offset + encodedLength, id, LITTLE_ENDIAN);
         encodedLength += SIZE_OF_LONG;
+        encodingBuffer.putLong(offset + encodedLength, recordingId, LITTLE_ENDIAN);
+        encodedLength += SIZE_OF_LONG;
         encodingBuffer.putLong(offset + encodedLength, position, LITTLE_ENDIAN);
         encodedLength += SIZE_OF_LONG;
 
-        return encodeTrailingStateChange(encodingBuffer, offset, encodedLength, captureLength, from, to);
+        encodedLength += encodeStateChange(encodingBuffer, offset + encodedLength, from, to);
+
+        encodedLength += encodeTrailingString(encodingBuffer, offset + encodedLength,
+            captureLength + LOG_HEADER_LENGTH - encodedLength, reason);
+
+        return encodedLength;
     }
 
-    static <E extends Enum<E>> int sessionStateChangeLength(final E from, final E to)
+    static <E extends Enum<E>> int replaySessionStateChangeLength(final E from, final E to, final String reason)
     {
-        return stateTransitionStringLength(from, to) + 2 * SIZE_OF_LONG;
+        return stateTransitionStringLength(from, to) + (3 * SIZE_OF_LONG) + (SIZE_OF_INT + reason.length());
+    }
+
+    static <E extends Enum<E>> int encodeRecordingSessionStateChange(
+        final UnsafeBuffer encodingBuffer,
+        final int offset,
+        final int captureLength,
+        final int length,
+        final E from,
+        final E to,
+        final long recordingId,
+        final long position,
+        final String reason)
+    {
+        int encodedLength = encodeLogHeader(encodingBuffer, offset, captureLength, length);
+
+        encodingBuffer.putLong(offset + encodedLength, recordingId, LITTLE_ENDIAN);
+        encodedLength += SIZE_OF_LONG;
+        encodingBuffer.putLong(offset + encodedLength, position, LITTLE_ENDIAN);
+        encodedLength += SIZE_OF_LONG;
+
+        encodedLength += encodeStateChange(encodingBuffer, offset + encodedLength, from, to);
+
+        encodedLength += encodeTrailingString(encodingBuffer, offset + encodedLength,
+            captureLength + LOG_HEADER_LENGTH - encodedLength, reason);
+
+        return encodedLength;
+    }
+
+    static <E extends Enum<E>> int recordingSessionStateChangeLength(final E from, final E to, final String reason)
+    {
+        return stateTransitionStringLength(from, to) + (2 * SIZE_OF_LONG) + (SIZE_OF_INT + reason.length());
+    }
+
+    static <E extends Enum<E>> int encodeReplicationSessionStateChange(
+        final UnsafeBuffer encodingBuffer,
+        final int offset,
+        final int captureLength,
+        final int length,
+        final E from,
+        final E to,
+        final long replicationId,
+        final long srcRecordingId,
+        final long dstRecordingId,
+        final long position,
+        final String reason)
+    {
+        int encodedLength = encodeLogHeader(encodingBuffer, offset, captureLength, length);
+
+        encodingBuffer.putLong(offset + encodedLength, replicationId, LITTLE_ENDIAN);
+        encodedLength += SIZE_OF_LONG;
+        encodingBuffer.putLong(offset + encodedLength, srcRecordingId, LITTLE_ENDIAN);
+        encodedLength += SIZE_OF_LONG;
+        encodingBuffer.putLong(offset + encodedLength, dstRecordingId, LITTLE_ENDIAN);
+        encodedLength += SIZE_OF_LONG;
+        encodingBuffer.putLong(offset + encodedLength, position, LITTLE_ENDIAN);
+        encodedLength += SIZE_OF_LONG;
+
+        encodedLength += encodeStateChange(encodingBuffer, offset + encodedLength, from, to);
+
+        encodedLength += encodeTrailingString(encodingBuffer, offset + encodedLength,
+            captureLength + LOG_HEADER_LENGTH - encodedLength, reason);
+
+        return encodedLength;
+    }
+
+    static <E extends Enum<E>> int replicationSessionStateChangeLength(final E from, final E to, final String reason)
+    {
+        return stateTransitionStringLength(from, to) + (4 * SIZE_OF_LONG) + (SIZE_OF_INT + reason.length());
+    }
+
+    static <E extends Enum<E>> int encodeControlSessionStateChange(
+        final UnsafeBuffer encodingBuffer,
+        final int offset,
+        final int captureLength,
+        final int length,
+        final E from,
+        final E to,
+        final long id,
+        final String reason)
+    {
+        int encodedLength = encodeLogHeader(encodingBuffer, offset, captureLength, length);
+
+        encodingBuffer.putLong(offset + encodedLength, id, LITTLE_ENDIAN);
+        encodedLength += SIZE_OF_LONG;
+
+        encodedLength += encodeStateChange(encodingBuffer, offset + encodedLength, from, to);
+
+        encodedLength += encodeTrailingString(encodingBuffer, offset + encodedLength,
+            captureLength + LOG_HEADER_LENGTH - encodedLength, reason);
+
+        return encodedLength;
+    }
+
+    static <E extends Enum<E>> int sessionStateChangeLength(final E from, final E to, final String reason)
+    {
+        return stateTransitionStringLength(from, to) + SIZE_OF_LONG + (SIZE_OF_INT + reason.length());
     }
 
     static void encodeReplaySessionError(
@@ -87,5 +193,54 @@ final class ArchiveEventEncoder
         encodedLength += SIZE_OF_LONG;
 
         encodingBuffer.putLong(offset + encodedLength, newCatalogLength, LITTLE_ENDIAN);
+    }
+
+    static int replicationSessionDoneLength()
+    {
+        return 8 * SIZE_OF_LONG + 3 * SIZE_OF_BYTE;
+    }
+
+    static void encodeReplicationSessionDone(
+        final UnsafeBuffer encodingBuffer,
+        final int offset,
+        final int captureLength,
+        final int length,
+        final long controlSessionId,
+        final long replicationId,
+        final long srcRecordingId,
+        final long replayPosition,
+        final long srcStopPosition,
+        final long dstRecordingId,
+        final long dstStopPosition,
+        final long position,
+        final boolean isClosed,
+        final boolean isEndOfStream,
+        final boolean isSynced)
+    {
+        final int logHeaderLength = encodeLogHeader(encodingBuffer, offset, captureLength, length);
+        final int bodyOffset = offset + logHeaderLength;
+        int bodyLength = 0;
+
+        encodingBuffer.putLong(bodyOffset + bodyLength, controlSessionId, LITTLE_ENDIAN);
+        bodyLength += SIZE_OF_LONG;
+        encodingBuffer.putLong(bodyOffset + bodyLength, replicationId, LITTLE_ENDIAN);
+        bodyLength += SIZE_OF_LONG;
+        encodingBuffer.putLong(bodyOffset + bodyLength, srcRecordingId, LITTLE_ENDIAN);
+        bodyLength += SIZE_OF_LONG;
+        encodingBuffer.putLong(bodyOffset + bodyLength, replayPosition, LITTLE_ENDIAN);
+        bodyLength += SIZE_OF_LONG;
+        encodingBuffer.putLong(bodyOffset + bodyLength, srcStopPosition, LITTLE_ENDIAN);
+        bodyLength += SIZE_OF_LONG;
+        encodingBuffer.putLong(bodyOffset + bodyLength, dstRecordingId, LITTLE_ENDIAN);
+        bodyLength += SIZE_OF_LONG;
+        encodingBuffer.putLong(bodyOffset + bodyLength, dstStopPosition, LITTLE_ENDIAN);
+        bodyLength += SIZE_OF_LONG;
+        encodingBuffer.putLong(bodyOffset + bodyLength, position, LITTLE_ENDIAN);
+        bodyLength += SIZE_OF_LONG;
+        encodingBuffer.putByte(bodyOffset + bodyLength, (byte)(isClosed ? 1 : 0));
+        bodyLength += SIZE_OF_BYTE;
+        encodingBuffer.putByte(bodyOffset + bodyLength, (byte)(isEndOfStream ? 1 : 0));
+        bodyLength += SIZE_OF_BYTE;
+        encodingBuffer.putByte(bodyOffset + bodyLength, (byte)(isSynced ? 1 : 0));
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,7 +36,7 @@ final class NetworkPublicationThreadLocals
 
     NetworkPublicationThreadLocals()
     {
-        final ByteBuffer byteBuffer = BufferUtil.allocateDirectAligned(CACHE_LINE_LENGTH * 3, CACHE_LINE_LENGTH);
+        final ByteBuffer byteBuffer = BufferUtil.allocateDirectAligned(CACHE_LINE_LENGTH * 4, CACHE_LINE_LENGTH);
 
         byteBuffer.limit(DataHeaderFlyweight.HEADER_LENGTH);
         heartbeatBuffer = byteBuffer.slice();

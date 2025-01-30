@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package io.aeron.archive;
 import io.aeron.Aeron;
 import io.aeron.ExclusivePublication;
 import io.aeron.Subscription;
+import io.aeron.archive.client.ArchiveEvent;
 import io.aeron.archive.codecs.ControlResponseCode;
 import io.aeron.archive.codecs.RecordingSignal;
 import io.aeron.archive.codecs.SourceLocation;
@@ -31,7 +32,6 @@ import java.util.ArrayDeque;
 import java.util.function.BooleanSupplier;
 
 import static io.aeron.archive.client.ArchiveException.AUTHENTICATION_REJECTED;
-import static io.aeron.archive.client.ArchiveException.GENERIC;
 import static io.aeron.archive.codecs.ControlResponseCode.*;
 
 /**
@@ -40,8 +40,12 @@ import static io.aeron.archive.codecs.ControlResponseCode.*;
  */
 final class ControlSession implements Session
 {
+    static final String SESSION_CLOSED_MSG = "session closed";
     private static final long RESEND_INTERVAL_MS = 200L;
     private static final String SESSION_REJECTED_MSG = "authentication rejected";
+    private final Thread conductorThread;
+    private long sessionLivenessCheckDeadlineMs;
+    private String abortReason;
 
     enum State
     {
@@ -50,6 +54,7 @@ final class ControlSession implements Session
 
     private final long controlSessionId;
     private final long connectTimeoutMs;
+    private final long sessionLivenessCheckIntervalMs;
     private final long controlPublicationId;
     private long correlationId;
     private long resendDeadlineMs;
@@ -66,7 +71,7 @@ final class ControlSession implements Session
     private final ArrayDeque<BooleanSupplier> syncResponseQueue = new ArrayDeque<>(8);
     private final ManyToOneConcurrentLinkedQueue<BooleanSupplier> asyncResponseQueue =
         new ManyToOneConcurrentLinkedQueue<>();
-    private final ControlSessionDemuxer demuxer;
+    private final ControlSessionAdapter controlSessionAdapter;
     private final String invalidVersionMessage;
     private State state = State.INIT;
 
@@ -74,9 +79,10 @@ final class ControlSession implements Session
         final long controlSessionId,
         final long correlationId,
         final long connectTimeoutMs,
+        final long sessionLivenessCheckIntervalMs,
         final long controlPublicationId,
         final String invalidVersionMessage,
-        final ControlSessionDemuxer demuxer,
+        final ControlSessionAdapter controlSessionAdapter,
         final Aeron aeron,
         final ArchiveConductor conductor,
         final CachedEpochClock cachedEpochClock,
@@ -87,8 +93,9 @@ final class ControlSession implements Session
         this.controlSessionId = controlSessionId;
         this.correlationId = correlationId;
         this.connectTimeoutMs = connectTimeoutMs;
+        this.sessionLivenessCheckIntervalMs = sessionLivenessCheckIntervalMs;
         this.invalidVersionMessage = invalidVersionMessage;
-        this.demuxer = demuxer;
+        this.controlSessionAdapter = controlSessionAdapter;
         this.aeron = aeron;
         this.controlPublicationId = controlPublicationId;
         this.conductor = conductor;
@@ -97,6 +104,8 @@ final class ControlSession implements Session
         this.authenticator = authenticator;
         this.controlSessionProxy = controlSessionProxy;
         this.activityDeadlineMs = cachedEpochClock.time() + connectTimeoutMs;
+        this.sessionLivenessCheckDeadlineMs = cachedEpochClock.time() + sessionLivenessCheckIntervalMs;
+        conductorThread = Thread.currentThread();
     }
 
     /**
@@ -110,12 +119,13 @@ final class ControlSession implements Session
     /**
      * {@inheritDoc}
      */
-    public void abort()
+    public void abort(final String reason)
     {
-        state(State.DONE);
+        abortReason = reason;
+        state(State.DONE, reason);
         if (null != activeListing)
         {
-            activeListing.abort();
+            activeListing.abort(reason);
         }
     }
 
@@ -126,7 +136,7 @@ final class ControlSession implements Session
     {
         if (null != activeListing)
         {
-            activeListing.abort();
+            activeListing.abort(abortReason);
         }
 
         if (null == controlPublication)
@@ -138,10 +148,16 @@ final class ControlSession implements Session
             CloseHelper.close(conductor.context().countedErrorHandler(), controlPublication);
         }
 
-        demuxer.removeControlSession(controlSessionId);
+        controlSessionAdapter.removeControlSession(controlSessionId);
         if (!conductor.context().controlSessionsCounter().isClosed())
         {
             conductor.context().controlSessionsCounter().decrementOrdered();
+        }
+
+        if (null != abortReason && !SESSION_CLOSED_MSG.equals(abortReason))
+        {
+            conductor.errorHandler.onError(new ArchiveEvent(
+                "controlSessionId=" + controlSessionId + " terminated: " + abortReason));
         }
     }
 
@@ -160,6 +176,15 @@ final class ControlSession implements Session
     {
         int workCount = 0;
         final long nowMs = cachedEpochClock.time();
+
+        if (hasNoActivity(nowMs))
+        {
+            abortReason = State.ACTIVE == state ?
+                "failed to send response for more than connectTimeoutMs=" + connectTimeoutMs :
+                "failed to establish initial connection: state=" + state;
+            state(State.INACTIVE, abortReason);
+            workCount++;
+        }
 
         switch (state)
         {
@@ -184,15 +209,24 @@ final class ControlSession implements Session
                 break;
 
             case ACTIVE:
+            {
+                if (sessionLivenessCheckDeadlineMs - nowMs < 0)
+                {
+                    sessionLivenessCheckDeadlineMs = nowMs + sessionLivenessCheckIntervalMs;
+                    sendOkResponse(Aeron.NULL_VALUE, Aeron.NULL_VALUE);
+                    workCount++;
+                }
+
                 workCount += sendResponses(nowMs);
                 break;
+            }
 
             case REJECTED:
                 workCount += sendReject(nowMs);
                 break;
 
             case INACTIVE:
-                state(State.DONE);
+                state(State.DONE, "inactive");
                 break;
 
             case DONE:
@@ -461,6 +495,24 @@ final class ControlSession implements Session
         }
     }
 
+    void onGetMaxRecordedPosition(final long correlationId, final long recordingId)
+    {
+        attemptToActivate();
+        if (State.ACTIVE == state)
+        {
+            conductor.getMaxRecordedPosition(correlationId, recordingId, this);
+        }
+    }
+
+    void onArchiveId(final long correlationId)
+    {
+        attemptToActivate();
+        if (State.ACTIVE == state)
+        {
+            conductor.archiveId(correlationId, this);
+        }
+    }
+
     void onListRecordingSubscriptions(
         final long correlationId,
         final int pseudoIndex,
@@ -505,7 +557,8 @@ final class ControlSession implements Session
         final String srcControlChannel,
         final String liveDestination,
         final String replicationChannel,
-        final byte[] encodedCredentials)
+        final byte[] encodedCredentials,
+        final String srcResponseChannel)
     {
         attemptToActivate();
         if (State.ACTIVE == state)
@@ -524,6 +577,7 @@ final class ControlSession implements Session
                 fileIoMaxLength,
                 replicationSessionId,
                 encodedCredentials,
+                srcResponseChannel,
                 this);
         }
     }
@@ -591,52 +645,58 @@ final class ControlSession implements Session
         }
     }
 
-    void sendOkResponse(final long correlationId, final ControlResponseProxy proxy)
+    void sendOkResponse(final long correlationId)
     {
-        sendResponse(correlationId, 0L, OK, null, proxy);
+        sendResponse(correlationId, 0L, OK, null);
     }
 
-    void sendOkResponse(final long correlationId, final long relevantId, final ControlResponseProxy proxy)
+    void sendOkResponse(final long correlationId, final long relevantId)
     {
-        sendResponse(correlationId, relevantId, OK, null, proxy);
+        sendResponse(correlationId, relevantId, OK, null);
     }
 
-    void sendErrorResponse(final long correlationId, final String errorMessage, final ControlResponseProxy proxy)
+    void sendErrorResponse(final long correlationId, final String errorMessage)
     {
-        sendResponse(correlationId, 0L, ERROR, errorMessage, proxy);
+        sendResponse(correlationId, 0L, ERROR, errorMessage);
     }
 
     void sendErrorResponse(
-        final long correlationId, final long relevantId, final String errorMessage, final ControlResponseProxy proxy)
+        final long correlationId, final long relevantId, final String errorMessage)
     {
-        sendResponse(correlationId, relevantId, ERROR, errorMessage, proxy);
+        sendResponse(correlationId, relevantId, ERROR, errorMessage);
     }
 
-    void sendRecordingUnknown(final long correlationId, final long recordingId, final ControlResponseProxy proxy)
+    void sendRecordingUnknown(final long correlationId, final long recordingId)
     {
-        sendResponse(correlationId, recordingId, RECORDING_UNKNOWN, null, proxy);
+        sendResponse(correlationId, recordingId, RECORDING_UNKNOWN, null);
     }
 
-    void sendSubscriptionUnknown(final long correlationId, final ControlResponseProxy proxy)
+    void sendSubscriptionUnknown(final long correlationId)
     {
-        sendResponse(correlationId, 0L, SUBSCRIPTION_UNKNOWN, null, proxy);
+        sendResponse(correlationId, 0L, SUBSCRIPTION_UNKNOWN, null);
     }
 
     void sendResponse(
         final long correlationId,
         final long relevantId,
         final ControlResponseCode code,
-        final String errorMessage,
-        final ControlResponseProxy proxy)
+        final String errorMessage)
     {
+        assertCalledOnConductorThread();
+
         if (!syncResponseQueue.isEmpty() ||
-            !proxy.sendResponse(controlSessionId, correlationId, relevantId, code, errorMessage, this))
+            !controlResponseProxy.sendResponse(controlSessionId, correlationId, relevantId, code, errorMessage, this))
         {
+            updateActivityDeadline(cachedEpochClock.time());
             queueResponse(correlationId, relevantId, code, errorMessage);
+        }
+        else
+        {
+            activityDeadlineMs = Aeron.NULL_VALUE;
         }
     }
 
-    void asyncSendReplayOkResponse(final long correlationId, final long replaySessionId)
+    void asyncSendOkResponse(final long correlationId, final long replaySessionId)
     {
         if (!asyncResponseQueue.offer(() -> controlResponseProxy.sendResponse(
             controlSessionId,
@@ -650,26 +710,28 @@ final class ControlSession implements Session
         }
     }
 
-    void attemptErrorResponse(final long correlationId, final String errorMessage, final ControlResponseProxy proxy)
+    boolean sendDescriptor(final long correlationId, final UnsafeBuffer descriptorBuffer)
     {
-        proxy.sendResponse(controlSessionId, correlationId, GENERIC, ERROR, errorMessage, this);
+        assertCalledOnConductorThread();
+        final boolean sent =
+            controlResponseProxy.sendDescriptor(controlSessionId, correlationId, descriptorBuffer, this);
+        if (sent)
+        {
+            activityDeadlineMs = Aeron.NULL_VALUE;
+        }
+        return sent;
     }
 
-    void attemptErrorResponse(
-        final long correlationId, final int errorCode, final String errorMessage, final ControlResponseProxy proxy)
+    boolean sendSubscriptionDescriptor(final long correlationId, final Subscription subscription)
     {
-        proxy.sendResponse(controlSessionId, correlationId, errorCode, ERROR, errorMessage, this);
-    }
-
-    int sendDescriptor(final long correlationId, final UnsafeBuffer descriptorBuffer, final ControlResponseProxy proxy)
-    {
-        return proxy.sendDescriptor(controlSessionId, correlationId, descriptorBuffer, this);
-    }
-
-    boolean sendSubscriptionDescriptor(
-        final long correlationId, final Subscription subscription, final ControlResponseProxy proxy)
-    {
-        return proxy.sendSubscriptionDescriptor(controlSessionId, correlationId, subscription, this);
+        assertCalledOnConductorThread();
+        final boolean sent =
+            controlResponseProxy.sendSubscriptionDescriptor(controlSessionId, correlationId, subscription, this);
+        if (sent)
+        {
+            activityDeadlineMs = Aeron.NULL_VALUE;
+        }
+        return sent;
     }
 
     void sendSignal(
@@ -679,6 +741,7 @@ final class ControlSession implements Session
         final long position,
         final RecordingSignal recordingSignal)
     {
+        assertCalledOnConductorThread();
         if (!syncResponseQueue.isEmpty() || !controlResponseProxy.sendSignal(
             controlSessionId,
             correlationId,
@@ -688,17 +751,19 @@ final class ControlSession implements Session
             recordingSignal,
             controlPublication))
         {
-            if (controlPublication.isConnected())
-            {
-                syncResponseQueue.offer(() -> controlResponseProxy.sendSignal(
-                    controlSessionId,
-                    correlationId,
-                    recordingId,
-                    subscriptionId,
-                    position,
-                    recordingSignal,
-                    controlPublication));
-            }
+            updateActivityDeadline(cachedEpochClock.time());
+            syncResponseQueue.offer(() -> controlResponseProxy.sendSignal(
+                controlSessionId,
+                correlationId,
+                recordingId,
+                subscriptionId,
+                position,
+                recordingSignal,
+                controlPublication));
+        }
+        else
+        {
+            activityDeadlineMs = Aeron.NULL_VALUE;
         }
     }
 
@@ -709,19 +774,28 @@ final class ControlSession implements Session
 
     void challenged()
     {
-        state(State.CHALLENGED);
+        state(State.CHALLENGED, "challenged");
     }
 
     void authenticate(final byte[] encodedPrincipal)
     {
         this.encodedPrincipal = encodedPrincipal;
         activityDeadlineMs = Aeron.NULL_VALUE;
-        state(State.AUTHENTICATED);
+        state(State.AUTHENTICATED, "authenticated");
     }
 
     void reject()
     {
-        state(State.REJECTED);
+        state(State.REJECTED, SESSION_REJECTED_MSG);
+    }
+
+    private void assertCalledOnConductorThread()
+    {
+        if (Thread.currentThread() != conductorThread)
+        {
+            throw new IllegalStateException(
+                "Invalid concurrent access detected: " + Thread.currentThread() + " != " + conductorThread);
+        }
     }
 
     private void queueResponse(
@@ -745,7 +819,7 @@ final class ControlSession implements Session
         {
             controlPublication = publication;
             activityDeadlineMs = nowMs + connectTimeoutMs;
-            state(State.CONNECTING);
+            state(State.CONNECTING, "connecting");
             workCount += 1;
         }
 
@@ -758,12 +832,7 @@ final class ControlSession implements Session
 
         if (controlPublication.isConnected())
         {
-            state(State.CONNECTED);
-            workCount += 1;
-        }
-        else if (hasNoActivity(nowMs))
-        {
-            state(State.INACTIVE);
+            state(State.CONNECTED, "connected");
             workCount += 1;
         }
 
@@ -774,12 +843,7 @@ final class ControlSession implements Session
     {
         int workCount = 0;
 
-        if (hasNoActivity(nowMs))
-        {
-            state(State.INACTIVE);
-            workCount += 1;
-        }
-        else if (nowMs > resendDeadlineMs)
+        if (nowMs > resendDeadlineMs)
         {
             resendDeadlineMs = nowMs + RESEND_INTERVAL_MS;
             if (null != invalidVersionMessage)
@@ -805,15 +869,7 @@ final class ControlSession implements Session
 
     private int waitForChallengeResponse(final long nowMs)
     {
-        if (hasNoActivity(nowMs))
-        {
-            state(State.INACTIVE);
-        }
-        else
-        {
-            authenticator.onChallengedSession(controlSessionProxy.controlSession(this), nowMs);
-        }
-
+        authenticator.onChallengedSession(controlSessionProxy.controlSession(this), nowMs);
         return 1;
     }
 
@@ -821,12 +877,7 @@ final class ControlSession implements Session
     {
         int workCount = 0;
 
-        if (hasNoActivity(nowMs))
-        {
-            state(State.INACTIVE);
-            workCount += 1;
-        }
-        else if (nowMs > resendDeadlineMs)
+        if (nowMs > resendDeadlineMs)
         {
             resendDeadlineMs = nowMs + RESEND_INTERVAL_MS;
             if (controlResponseProxy.sendResponse(
@@ -851,7 +902,9 @@ final class ControlSession implements Session
 
         if (!controlPublication.isConnected())
         {
-            state(State.INACTIVE);
+            abortReason = "control publication not connected";
+            state(State.INACTIVE, abortReason);
+            workCount++;
         }
         else
         {
@@ -862,15 +915,6 @@ final class ControlSession implements Session
                     syncResponseQueue.pollFirst();
                     activityDeadlineMs = Aeron.NULL_VALUE;
                     workCount++;
-                }
-                else if (Aeron.NULL_VALUE == activityDeadlineMs)
-                {
-                    activityDeadlineMs = nowMs + connectTimeoutMs;
-                }
-                else if (hasNoActivity(nowMs))
-                {
-                    state(State.INACTIVE);
-                    return workCount;
                 }
             }
 
@@ -883,14 +927,9 @@ final class ControlSession implements Session
                     activityDeadlineMs = Aeron.NULL_VALUE;
                     workCount++;
                 }
-                else if (Aeron.NULL_VALUE == activityDeadlineMs)
+                else
                 {
-                    activityDeadlineMs = nowMs + connectTimeoutMs;
-                }
-                else if (hasNoActivity(nowMs))
-                {
-                    state(State.INACTIVE);
-                    return workCount;
+                    updateActivityDeadline(nowMs);
                 }
             }
         }
@@ -902,21 +941,11 @@ final class ControlSession implements Session
     {
         int workCount = 0;
 
-        if (hasNoActivity(nowMs))
-        {
-            state(State.INACTIVE);
-            workCount += 1;
-        }
-        else if (nowMs > resendDeadlineMs)
+        if (nowMs > resendDeadlineMs)
         {
             resendDeadlineMs = nowMs + RESEND_INTERVAL_MS;
             controlResponseProxy.sendResponse(
-                controlSessionId,
-                correlationId,
-                AUTHENTICATION_REJECTED,
-                ERROR,
-                SESSION_REJECTED_MSG,
-                this);
+                controlSessionId, correlationId, AUTHENTICATION_REJECTED, ERROR, SESSION_REJECTED_MSG, this);
 
             workCount += 1;
         }
@@ -929,23 +958,32 @@ final class ControlSession implements Session
         return Aeron.NULL_VALUE != activityDeadlineMs && nowMs > activityDeadlineMs;
     }
 
+    private void updateActivityDeadline(final long nowMs)
+    {
+        if (Aeron.NULL_VALUE == activityDeadlineMs)
+        {
+            activityDeadlineMs = nowMs + connectTimeoutMs;
+        }
+    }
+
     private void attemptToActivate()
     {
         if (State.AUTHENTICATED == state && null == invalidVersionMessage)
         {
-            state(State.ACTIVE);
+            state(State.ACTIVE, "active");
         }
     }
 
-    private void state(final State state)
+    private void state(final State state, final String reason)
     {
-        logStateChange(this.state, state, controlSessionId);
+        logStateChange(this.state, state, controlSessionId, reason);
         this.state = state;
     }
 
-    private void logStateChange(final State oldState, final State newState, final long controlSessionId)
+    private void logStateChange(
+        final State oldState, final State newState, final long controlSessionId, final String reason)
     {
-//        System.out.println(controlSessionId + ": " + oldState + " -> " + newState);
+//        System.out.println(controlSessionId + ": " + oldState + " -> " + newState + ", reason=\"" + reason + "\"");
     }
 
     public String toString()

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,15 +21,16 @@
 #include "aeron_atomic.h"
 #include "aeron_broadcast_descriptor.h"
 
-#define AERON_BROADCAST_SCRATCH_BUFFER_LENGTH (4096u)
+#define AERON_BROADCAST_SCRATCH_BUFFER_LENGTH_DEFAULT (4096u)
 
 typedef struct aeron_broadcast_receiver_stct
 {
-    uint8_t scratch_buffer[AERON_BROADCAST_SCRATCH_BUFFER_LENGTH];
+    uint8_t *scratch_buffer;
     uint8_t *buffer;
     aeron_broadcast_descriptor_t *descriptor;
     size_t capacity;
     size_t mask;
+    size_t scratch_buffer_capacity;
 
     size_t record_offset;
     int64_t cursor;
@@ -41,11 +42,12 @@ aeron_broadcast_receiver_t;
 typedef void (*aeron_broadcast_receiver_handler_t)(int32_t type_id, uint8_t *buffer, size_t length, void *clientd);
 
 int aeron_broadcast_receiver_init(aeron_broadcast_receiver_t *receiver, void *buffer, size_t length);
+int aeron_broadcast_receiver_close(aeron_broadcast_receiver_t *receiver);
 
 inline bool aeron_broadcast_receiver_validate_at(aeron_broadcast_receiver_t *receiver, int64_t cursor)
 {
     int64_t tail_intent_counter;
-    AERON_GET_VOLATILE(tail_intent_counter, receiver->descriptor->tail_intent_counter);
+    AERON_GET_ACQUIRE(tail_intent_counter, receiver->descriptor->tail_intent_counter);
 
     return (cursor + (int64_t)receiver->capacity) > tail_intent_counter;
 }
@@ -63,7 +65,7 @@ inline bool aeron_broadcast_receiver_receive_next(aeron_broadcast_receiver_t *re
     int64_t tail;
     int64_t cursor = receiver->next_record;
 
-    AERON_GET_VOLATILE(tail, receiver->descriptor->tail_counter);
+    AERON_GET_ACQUIRE(tail, receiver->descriptor->tail_counter);
 
     if (tail > cursor)
     {
@@ -72,7 +74,7 @@ inline bool aeron_broadcast_receiver_receive_next(aeron_broadcast_receiver_t *re
         if (!aeron_broadcast_receiver_validate_at(receiver, cursor))
         {
             receiver->lapped_count++;
-            AERON_GET_VOLATILE(cursor, receiver->descriptor->latest_counter);
+            AERON_GET_ACQUIRE(cursor, receiver->descriptor->latest_counter);
             record_offset = (uint32_t)cursor & (receiver->capacity - 1u);
         }
 

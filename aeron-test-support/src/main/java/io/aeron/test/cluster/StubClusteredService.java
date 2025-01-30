@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ import org.agrona.concurrent.IdleStrategy;
 
 public class StubClusteredService implements ClusteredService
 {
+    private static final int SEND_ATTEMPTS = 3;
     protected Cluster cluster;
     protected IdleStrategy idleStrategy;
 
@@ -73,5 +74,22 @@ public class StubClusteredService implements ClusteredService
     protected long serviceCorrelationId(final int correlationId)
     {
         return ((long)cluster.context().serviceId()) << 56 | correlationId;
+    }
+
+    protected final void echoMessage(
+        final ClientSession session, final DirectBuffer buffer, final int offset, final int length)
+    {
+        idleStrategy.reset();
+        int attempts = SEND_ATTEMPTS;
+        do
+        {
+            final long result = session.offer(buffer, offset, length);
+            if (result > 0)
+            {
+                return;
+            }
+            idleStrategy.idle();
+        }
+        while (--attempts > 0);
     }
 }

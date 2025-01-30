@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -68,7 +68,7 @@ public:
      * @param context for configuration of the client.
      */
     explicit Aeron(Context &context) :
-        m_context(context.conclude()),
+        m_context(std::move(context.conclude())),
         m_aeron(Aeron::init_aeron(m_context)),
         m_countersReader(aeron_counters_reader(m_aeron)),
         m_clientConductor(m_aeron),
@@ -77,10 +77,20 @@ public:
         aeron_start(m_aeron);
     }
 
+    explicit Aeron(aeron_t *aeron) :
+        m_context(aeron_context(aeron)),
+        m_aeron(aeron),
+        m_countersReader(aeron_counters_reader(m_aeron)),
+        m_clientConductor(m_aeron),
+        m_conductorInvoker(m_clientConductor, m_context.m_exceptionHandler)
+    {
+    }
+
     ~Aeron()
     {
+        aeron_on_close_client_pair_t closePair = {emptyCallback, nullptr};
+        aeron_add_close_handler(m_aeron, &closePair);
         aeron_close(m_aeron);
-        aeron_context_close(m_context.m_context);
 
         m_availableCounterHandlers.clear();
         m_unavailableCounterHandlers.clear();
@@ -571,6 +581,7 @@ public:
      * - If the media driver has returned an error, this method will throw the error returned.
      *
      * @see Aeron::addCounter
+     * @see Aeron::addStaticCounter
      *
      * @param registrationId of the Counter returned by Aeron::addCounter
      * @return Counter associated with the registrationId
@@ -633,6 +644,7 @@ public:
      * - If the media driver has returned an error, this method will throw the error returned.
      *
      * @see Aeron::addCounter
+     * @see Aeron::addStaticCounter
      *
      * @param registrationId of the Counter returned by Aeron::addCounter
      * @return Counter associated with the registrationId
@@ -640,7 +652,6 @@ public:
     inline std::shared_ptr<Counter> findCounter(AsyncAddCounter *addCounter)
     {
         aeron_counter_t *counter;
-        std::int64_t registrationId = aeron_async_add_counter_get_registration_id(addCounter);
         int result = aeron_async_add_counter_poll(&counter, addCounter);
         if (result < 0)
         {
@@ -652,8 +663,67 @@ public:
         }
         else
         {
-            return std::make_shared<Counter>(counter, m_countersReader, registrationId);
+            aeron_counter_constants_t counter_constants = {};
+            aeron_counter_constants(counter, &counter_constants);
+            return std::make_shared<Counter>(counter, m_countersReader, counter_constants.registration_id);
         }
+    }
+
+    /**
+     * Allocates or returns an existing static counter instance using specified <code>typeId</code> and
+     * <code>registrationId</code> pair. Such counter cannot be deleted and its lifecycle is decoupled from this
+     * <code>Aeron</code> instance, i.e. won't be freed when this instance is closed or times out.
+     *
+     * @param typeId         for the counter.
+     * @param keyBuffer      containing the optional key for the counter.
+     * @param keyLength      of the key in the keyBuffer.
+     * @param label          for the counter.
+     * @param registrationId that uniquely identifies the static counter for a given <code>typeId</code>
+     * @return correlation id to resolve the AsyncAddCounter for the <code>Counter</code>.
+     */
+    std::int64_t addStaticCounter(
+        std::int32_t typeId,
+        const std::uint8_t *keyBuffer,
+        std::size_t keyLength,
+        const std::string &label,
+        std::int64_t registrationId)
+    {
+        AsyncAddCounter *addCounter = addStaticCounterAsync(typeId, keyBuffer, keyLength, label, registrationId);
+        std::int64_t correlationId = aeron_async_add_counter_get_registration_id(addCounter);
+
+        std::lock_guard<std::recursive_mutex> lock(m_adminLock);
+
+        m_pendingCounters[correlationId] = addCounter;
+        return correlationId;
+    }
+
+    /**
+     * Allocates or returns an existing static counter instance using specified <code>typeId</code> and
+     * <code>registrationId</code> pair. Such counter cannot be deleted and its lifecycle is decoupled from this
+     * <code>Aeron</code> instance, i.e. won't be freed when this instance is closed or times out.
+     *
+     * @param typeId         for the counter.
+     * @param keyBuffer      containing the optional key for the counter.
+     * @param keyLength      of the key in the keyBuffer.
+     * @param label          for the counter.
+     * @param registrationId that uniquely identifies the static counter for a given <code>typeId</code>.
+     * @return AsyncAddCounter to find the counter.
+     */
+    inline AsyncAddCounter *addStaticCounterAsync(
+        std::int32_t typeId,
+        const std::uint8_t *keyBuffer,
+        std::size_t keyLength,
+        const std::string &label,
+        std::int64_t registrationId)
+    {
+        aeron_async_add_counter_t *addCounter;
+        if (aeron_async_add_static_counter(
+            &addCounter, m_aeron, typeId, keyBuffer, keyLength, label.c_str(), label.length(), registrationId) < 0)
+        {
+            AERON_MAP_ERRNO_TO_SOURCED_EXCEPTION_AND_THROW;
+        }
+
+        return addCounter;
     }
 
     /**
@@ -669,7 +739,7 @@ public:
         auto handler_ptr = std::make_shared<on_available_counter_t>(handler);
 
         std::int64_t registrationId = aeron_next_correlation_id(m_aeron);
-        m_availableCounterHandlers.emplace_back(std::make_pair(registrationId, handler_ptr));
+        m_availableCounterHandlers.emplace_back(registrationId, handler_ptr);
         auto &storedHandler = m_availableCounterHandlers.back();
 
         aeron_on_available_counter_pair_t counterPair;
@@ -731,7 +801,7 @@ public:
         auto handler_ptr = std::make_shared<on_unavailable_counter_t>(handler);
 
         std::int64_t registrationId = aeron_next_correlation_id(m_aeron);
-        m_unavailableCounterHandlers.emplace_back(std::make_pair(registrationId, handler_ptr));
+        m_unavailableCounterHandlers.emplace_back(registrationId, handler_ptr);
         auto &storedHandler = m_unavailableCounterHandlers.back();
 
         aeron_on_unavailable_counter_pair_t counterPair;
@@ -793,7 +863,7 @@ public:
         std::shared_ptr<on_close_client_t> handler_ptr = std::make_shared<on_close_client_t>(handler);
 
         std::int64_t registrationId = aeron_next_correlation_id(m_aeron);
-        m_closeClientHandlers.emplace_back(std::make_pair(registrationId, handler_ptr));
+        m_closeClientHandlers.emplace_back(registrationId, handler_ptr);
 
         aeron_on_close_client_pair_t counterPair;
         counterPair.handler = onCloseClientCallback;
@@ -903,6 +973,16 @@ public:
     }
 
     /**
+     * Get the underlying C Aeron client. Applications should not need to use this method.
+     *
+     * @return the underlying C Aeron client.
+     */
+    inline aeron_t *aeron() const
+    {
+        return m_aeron;
+    }
+
+    /**
      * Return the static version and build string for the binary library.
      *
      * @return static version and build string for the binary library.
@@ -974,6 +1054,10 @@ private:
     {
         on_close_client_t &callback = *reinterpret_cast<on_close_client_t *>(clientd);
         callback();
+    }
+
+    static void emptyCallback(void * /* clientd */)
+    {
     }
 };
 }

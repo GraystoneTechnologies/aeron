@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -38,7 +38,7 @@ void aeron_driver_receiver_proxy_offer(aeron_driver_receiver_proxy_t *receiver_p
 void aeron_driver_receiver_proxy_on_add_endpoint(
     aeron_driver_receiver_proxy_t *receiver_proxy, aeron_receive_channel_endpoint_t *endpoint)
 {
-    receiver_proxy->on_add_endpoint_func(endpoint->conductor_fields.udp_channel);
+    receiver_proxy->log.on_add_endpoint(endpoint->conductor_fields.udp_channel);
 
     aeron_command_base_t cmd =
         {
@@ -59,7 +59,7 @@ void aeron_driver_receiver_proxy_on_add_endpoint(
 void aeron_driver_receiver_proxy_on_remove_endpoint(
     aeron_driver_receiver_proxy_t *receiver_proxy, aeron_receive_channel_endpoint_t *endpoint)
 {
-    receiver_proxy->on_remove_endpoint_func(endpoint->conductor_fields.udp_channel);
+    receiver_proxy->log.on_remove_endpoint(endpoint->conductor_fields.udp_channel);
 
     aeron_command_base_t cmd =
         {
@@ -136,6 +136,30 @@ void aeron_driver_receiver_proxy_on_add_subscription_by_session(
     if (AERON_THREADING_MODE_IS_SHARED_OR_INVOKER(receiver_proxy->threading_mode))
     {
         aeron_driver_receiver_on_add_subscription_by_session(receiver_proxy->receiver, &cmd);
+    }
+    else
+    {
+        aeron_driver_receiver_proxy_offer(receiver_proxy, &cmd, sizeof(cmd));
+    }
+}
+
+void aeron_driver_receiver_proxy_on_request_setup(
+    aeron_driver_receiver_proxy_t *receiver_proxy,
+    aeron_receive_channel_endpoint_t *endpoint,
+    int32_t stream_id,
+    int32_t session_id)
+{
+    aeron_command_subscription_t cmd =
+        {
+            .base = { .func = aeron_driver_receiver_on_request_setup, .item = NULL },
+            .endpoint = endpoint,
+            .stream_id = stream_id,
+            .session_id = session_id
+        };
+
+    if (AERON_THREADING_MODE_IS_SHARED_OR_INVOKER(receiver_proxy->threading_mode))
+    {
+        aeron_driver_receiver_on_request_setup(receiver_proxy->receiver, &cmd);
     }
     else
     {
@@ -325,5 +349,34 @@ void aeron_driver_receiver_proxy_on_resolution_change(
     else
     {
         aeron_driver_receiver_proxy_offer(receiver_proxy, &cmd, sizeof(cmd));
+    }
+}
+
+void aeron_driver_receiver_proxy_on_invalidate_image(
+    aeron_driver_receiver_proxy_t *receiver_proxy,
+    int64_t image_correlation_id,
+    int64_t position,
+    int32_t reason_length,
+    const char *reason)
+{
+    reason_length = reason_length <= AERON_ERROR_MAX_TEXT_LENGTH ? reason_length : AERON_ERROR_MAX_TEXT_LENGTH;
+    uint8_t message_buffer[sizeof(aeron_command_base_t) + AERON_ERROR_MAX_TEXT_LENGTH + 1];
+    aeron_command_receiver_invalidate_image_t *cmd = (aeron_command_receiver_invalidate_image_t *)message_buffer;
+
+    cmd->base.func = aeron_driver_receiver_on_invalidate_image;
+    cmd->base.item = NULL;
+    cmd->image_correlation_id = image_correlation_id;
+    cmd->position = position;
+    cmd->reason_length = reason_length;
+    memcpy(cmd->reason_text, reason, reason_length);
+    aeron_str_null_terminate(cmd->reason_text, reason_length);
+
+    if (AERON_THREADING_MODE_IS_SHARED_OR_INVOKER(receiver_proxy->threading_mode))
+    {
+        aeron_driver_receiver_on_invalidate_image(receiver_proxy->receiver, cmd);
+    }
+    else
+    {
+        aeron_driver_receiver_proxy_offer(receiver_proxy, cmd, sizeof(*cmd) + reason_length);
     }
 }

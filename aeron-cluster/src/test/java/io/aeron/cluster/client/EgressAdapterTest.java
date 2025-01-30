@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package io.aeron.cluster.client;
 import io.aeron.Subscription;
 import io.aeron.cluster.codecs.*;
 import io.aeron.logbuffer.Header;
+
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.Test;
 
@@ -36,14 +37,46 @@ class EgressAdapterTest
     private final AdminResponseEncoder adminResponseEncoder = new AdminResponseEncoder();
 
     @Test
-    void onFragmentShouldThrowClusterExceptionOnInvalidSchemaId()
+    void onFragmentShouldDelegateToEgressListenerOnUnknownSchemaId()
     {
-        final EgressAdapter adapter = new EgressAdapter(mock(EgressListener.class), 42, mock(Subscription.class), 5);
+        final int schemaId = 17;
+        final int templateId = 19;
+        messageHeaderEncoder
+            .wrap(buffer, 0)
+            .schemaId(schemaId)
+            .templateId(templateId);
 
+        final EgressListenerExtension listenerExtension = mock(EgressListenerExtension.class);
+        final Header header = new Header(0, 0);
+        final EgressAdapter adapter = new EgressAdapter(
+            mock(EgressListener.class), listenerExtension, 0, mock(Subscription.class), 3);
+
+        adapter.onFragment(buffer, 0, MessageHeaderDecoder.ENCODED_LENGTH * 2, header);
+
+        verify(listenerExtension).onExtensionMessage(
+            anyInt(),
+            eq(templateId),
+            eq(schemaId),
+            eq(0),
+            eq(buffer),
+            eq(MessageHeaderDecoder.ENCODED_LENGTH),
+            eq(MessageHeaderDecoder.ENCODED_LENGTH));
+        verifyNoMoreInteractions(listenerExtension);
+    }
+
+    @Test
+    void defaultEgressListenerBehaviourShouldThrowClusterExceptionOnUnknownSchemaId()
+    {
+        final EgressListener listener = (clusterSessionId, timestamp, buffer, offset, length, header) ->
+        {
+        };
+        final EgressAdapter adapter =
+            new EgressAdapter(listener, 42, mock(Subscription.class), 5);
         final ClusterException exception = assertThrows(ClusterException.class,
             () -> adapter.onFragment(buffer, 0, 64, new Header(0, 0)));
         assertEquals("ERROR - expected schemaId=" + MessageHeaderDecoder.SCHEMA_ID + ", actual=0",
             exception.getMessage());
+
     }
 
     @Test

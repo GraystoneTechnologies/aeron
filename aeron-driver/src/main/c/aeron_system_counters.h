@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -55,6 +55,12 @@ typedef enum aeron_system_counter_enum_stct
     AERON_SYSTEM_COUNTER_RECEIVER_CYCLE_TIME_THRESHOLD_EXCEEDED = 31,
     AERON_SYSTEM_COUNTER_NAME_RESOLVER_MAX_TIME = 32,
     AERON_SYSTEM_COUNTER_NAME_RESOLVER_TIME_THRESHOLD_EXCEEDED = 33,
+    AERON_SYSTEM_COUNTER_AERON_VERSION = 34,
+    AERON_SYSTEM_COUNTER_BYTES_CURRENTLY_MAPPED = 35,
+    AERON_SYSTEM_COUNTER_RETRANSMITTED_BYTES = 36,
+    AERON_SYSTEM_COUNTER_RETRANSMIT_OVERFLOW = 37,
+    AERON_SYSTEM_COUNTER_ERROR_FRAMES_RECEIVED = 38,
+    AERON_SYSTEM_COUNTER_ERROR_FRAMES_SENT = 39,
 
     // Add all new counters before this one (used for a static assertion).
     AERON_SYSTEM_COUNTER_DUMMY_LAST,

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,10 +15,7 @@
  */
 package io.aeron.archive.client;
 
-import io.aeron.Aeron;
-import io.aeron.ChannelUriStringBuilder;
-import io.aeron.Publication;
-import io.aeron.Subscription;
+import io.aeron.*;
 import io.aeron.archive.codecs.*;
 import io.aeron.security.CredentialsSupplier;
 import io.aeron.security.NullCredentialsSupplier;
@@ -44,7 +41,7 @@ public final class ArchiveProxy
     private final CredentialsSupplier credentialsSupplier;
 
     private final ExpandableArrayBuffer buffer = new ExpandableArrayBuffer(256);
-    private final Publication publication;
+    private final ExclusivePublication publication;
     private final MessageHeaderEncoder messageHeader = new MessageHeaderEncoder();
     private StartRecordingRequestEncoder startRecordingRequest;
     private StartRecordingRequest2Encoder startRecordingRequest2;
@@ -62,6 +59,7 @@ public final class ArchiveProxy
     private TruncateRecordingRequestEncoder truncateRecordingRequest;
     private PurgeRecordingRequestEncoder purgeRecordingRequest;
     private StopPositionRequestEncoder stopPositionRequest;
+    private MaxRecordedPositionRequestEncoder maxRecordedPositionRequestEncoder;
     private FindLastMatchingRecordingRequestEncoder findLastMatchingRecordingRequest;
     private ListRecordingSubscriptionsRequestEncoder listRecordingSubscriptionsRequest;
     private BoundedReplayRequestEncoder boundedReplayRequest;
@@ -74,17 +72,37 @@ public final class ArchiveProxy
     private PurgeSegmentsRequestEncoder purgeSegmentsRequest;
     private AttachSegmentsRequestEncoder attachSegmentsRequest;
     private MigrateSegmentsRequestEncoder migrateSegmentsRequest;
+    private ArchiveIdRequestEncoder archiveIdRequestEncoder;
+    private ReplayTokenRequestEncoder replayTokenRequestEncoder;
 
     /**
-     * Create a proxy with a {@link Publication} for sending control message requests.
+     * Create a proxy with a {@link ExclusivePublication} for sending control message requests.
      * <p>
      * This provides a default {@link IdleStrategy} of a {@link YieldingIdleStrategy} when offers are back pressured
      * with a defaults of {@link AeronArchive.Configuration#MESSAGE_TIMEOUT_DEFAULT_NS} and
      * {@link #DEFAULT_RETRY_ATTEMPTS}.
      *
      * @param publication publication for sending control messages to an archive.
+     * @throws ClassCastException if {@code publication} is not an instance of {@link ExclusivePublication}.
+     * @deprecated Use another constructor with an {@link ExclusivePublication}.
      */
+    @Deprecated(forRemoval = true, since = "1.47.0")
     public ArchiveProxy(final Publication publication)
+    {
+        this((ExclusivePublication)publication);
+    }
+
+    /**
+     * Create a proxy with a {@link ExclusivePublication} for sending control message requests.
+     * <p>
+     * This provides a default {@link IdleStrategy} of a {@link YieldingIdleStrategy} when offers are back pressured
+     * with a defaults of {@link AeronArchive.Configuration#MESSAGE_TIMEOUT_DEFAULT_NS} and
+     * {@link #DEFAULT_RETRY_ATTEMPTS}.
+     *
+     * @param publication publication for sending control messages to an archive.
+     * @throws ClassCastException if {@code publication} is not an instance of {@link ExclusivePublication}.
+     */
+    public ArchiveProxy(final ExclusivePublication publication)
     {
         this(
             publication,
@@ -96,7 +114,7 @@ public final class ArchiveProxy
     }
 
     /**
-     * Create a proxy with a {@link Publication} for sending control message requests.
+     * Create a proxy with a {@link ExclusivePublication} for sending control message requests.
      *
      * @param publication         publication for sending control messages to an archive.
      * @param retryIdleStrategy   for what should happen between retry attempts at offering messages.
@@ -104,9 +122,40 @@ public final class ArchiveProxy
      * @param connectTimeoutNs    for connection requests.
      * @param retryAttempts       for offering control messages before giving up.
      * @param credentialsSupplier for the AuthConnectRequest
+     * @throws ClassCastException if {@code publication} is not an instance of {@link ExclusivePublication}.
+     * @deprecated Use another constructor with an {@link ExclusivePublication}.
      */
+    @Deprecated(forRemoval = true, since = "1.47.0")
     public ArchiveProxy(
         final Publication publication,
+        final IdleStrategy retryIdleStrategy,
+        final NanoClock nanoClock,
+        final long connectTimeoutNs,
+        final int retryAttempts,
+        final CredentialsSupplier credentialsSupplier)
+    {
+        this(
+            (ExclusivePublication)publication,
+            retryIdleStrategy,
+            nanoClock,
+            connectTimeoutNs,
+            retryAttempts,
+            credentialsSupplier);
+    }
+
+    /**
+     * Create a proxy with a {@link ExclusivePublication} for sending control message requests.
+     *
+     * @param publication         publication for sending control messages to an archive.
+     * @param retryIdleStrategy   for what should happen between retry attempts at offering messages.
+     * @param nanoClock           to be used for calculating checking deadlines.
+     * @param connectTimeoutNs    for connection requests.
+     * @param retryAttempts       for offering control messages before giving up.
+     * @param credentialsSupplier for the AuthConnectRequest
+     * @since 1.47.0
+     */
+    public ArchiveProxy(
+        final ExclusivePublication publication,
         final IdleStrategy retryIdleStrategy,
         final NanoClock nanoClock,
         final long connectTimeoutNs,
@@ -447,7 +496,8 @@ public final class ArchiveProxy
                 replayStreamId,
                 correlationId,
                 controlSessionId,
-                replayParams.fileIoMaxLength());
+                replayParams.fileIoMaxLength(),
+                replayParams.replayToken());
         }
         else
         {
@@ -459,7 +509,8 @@ public final class ArchiveProxy
                 replayStreamId,
                 correlationId,
                 controlSessionId,
-                replayParams.fileIoMaxLength());
+                replayParams.fileIoMaxLength(),
+                replayParams.replayToken());
         }
     }
 
@@ -492,6 +543,7 @@ public final class ArchiveProxy
             replayStreamId,
             correlationId,
             controlSessionId,
+            Aeron.NULL_VALUE,
             Aeron.NULL_VALUE);
     }
 
@@ -527,6 +579,7 @@ public final class ArchiveProxy
             replayStreamId,
             correlationId,
             controlSessionId,
+            Aeron.NULL_VALUE,
             Aeron.NULL_VALUE);
     }
 
@@ -875,6 +928,53 @@ public final class ArchiveProxy
     }
 
     /**
+     * Get the stop or active recorded position of a recording.
+     *
+     * @param recordingId      of the recording that the stop of active recording position is being requested for.
+     * @param correlationId    for this request.
+     * @param controlSessionId for this request.
+     * @return true if successfully offered otherwise false.
+     */
+    public boolean getMaxRecordedPosition(
+        final long recordingId, final long correlationId, final long controlSessionId)
+    {
+        if (null == maxRecordedPositionRequestEncoder)
+        {
+            maxRecordedPositionRequestEncoder = new MaxRecordedPositionRequestEncoder();
+        }
+
+        maxRecordedPositionRequestEncoder
+            .wrapAndApplyHeader(buffer, 0, messageHeader)
+            .controlSessionId(controlSessionId)
+            .correlationId(correlationId)
+            .recordingId(recordingId);
+
+        return offer(maxRecordedPositionRequestEncoder.encodedLength());
+    }
+
+    /**
+     * Get the id of the Archive.
+     *
+     * @param correlationId    for this request.
+     * @param controlSessionId for this request.
+     * @return true if successfully offered otherwise false.
+     */
+    public boolean archiveId(final long correlationId, final long controlSessionId)
+    {
+        if (null == archiveIdRequestEncoder)
+        {
+            archiveIdRequestEncoder = new ArchiveIdRequestEncoder();
+        }
+
+        archiveIdRequestEncoder
+            .wrapAndApplyHeader(buffer, 0, messageHeader)
+            .controlSessionId(controlSessionId)
+            .correlationId(correlationId);
+
+        return offer(archiveIdRequestEncoder.encodedLength());
+    }
+
+    /**
      * Find the last recording that matches the given criteria.
      *
      * @param minRecordingId   to search back to.
@@ -994,7 +1094,8 @@ public final class ArchiveProxy
             controlSessionId,
             Aeron.NULL_VALUE,
             Aeron.NULL_VALUE,
-            NullCredentialsSupplier.NULL_CREDENTIAL);
+            NullCredentialsSupplier.NULL_CREDENTIAL,
+            null);
     }
 
     /**
@@ -1047,7 +1148,8 @@ public final class ArchiveProxy
             controlSessionId,
             Aeron.NULL_VALUE,
             Aeron.NULL_VALUE,
-            NullCredentialsSupplier.NULL_CREDENTIAL);
+            NullCredentialsSupplier.NULL_CREDENTIAL,
+            null);
     }
 
     /**
@@ -1099,7 +1201,8 @@ public final class ArchiveProxy
             controlSessionId,
             Aeron.NULL_VALUE,
             Aeron.NULL_VALUE,
-            NullCredentialsSupplier.NULL_CREDENTIAL);
+            NullCredentialsSupplier.NULL_CREDENTIAL,
+            null);
     }
 
     /**
@@ -1156,7 +1259,8 @@ public final class ArchiveProxy
             controlSessionId,
             Aeron.NULL_VALUE,
             Aeron.NULL_VALUE,
-            NullCredentialsSupplier.NULL_CREDENTIAL);
+            NullCredentialsSupplier.NULL_CREDENTIAL,
+            null);
     }
 
     /**
@@ -1208,7 +1312,8 @@ public final class ArchiveProxy
             controlSessionId,
             replicationParams.fileIoMaxLength(),
             replicationParams.replicationSessionId(),
-            replicationParams.encodedCredentials());
+            replicationParams.encodedCredentials(),
+            replicationParams.srcResponseChannel());
     }
 
     /**
@@ -1390,6 +1495,32 @@ public final class ArchiveProxy
         return offer(migrateSegmentsRequest.encodedLength());
     }
 
+    /**
+     * Request a token for this session that will allow a replay to be initiated from another image without
+     * re-authentication.
+     *
+     * @param lastCorrelationId for the request
+     * @param controlSessionId  for the request
+     * @param recordingId       that will be replayed.
+     * @return true if successfully offered
+     */
+    public boolean requestReplayToken(final long lastCorrelationId, final long controlSessionId, final long recordingId)
+    {
+        if (null == replayTokenRequestEncoder)
+        {
+            replayTokenRequestEncoder = new ReplayTokenRequestEncoder();
+        }
+
+        replayTokenRequestEncoder
+            .wrapAndApplyHeader(buffer, 0, messageHeader)
+            .controlSessionId(controlSessionId)
+            .correlationId(lastCorrelationId)
+            .recordingId(recordingId);
+
+        return offer(replayTokenRequestEncoder.encodedLength());
+    }
+
+
     private boolean offer(final int length)
     {
         retryIdleStrategy.reset();
@@ -1397,25 +1528,26 @@ public final class ArchiveProxy
         int attempts = retryAttempts;
         while (true)
         {
-            final long result = publication.offer(buffer, 0, MessageHeaderEncoder.ENCODED_LENGTH + length);
-            if (result > 0)
+            final long position = this.publication.offer(buffer, 0, MessageHeaderEncoder.ENCODED_LENGTH + length);
+            if (position > 0)
             {
                 return true;
             }
 
-            if (result == Publication.CLOSED)
+            if (position == Publication.CLOSED)
             {
                 throw new ArchiveException("connection to the archive has been closed");
             }
 
-            if (result == Publication.NOT_CONNECTED)
+            if (position == Publication.NOT_CONNECTED)
             {
                 throw new ArchiveException("connection to the archive is no longer available");
             }
 
-            if (result == Publication.MAX_POSITION_EXCEEDED)
+            if (position == Publication.MAX_POSITION_EXCEEDED)
             {
-                throw new ArchiveException("offer failed due to max position being reached");
+                throw new ArchiveException(
+                    "offer failed due to max position being reached: term-length=" + publication.termBufferLength());
             }
 
             if (--attempts <= 0)
@@ -1434,20 +1566,21 @@ public final class ArchiveProxy
         final long deadlineNs = nanoClock.nanoTime() + connectTimeoutNs;
         while (true)
         {
-            final long result = publication.offer(buffer, 0, MessageHeaderEncoder.ENCODED_LENGTH + length);
-            if (result > 0)
+            final long position = publication.offer(buffer, 0, MessageHeaderEncoder.ENCODED_LENGTH + length);
+            if (position > 0)
             {
                 return true;
             }
 
-            if (result == Publication.CLOSED)
+            if (position == Publication.CLOSED)
             {
                 throw new ArchiveException("connection to the archive has been closed");
             }
 
-            if (result == Publication.MAX_POSITION_EXCEEDED)
+            if (position == Publication.MAX_POSITION_EXCEEDED)
             {
-                throw new ArchiveException("offer failed due to max position being reached");
+                throw new ArchiveException(
+                    "offer failed due to max position being reached: term-length=" + publication.termBufferLength());
             }
 
             if (deadlineNs - nanoClock.nanoTime() < 0)
@@ -1472,7 +1605,8 @@ public final class ArchiveProxy
         final int replayStreamId,
         final long correlationId,
         final long controlSessionId,
-        final int fileIoMaxLength)
+        final int fileIoMaxLength,
+        final long replayToken)
     {
         if (null == replayRequest)
         {
@@ -1488,6 +1622,7 @@ public final class ArchiveProxy
             .length(length)
             .replayStreamId(replayStreamId)
             .fileIoMaxLength(fileIoMaxLength)
+            .replayToken(replayToken)
             .replayChannel(replayChannel);
 
         return offer(replayRequest.encodedLength());
@@ -1502,7 +1637,8 @@ public final class ArchiveProxy
         final int replayStreamId,
         final long correlationId,
         final long controlSessionId,
-        final int fileIoMaxLength)
+        final int fileIoMaxLength,
+        final long replayToken)
     {
         if (null == boundedReplayRequest)
         {
@@ -1519,6 +1655,7 @@ public final class ArchiveProxy
             .limitCounterId(limitCounterId)
             .replayStreamId(replayStreamId)
             .fileIoMaxLength(fileIoMaxLength)
+            .replayToken(replayToken)
             .replayChannel(replayChannel);
 
         return offer(boundedReplayRequest.encodedLength());
@@ -1538,7 +1675,8 @@ public final class ArchiveProxy
         final long controlSessionId,
         final int fileIoMaxLength,
         final int replicationSessionId,
-        final byte[] encodedCredentials)
+        final byte[] encodedCredentials,
+        final String srcResponseChannel)
     {
         if (null == replicateRequest)
         {
@@ -1560,7 +1698,8 @@ public final class ArchiveProxy
             .liveDestination(liveDestination)
             .replicationChannel(replicationChannel)
             .replicationSessionId(replicationSessionId)
-            .putEncodedCredentials(encodedCredentials, 0, encodedCredentials.length);
+            .putEncodedCredentials(encodedCredentials, 0, encodedCredentials.length)
+            .srcResponseChannel(srcResponseChannel);
 
         return offer(replicateRequest.encodedLength());
     }

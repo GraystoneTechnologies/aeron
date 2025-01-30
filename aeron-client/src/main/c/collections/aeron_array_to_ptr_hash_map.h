@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -197,11 +197,11 @@ inline int aeron_array_to_ptr_hash_map_put(
     if (NULL == old_value)
     {
         ++map->size;
-        map->keys[index].arr = key;
         map->keys[index].hash_code = hash_code;
         map->keys[index].arr_length = key_len;
     }
 
+    map->keys[index].arr = key;
     map->values[index] = value;
 
     if (map->size > map->resize_threshold)

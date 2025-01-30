@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -65,7 +65,6 @@ public class OptimalMulticastDelayGenerator implements FeedbackDelayGenerator
 
     /**
      * Create new feedback delay generator based on estimates. Pre-calculating some parameters upfront.
-     * <p>
      *
      * @param maxBackoffT of the delay interval
      * @param groupSize   estimate
@@ -83,7 +82,7 @@ public class OptimalMulticastDelayGenerator implements FeedbackDelayGenerator
     /**
      * {@inheritDoc}
      */
-    public long generateDelay()
+    public long generateDelayNs()
     {
         return (long)generateNewOptimalDelay();
     }

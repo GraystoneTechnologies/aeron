@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,12 +32,28 @@ public final class SampleAuthenticator implements Authenticator
     private static final String CHALLENGE_CREDENTIALS_STRING = "admin:CSadmin";
     private static final String CHALLENGE_STRING = "challenge!";
 
+    /**
+     * A sample principal representing an administrator.
+     */
+    public static final String PRINCIPAL = "admin";
+
     enum SessionState
     {
         CHALLENGE, AUTHENTICATED, REJECT
     }
 
     private final Long2ObjectHashMap<SessionState> sessionIdToStateMap = new Long2ObjectHashMap<>();
+
+    /**
+     * Byte array encoded representation of the sample principal.
+     *
+     * @return byte array representation of {@link #PRINCIPAL}
+     * @see #PRINCIPAL
+     */
+    public byte[] encodedPrincipal()
+    {
+        return PRINCIPAL.getBytes(StandardCharsets.US_ASCII);
+    }
 
     /**
      * Client is attempting to connect.
@@ -94,7 +110,8 @@ public final class SampleAuthenticator implements Authenticator
      */
     public void onConnectedSession(final SessionProxy sessionProxy, final long nowMs)
     {
-        final SessionState sessionState = sessionIdToStateMap.get(sessionProxy.sessionId());
+        final long sessionId = sessionProxy.sessionId();
+        final SessionState sessionState = sessionIdToStateMap.get(sessionId);
 
         if (null != sessionState)
         {
@@ -105,11 +122,15 @@ public final class SampleAuthenticator implements Authenticator
                     break;
 
                 case AUTHENTICATED:
-                    sessionProxy.authenticate(ArrayUtil.EMPTY_BYTE_ARRAY);
+                    if (sessionProxy.authenticate(encodedPrincipal()))
+                    {
+                        sessionIdToStateMap.remove(sessionId);
+                    }
                     break;
 
                 case REJECT:
                     sessionProxy.reject();
+                    sessionIdToStateMap.remove(sessionId);
                     break;
             }
         }
@@ -123,7 +144,8 @@ public final class SampleAuthenticator implements Authenticator
      */
     public void onChallengedSession(final SessionProxy sessionProxy, final long nowMs)
     {
-        final SessionState sessionState = sessionIdToStateMap.get(sessionProxy.sessionId());
+        final long sessionId = sessionProxy.sessionId();
+        final SessionState sessionState = sessionIdToStateMap.get(sessionId);
 
         if (null != sessionState)
         {
@@ -133,11 +155,15 @@ public final class SampleAuthenticator implements Authenticator
                     break;
 
                 case AUTHENTICATED:
-                    sessionProxy.authenticate(ArrayUtil.EMPTY_BYTE_ARRAY);
+                    if (sessionProxy.authenticate(ArrayUtil.EMPTY_BYTE_ARRAY))
+                    {
+                        sessionIdToStateMap.remove(sessionId);
+                    }
                     break;
 
                 case REJECT:
                     sessionProxy.reject();
+                    sessionIdToStateMap.remove(sessionId);
                     break;
             }
         }

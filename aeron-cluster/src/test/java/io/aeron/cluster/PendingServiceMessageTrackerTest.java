@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,7 +39,7 @@ import static org.mockito.Mockito.when;
 
 class PendingServiceMessageTrackerTest
 {
-    private final CountersManager countersManager = Tests.newCountersMananger(16 * 1024);
+    private final CountersManager countersManager = Tests.newCountersManager(16 * 1024);
     private final int counterId = countersManager.allocate("test");
     private final Counter counter = new Counter(countersManager, 0, counterId);
     private final LogPublisher logPublisher = mock(LogPublisher.class);
@@ -170,7 +170,7 @@ class PendingServiceMessageTrackerTest
     @Test
     void loadInvalid()
     {
-        final CountersManager countersManager = Tests.newCountersMananger(16 * 1024);
+        final CountersManager countersManager = Tests.newCountersManager(16 * 1024);
         final int counterId = countersManager.allocate("test");
         final Counter counter = new Counter(countersManager, 0, counterId);
         final LogPublisher logPublisher = mock(LogPublisher.class);
@@ -187,7 +187,7 @@ class PendingServiceMessageTrackerTest
     @Test
     void loadValid()
     {
-        final CountersManager countersManager = Tests.newCountersMananger(16 * 1024);
+        final CountersManager countersManager = Tests.newCountersManager(16 * 1024);
         final int counterId = countersManager.allocate("test");
         final Counter counter = new Counter(countersManager, 0, counterId);
         final LogPublisher logPublisher = mock(LogPublisher.class);
@@ -224,7 +224,7 @@ class PendingServiceMessageTrackerTest
     private static void loadSnapshot(final PendingServiceMessageTracker tracker, final Snapshot snapshot)
     {
         tracker.loadState(snapshot.nextServiceSessionId, snapshot.logServiceSessionId, snapshot.size);
-        snapshot.messages.forEach(msg -> tracker.appendMessage(msg, 0, msg.capacity()));
+        snapshot.messages.forEach((msg) -> tracker.appendMessage(msg, 0, msg.capacity()));
     }
 
     private static final class Snapshot

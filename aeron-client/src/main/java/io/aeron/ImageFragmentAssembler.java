@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,11 +17,9 @@ package io.aeron;
 
 import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.Header;
-import org.agrona.BitUtil;
 import org.agrona.DirectBuffer;
 
 import static io.aeron.logbuffer.FrameDescriptor.*;
-import static io.aeron.protocol.DataHeaderFlyweight.HEADER_LENGTH;
 
 /**
  * A {@link FragmentHandler} that sits in a chain-of-responsibility pattern that reassembles fragmented messages
@@ -122,21 +120,22 @@ public class ImageFragmentAssembler implements FragmentHandler
         if ((flags & BEGIN_FRAG_FLAG) == BEGIN_FRAG_FLAG)
         {
             builder.reset()
+                .captureHeader(header)
                 .append(buffer, offset, length)
-                .nextTermOffset(BitUtil.align(offset + length + HEADER_LENGTH, FRAME_ALIGNMENT));
+                .nextTermOffset(header.nextTermOffset());
         }
-        else if (offset == builder.nextTermOffset())
+        else if (header.termOffset() == builder.nextTermOffset())
         {
             builder.append(buffer, offset, length);
 
             if ((flags & END_FRAG_FLAG) == END_FRAG_FLAG)
             {
-                delegate.onFragment(builder.buffer(), 0, builder.limit(), header);
+                delegate.onFragment(builder.buffer(), 0, builder.limit(), builder.completeHeader(header));
                 builder.reset();
             }
             else
             {
-                builder.nextTermOffset(BitUtil.align(offset + length + HEADER_LENGTH, FRAME_ALIGNMENT));
+                builder.nextTermOffset(header.nextTermOffset());
             }
         }
         else

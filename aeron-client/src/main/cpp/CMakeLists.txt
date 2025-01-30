@@ -1,5 +1,5 @@
 #
-# Copyright 2014-2023 Real Logic Limited.
+# Copyright 2014-2025 Real Logic Limited.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ if (MSVC AND "${CMAKE_SYSTEM_NAME}" MATCHES "Windows")
 endif ()
 
 SET(SOURCE
+    ${CMAKE_CURRENT_SOURCE_DIR}/AeronVersion.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Publication.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ExclusivePublication.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Subscription.cpp
@@ -33,6 +34,8 @@ SET(SOURCE
 
 SET(HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/Aeron.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/AeronCounters.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/AeronVersion.h
     ${CMAKE_CURRENT_SOURCE_DIR}/BufferBuilder.h
     ${CMAKE_CURRENT_SOURCE_DIR}/ChannelUri.h
     ${CMAKE_CURRENT_SOURCE_DIR}/ChannelUriStringBuilder.h
@@ -135,19 +138,18 @@ SET(HEADERS
 
 # static library
 add_library(aeron_client STATIC ${SOURCE} ${HEADERS})
+add_library(aeron::aeron_client ALIAS aeron_client)
 add_library(aeron_client_shared SHARED ${SOURCE} ${HEADERS})
+add_library(aeron::aeron_client_shared ALIAS aeron_client_shared)
 
 target_include_directories(aeron_client
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>" "$<INSTALL_INTERFACE:include>")
 
 target_include_directories(aeron_client_shared
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>" "$<INSTALL_INTERFACE:include>")
 
 if (MSVC)
     string(REPLACE "/" "\\\\" NATIVE_PROJECT_SOURCE_DIR "${PROJECT_SOURCE_DIR}")
-    if (${CMAKE_VERSION} VERSION_LESS "3.13.0")
-        string(TOLOWER "${NATIVE_PROJECT_SOURCE_DIR}" NATIVE_PROJECT_SOURCE_DIR)
-    endif ()
 else ()
     set(NATIVE_PROJECT_SOURCE_DIR "${PROJECT_SOURCE_DIR}")
 endif ()
@@ -155,12 +157,12 @@ endif ()
 target_compile_definitions(aeron_client
     PUBLIC $<$<NOT:$<CONFIG:Debug>>:DISABLE_BOUNDS_CHECKS>
     # relative file paths for use in exceptions
-    PUBLIC "__PROJECT_SOURCE_DIR__=\"${NATIVE_PROJECT_SOURCE_DIR}\"")
+    PUBLIC "$<BUILD_INTERFACE:__PROJECT_SOURCE_DIR__=\"${NATIVE_PROJECT_SOURCE_DIR}\">")
 
 target_compile_definitions(aeron_client_shared
     PUBLIC $<$<NOT:$<CONFIG:Debug>>:DISABLE_BOUNDS_CHECKS>
     # relative file paths for use in exceptions
-    PUBLIC "__PROJECT_SOURCE_DIR__=\"${NATIVE_PROJECT_SOURCE_DIR}\""
+    PUBLIC "$<BUILD_INTERFACE:__PROJECT_SOURCE_DIR__=\"${NATIVE_PROJECT_SOURCE_DIR}\">"
     PUBLIC CLIENT_SHARED DLL_EXPORT)
 
 if (NOT WIN32)
@@ -176,8 +178,9 @@ target_link_libraries(aeron_client_shared
 
 if (AERON_INSTALL_TARGETS)
     install(TARGETS aeron_client_shared aeron_client
+        EXPORT aeron-targets
         RUNTIME DESTINATION lib
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib)
-    install(DIRECTORY . DESTINATION include FILES_MATCHING PATTERN "*.h")
+    install(DIRECTORY ./ DESTINATION include FILES_MATCHING PATTERN "*.h")
 endif ()

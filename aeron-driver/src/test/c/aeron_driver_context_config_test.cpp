@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -179,5 +179,44 @@ TEST_F(DriverContextConfigTest, shouldHandleValuesOutsideOfUint32Range)
     aeron_env_set(AERON_DRIVER_RESOURCE_FREE_LIMIT_ENV_VAR, "-1");
     EXPECT_EQ(0, aeron_driver_context_init(&context));
     EXPECT_EQ(1, aeron_driver_context_get_resource_free_limit(context));
+    aeron_driver_context_close(context);
+}
+
+TEST_F(DriverContextConfigTest, shouldReturnDefaultLowFileStoreWarningThresholdIfNoneProvided)
+{
+    const uint64_t default_low_storage_warning_threshold = 160 * 1024 * 1024;
+
+    aeron_driver_context_t *context = nullptr;
+    EXPECT_EQ(default_low_storage_warning_threshold, aeron_driver_context_get_low_file_store_warning_threshold(context));
+
+    ASSERT_EQ(0, aeron_driver_context_init(&context));
+    EXPECT_EQ(default_low_storage_warning_threshold, aeron_driver_context_get_low_file_store_warning_threshold(context));
+    aeron_driver_context_close(context);
+}
+
+TEST_F(DriverContextConfigTest, shouldAssignLowStoreWarningThreshold)
+{
+    aeron_driver_context_t *context = nullptr;
+    EXPECT_EQ(-1, aeron_driver_context_set_low_file_store_warning_threshold(context, 42));
+
+    const uint64_t threshold = 1024 * 1024;
+    ASSERT_EQ(0, aeron_driver_context_init(&context));
+    EXPECT_EQ(0, aeron_driver_context_set_low_file_store_warning_threshold(context, threshold));
+    EXPECT_EQ(threshold, aeron_driver_context_get_low_file_store_warning_threshold(context));
+    aeron_driver_context_close(context);
+}
+
+TEST_F(DriverContextConfigTest, shouldReadLowFileStoreWarningThresholdFromAnEnvironmentVariable)
+{
+    aeron_driver_context_t *context = nullptr;
+    aeron_env_set(AERON_LOW_FILE_STORE_WARNING_THRESHOLD_ENV_VAR, "2m");
+    ASSERT_EQ(0, aeron_driver_context_init(&context));
+    EXPECT_EQ(2 * 1024 * 1024, aeron_driver_context_get_low_file_store_warning_threshold(context));
+    aeron_driver_context_close(context);
+
+    const uint64_t default_low_storage_warning_threshold = 160 * 1024 * 1024;
+    aeron_env_set(AERON_LOW_FILE_STORE_WARNING_THRESHOLD_ENV_VAR, "garbage");
+    ASSERT_EQ(0, aeron_driver_context_init(&context));
+    EXPECT_EQ(default_low_storage_warning_threshold, aeron_driver_context_get_low_file_store_warning_threshold(context));
     aeron_driver_context_close(context);
 }

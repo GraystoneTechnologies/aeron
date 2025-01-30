@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -40,16 +40,18 @@ int aeron_ipc_publication_create(
 {
     char path[AERON_MAX_PATH];
     int path_length = aeron_ipc_publication_location(path, sizeof(path), context->aeron_dir, registration_id);
+    if (path_length < 0)
+    {
+        AERON_APPEND_ERR("%s", "Could not resolve IPC publication file path");
+        return -1;
+    }
     aeron_ipc_publication_t *_pub = NULL;
     const uint64_t log_length = aeron_logbuffer_compute_log_length(params->term_length, context->file_page_size);
 
     *publication = NULL;
 
-    if (context->perform_storage_checks && context->usable_fs_space_func(context->aeron_dir) < log_length)
+    if (aeron_driver_context_run_storage_checks(context, log_length) < 0)
     {
-        AERON_SET_ERR(
-            -AERON_ERROR_CODE_STORAGE_SPACE,
-            "Insufficient usable storage for new log of length=%" PRId64 " in %s", log_length, context->aeron_dir);
         return -1;
     }
 
@@ -85,9 +87,14 @@ int aeron_ipc_publication_create(
         AERON_APPEND_ERR("error mapping IPC raw log: %s", path);
         return -1;
     }
+
+    _pub->mapped_bytes_counter = aeron_system_counter_addr(
+        system_counters, AERON_SYSTEM_COUNTER_BYTES_CURRENTLY_MAPPED);
+    aeron_counter_add_ordered(_pub->mapped_bytes_counter, (int64_t)log_length);
+
     _pub->raw_log_close_func = context->raw_log_close_func;
     _pub->raw_log_free_func = context->raw_log_free_func;
-    _pub->untethered_subscription_state_change_func = context->untethered_subscription_state_change_func;
+    _pub->log.untethered_subscription_state_change = context->log.untethered_subscription_on_state_change;
 
     strncpy(_pub->log_file_name, path, (size_t)path_length);
     _pub->log_file_name[path_length] = '\0';
@@ -130,16 +137,40 @@ int aeron_ipc_publication_create(
 
     int64_t now_ns = aeron_clock_cached_nano_time(context->cached_clock);
 
-    _pub->log_meta_data->initial_term_id = initial_term_id;
-    _pub->log_meta_data->mtu_length = (int32_t)params->mtu_length;
-    _pub->log_meta_data->term_length = (int32_t)params->term_length;
-    _pub->log_meta_data->page_size = (int32_t)context->file_page_size;
-    _pub->log_meta_data->correlation_id = registration_id;
-    _pub->log_meta_data->is_connected = 0;
-    _pub->log_meta_data->active_transport_count = 0;
-    _pub->log_meta_data->end_of_stream_position = INT64_MAX;
-    aeron_logbuffer_fill_default_header(
-        _pub->mapped_raw_log.log_meta_data.addr, session_id, stream_id, initial_term_id);
+    aeron_logbuffer_metadata_init(
+        _pub->mapped_raw_log.log_meta_data.addr,
+        INT64_MAX,
+        0,
+        0,
+        registration_id,
+        initial_term_id,
+        (int32_t)params->mtu_length,
+        (int32_t)params->term_length,
+        (int32_t)context->file_page_size,
+        (int32_t)params->publication_window_length,
+        0,
+        0,
+        (int32_t)context->os_buffer_lengths.default_so_sndbuf,
+        (int32_t)context->os_buffer_lengths.max_so_sndbuf,
+        0,
+        (int32_t)context->os_buffer_lengths.default_so_rcvbuf,
+        (int32_t)context->os_buffer_lengths.max_so_rcvbuf,
+        (int32_t)params->max_resend,
+        session_id,
+        stream_id,
+        (int64_t)params->entity_tag,
+        (int64_t)params->response_correlation_id,
+        (int64_t)params->linger_timeout_ns,
+        (int64_t)params->untethered_window_limit_timeout_ns,
+        (int64_t)params->untethered_resting_timeout_ns,
+        (uint8_t)false,
+        (uint8_t)params->is_response,
+        (uint8_t)false,
+        (uint8_t)false,
+        (uint8_t)params->is_sparse,
+        (uint8_t)params->signal_eos,
+        (uint8_t)params->spies_simulate_connection,
+        (uint8_t)false);
 
     _pub->conductor_fields.subscribable.correlation_id = registration_id;
     _pub->conductor_fields.subscribable.array = NULL;
@@ -167,10 +198,11 @@ int aeron_ipc_publication_create(
     _pub->starting_term_id = params->has_position ? params->term_id : initial_term_id;
     _pub->starting_term_offset = params->has_position ? params->term_offset : 0;
     _pub->position_bits_to_shift = (size_t)aeron_number_of_trailing_zeroes((int32_t)params->term_length);
-    _pub->term_window_length = (int64_t)aeron_producer_window_length(
-        context->ipc_publication_window_length, params->term_length);
+    _pub->term_window_length = params->publication_window_length;
     _pub->trip_gain = _pub->term_window_length / 8;
     _pub->unblock_timeout_ns = (int64_t)context->publication_unblock_timeout_ns;
+    _pub->untethered_window_limit_timeout_ns = (int64_t)params->untethered_window_limit_timeout_ns;
+    _pub->untethered_resting_timeout_ns = (int64_t)params->untethered_resting_timeout_ns;
     _pub->is_exclusive = is_exclusive;
 
     _pub->conductor_fields.consumer_position = aeron_ipc_publication_producer_position(_pub);
@@ -216,20 +248,27 @@ bool aeron_ipc_publication_free(aeron_ipc_publication_t *publication)
         return false;
     }
 
+    aeron_counter_add_ordered(
+        publication->mapped_bytes_counter, -((int64_t)publication->mapped_raw_log.mapped_file.length));
+
     aeron_free(publication->log_file_name);
     aeron_free(publication);
+
     return true;
 }
 
-int aeron_ipc_publication_update_pub_lmt(aeron_ipc_publication_t *publication)
+int aeron_ipc_publication_update_pub_pos_and_lmt(aeron_ipc_publication_t *publication)
 {
     int work_count = 0;
 
     if (AERON_IPC_PUBLICATION_STATE_ACTIVE == publication->conductor_fields.state)
     {
+        const int64_t producer_position = aeron_ipc_publication_producer_position(publication);
         int64_t consumer_position = publication->conductor_fields.consumer_position;
 
-        if (publication->conductor_fields.subscribable.length > 0)
+        aeron_counter_set_ordered(publication->pub_pos_position.value_addr, producer_position);
+
+        if (aeron_driver_subscribable_has_working_positions(&publication->conductor_fields.subscribable))
         {
             int64_t min_sub_pos = INT64_MAX;
             int64_t max_sub_pos = consumer_position;
@@ -287,7 +326,7 @@ void aeron_ipc_publication_clean_buffer(aeron_ipc_publication_t *publication, in
             length - sizeof(int64_t));
 
         uint64_t *ptr = (uint64_t *)(publication->mapped_raw_log.term_buffers[dirty_index].addr + term_offset);
-        AERON_PUT_ORDERED(*ptr, (uint64_t)0);
+        AERON_SET_RELEASE(*ptr, (uint64_t)0);
 
         publication->conductor_fields.clean_position = (int64_t)(clean_position + length);
     }
@@ -300,9 +339,10 @@ void aeron_ipc_publication_check_untethered_subscriptions(
     int64_t term_window_length = publication->term_window_length;
     int64_t untethered_window_limit = (consumer_position - term_window_length) + (term_window_length / 4);
 
-    for (size_t i = 0, length = publication->conductor_fields.subscribable.length; i < length; i++)
+    aeron_subscribable_t *subscribable = &publication->conductor_fields.subscribable;
+    for (size_t i = 0, length = subscribable->length; i < length; i++)
     {
-        aeron_tetherable_position_t *tetherable_position = &publication->conductor_fields.subscribable.array[i];
+        aeron_tetherable_position_t *tetherable_position = &subscribable->array[i];
 
         if (tetherable_position->is_tether)
         {
@@ -310,8 +350,8 @@ void aeron_ipc_publication_check_untethered_subscriptions(
         }
         else
         {
-            int64_t window_limit_timeout_ns = (int64_t)conductor->context->untethered_window_limit_timeout_ns;
-            int64_t resting_timeout_ns = (int64_t)conductor->context->untethered_resting_timeout_ns;
+            int64_t window_limit_timeout_ns = publication->untethered_window_limit_timeout_ns;
+            int64_t resting_timeout_ns = publication->untethered_resting_timeout_ns;
 
             switch (tetherable_position->state)
             {
@@ -330,7 +370,10 @@ void aeron_ipc_publication_check_untethered_subscriptions(
                             AERON_IPC_CHANNEL,
                             AERON_IPC_CHANNEL_LEN);
 
-                        publication->untethered_subscription_state_change_func(
+                        aeron_driver_subscribable_state(
+                            subscribable, tetherable_position, AERON_SUBSCRIPTION_TETHER_LINGER, now_ns);
+
+                        conductor->context->log.untethered_subscription_on_state_change(
                             tetherable_position,
                             now_ns,
                             AERON_SUBSCRIPTION_TETHER_LINGER,
@@ -342,7 +385,10 @@ void aeron_ipc_publication_check_untethered_subscriptions(
                 case AERON_SUBSCRIPTION_TETHER_LINGER:
                     if (now_ns > (tetherable_position->time_of_last_update_ns + window_limit_timeout_ns))
                     {
-                        publication->untethered_subscription_state_change_func(
+                        aeron_driver_subscribable_state(
+                            subscribable, tetherable_position, AERON_SUBSCRIPTION_TETHER_RESTING, now_ns);
+
+                        conductor->context->log.untethered_subscription_on_state_change(
                             tetherable_position,
                             now_ns,
                             AERON_SUBSCRIPTION_TETHER_RESTING,
@@ -354,7 +400,8 @@ void aeron_ipc_publication_check_untethered_subscriptions(
                 case AERON_SUBSCRIPTION_TETHER_RESTING:
                     if (now_ns > (tetherable_position->time_of_last_update_ns + resting_timeout_ns))
                     {
-                        aeron_counter_set_ordered(tetherable_position->value_addr, consumer_position);
+                        int64_t join_position = aeron_ipc_publication_join_position(publication);
+                        aeron_counter_set_ordered(tetherable_position->value_addr, join_position);
                         aeron_driver_conductor_on_available_image(
                             conductor,
                             publication->conductor_fields.managed_resource.registration_id,
@@ -367,7 +414,10 @@ void aeron_ipc_publication_check_untethered_subscriptions(
                             AERON_IPC_CHANNEL,
                             AERON_IPC_CHANNEL_LEN);
 
-                        publication->untethered_subscription_state_change_func(
+                        aeron_driver_subscribable_state(
+                            subscribable, tetherable_position, AERON_SUBSCRIPTION_TETHER_ACTIVE, now_ns);
+
+                        conductor->context->log.untethered_subscription_on_state_change(
                             tetherable_position,
                             now_ns,
                             AERON_SUBSCRIPTION_TETHER_ACTIVE,
@@ -466,7 +516,7 @@ void aeron_ipc_publication_decref(void *clientd)
             aeron_counter_set_ordered(publication->pub_lmt_position.value_addr, producer_position);
         }
 
-        AERON_PUT_ORDERED(publication->log_meta_data->end_of_stream_position, producer_position);
+        AERON_SET_RELEASE(publication->log_meta_data->end_of_stream_position, producer_position);
         publication->conductor_fields.state = AERON_IPC_PUBLICATION_STATE_DRAINING;
     }
 }
@@ -512,7 +562,5 @@ extern int64_t aeron_ipc_publication_join_position(aeron_ipc_publication_t *publ
 extern bool aeron_ipc_publication_has_reached_end_of_life(aeron_ipc_publication_t *publication);
 
 extern bool aeron_ipc_publication_is_drained(aeron_ipc_publication_t *publication);
-
-extern size_t aeron_ipc_publication_num_subscribers(aeron_ipc_publication_t *publication);
 
 extern bool aeron_ipc_publication_is_accepting_subscriptions(aeron_ipc_publication_t *publication);

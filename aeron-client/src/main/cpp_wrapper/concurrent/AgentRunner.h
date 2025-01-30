@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,7 +37,7 @@ template <typename Agent, typename IdleStrategy>
 class AgentRunner
 {
 public:
-    AgentRunner(Agent &agent, IdleStrategy &idleStrategy, logbuffer::exception_handler_t &exceptionHandler) :
+    AgentRunner(Agent &agent, IdleStrategy &idleStrategy, util::exception_handler_t &exceptionHandler) :
         m_agent(agent),
         m_idleStrategy(idleStrategy),
         m_exceptionHandler(exceptionHandler),
@@ -48,7 +48,7 @@ public:
     AgentRunner(
         Agent &agent,
         IdleStrategy &idleStrategy,
-        logbuffer::exception_handler_t &exceptionHandler,
+        util::exception_handler_t &exceptionHandler,
         const std::string &name) :
         m_agent(agent),
         m_idleStrategy(idleStrategy),
@@ -122,7 +122,9 @@ public:
 #elif defined(Darwin)
                 pthread_setname_np(m_name.c_str());
 #else
-                pthread_setname_np(pthread_self(), m_name.c_str());
+                char threadName[16UL] = {};
+                std::copy(m_name.begin(), m_name.begin() + std::min(m_name.size(), 15UL), threadName);
+                pthread_setname_np(pthread_self(), threadName);
 #endif
                 run();
             });
@@ -195,7 +197,7 @@ public:
 private:
     Agent &m_agent;
     IdleStrategy &m_idleStrategy;
-    logbuffer::exception_handler_t &m_exceptionHandler;
+    util::exception_handler_t &m_exceptionHandler;
     std::atomic<bool> m_isStarted = { false };
     std::atomic<bool> m_isRunning = { false };
     std::atomic<bool> m_isClosed = { false };

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 package io.aeron.driver;
 
+import io.aeron.protocol.ErrorFlyweight;
 import io.aeron.protocol.StatusMessageFlyweight;
 
 import java.net.InetSocketAddress;
@@ -53,8 +54,27 @@ public class TaggedMulticastFlowControl extends AbstractMinMulticastFlowControl
         final int positionBitsToShift,
         final long timeNs)
     {
-        final boolean matchesTag = matchesTag(flyweight);
-        return processStatusMessage(flyweight, senderLimit, initialTermId, positionBitsToShift, timeNs, matchesTag);
+        return processStatusMessage(
+            flyweight, senderLimit, initialTermId, positionBitsToShift, timeNs, matchesTag(flyweight));
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public void onTriggerSendSetup(
+        final StatusMessageFlyweight flyweight,
+        final InetSocketAddress receiverAddress,
+        final long timeNs)
+    {
+        processSendSetupTrigger(flyweight, receiverAddress, timeNs, matchesTag(flyweight));
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public void onError(final ErrorFlyweight errorFlyweight, final InetSocketAddress receiverAddress, final long timeNs)
+    {
+        processError(errorFlyweight, receiverAddress, timeNs, matchesTag(errorFlyweight));
     }
 
     @SuppressWarnings("deprecation")
@@ -85,5 +105,10 @@ public class TaggedMulticastFlowControl extends AbstractMinMulticastFlowControl
         }
 
         return result;
+    }
+
+    private boolean matchesTag(final ErrorFlyweight errorFlyweight)
+    {
+        return errorFlyweight.hasGroupTag() && errorFlyweight.groupTag() == super.groupTag();
     }
 }

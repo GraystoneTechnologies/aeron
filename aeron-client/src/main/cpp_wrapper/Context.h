@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,12 +20,13 @@
 #include <memory>
 #include <iostream>
 
-#include "util/Exceptions.h"
+#include "aeron_common.h"
+#include "aeronc.h"
+#include "CncFileDescriptor.h"
 #include "concurrent/AgentRunner.h"
 #include "concurrent/CountersReader.h"
-#include "CncFileDescriptor.h"
-
-#include "aeronc.h"
+#include "status/PublicationErrorFrame.h"
+#include "util/Exceptions.h"
 
 namespace aeron
 {
@@ -38,7 +39,7 @@ class Image;
 /**
  * Used to represent a null value for when some value is not yet set.
  */
-constexpr const std::int32_t NULL_VALUE = -1;
+static constexpr std::int32_t NULL_VALUE = -1;
 
 /**
  * Function called by Aeron to deliver notification of an available image.
@@ -133,9 +134,12 @@ typedef std::function<void(
  */
 typedef std::function<void()> on_close_client_t;
 
+typedef std::function<void(aeron::status::PublicationErrorFrame &errorFrame)> on_publication_error_frame_t;
+
 const static long NULL_TIMEOUT = -1;
 const static long DEFAULT_MEDIA_DRIVER_TIMEOUT_MS = 10000;
 const static long DEFAULT_RESOURCE_LINGER_MS = 5000;
+const static int MAX_CLIENT_NAME_LENGTH = 100;
 
 /**
  * The Default handler for Aeron runtime exceptions.
@@ -192,6 +196,10 @@ inline void defaultOnCloseClientHandler()
 {
 }
 
+inline void defaultOnErrorFrameHandler(aeron::status::PublicationErrorFrame &)
+{
+}
+
 /**
  * This class provides configuration for the {@link Aeron} class via the {@link Aeron::Aeron} or {@link Aeron::connect}
  * methods and its overloads. It gives applications some control over the interactions with the Aeron Media Driver.
@@ -211,8 +219,42 @@ public:
     }
 
     /// @cond HIDDEN_SYMBOLS
+    explicit Context(aeron_context_t *context)
+    {
+        m_context = context;
+    }
+    /// @endcond
+
+    Context(Context &&other) noexcept :
+        m_context(other.m_context),
+        m_onAvailableImageHandler(other.m_onAvailableImageHandler),
+        m_onUnavailableImageHandler(other.m_onUnavailableImageHandler),
+        m_exceptionHandler(other.m_exceptionHandler),
+        m_onNewPublicationHandler(other.m_onNewPublicationHandler),
+        m_isOnNewExclusivePublicationHandlerSet(other.m_isOnNewExclusivePublicationHandlerSet),
+        m_onNewExclusivePublicationHandler(other.m_onNewExclusivePublicationHandler),
+        m_onNewSubscriptionHandler(other.m_onNewSubscriptionHandler),
+        m_onAvailableCounterHandler(other.m_onAvailableCounterHandler),
+        m_onUnavailableCounterHandler(other.m_onUnavailableCounterHandler),
+        m_onCloseClientHandler(other.m_onCloseClientHandler),
+        m_onErrorFrameHandler(other.m_onErrorFrameHandler)
+    {
+        other.m_context = nullptr;
+    }
+
+    ~Context()
+    {
+        aeron_context_close(m_context);
+    }
+
+    /// @cond HIDDEN_SYMBOLS
     this_t &conclude()
     {
+        if (clientName().length() > MAX_CLIENT_NAME_LENGTH)
+        {
+            throw util::IllegalArgumentException("clientName length must <= 100", SOURCEINFO);
+        }
+
         if (!m_isOnNewExclusivePublicationHandlerSet)
         {
             newExclusivePublicationHandler(m_onNewPublicationHandler);
@@ -234,6 +276,41 @@ public:
             throw IllegalArgumentException(std::string(aeron_errmsg()), SOURCEINFO);
         }
         return *this;
+    }
+
+    /**
+     * Get the directory that the Aeron client will use to communicate with the media driver.
+     *
+     * @return aeron directory
+     */
+    inline std::string aeronDir()
+    {
+        return std::string(aeron_context_get_dir(m_context));
+    }
+
+    /**
+     * Set the name for this Aeron client.
+     *
+     * @param clientName to set.
+     * @return reference to this Context instance.
+     */
+    inline this_t &clientName(const std::string &clientName)
+    {
+        if (aeron_context_set_client_name(m_context, clientName.c_str()) < 0)
+        {
+            throw IllegalArgumentException(std::string(aeron_errmsg()), SOURCEINFO);
+        }
+        return *this;
+    }
+
+    /**
+     * Get the name of this Aeron client.
+     *
+     * @return client name or empty string.
+     */
+    inline std::string clientName()
+    {
+        return {aeron_context_get_client_name(m_context)};
     }
 
     /**
@@ -407,9 +484,40 @@ public:
         {
             throw IllegalArgumentException("timeout less than 0", SOURCEINFO);
         }
-
         std::uint64_t duration_ns = static_cast<std::uint64_t>(value) * 1000000;
         if (aeron_context_set_resource_linger_duration_ns(m_context, duration_ns) < 0)
+        {
+            throw IllegalArgumentException(std::string(aeron_errmsg()), SOURCEINFO);
+        }
+        return *this;
+    }
+
+    /**
+     * Get the amount of time, in milliseconds, that the client conductor will sleep when idle.
+     *
+     * @return value in number of milliseconds.
+     * @see errorHandler
+     */
+    long idleSleepDuration() const
+    {
+        return static_cast<long>(aeron_context_get_idle_sleep_duration_ns(m_context) / 1000000);
+    }
+
+    /**
+     * Set the amount of time, in milliseconds, that the client conductor will sleep when idle.
+     *
+     * @param value Number of milliseconds.
+     * @return reference to this Context instance
+     */
+    inline this_t &idleSleepDuration(long value)
+    {
+        if (value < 0)
+        {
+            throw IllegalArgumentException("idle sleep less than 0", SOURCEINFO);
+        }
+
+        std::uint64_t duration_ns = static_cast<std::uint64_t>(value) * 1000000;
+        if (aeron_context_set_idle_sleep_duration_ns(m_context, duration_ns) < 0)
         {
             throw IllegalArgumentException(std::string(aeron_errmsg()), SOURCEINFO);
         }
@@ -443,6 +551,19 @@ public:
         return *this;
     }
 
+    /**
+     * Set handler to receive notifications when a publication error is received for a publication that this client
+     * is interested in.
+     *
+     * @param handler
+     * @return reference to this Context instance.
+     */
+    inline this_t &errorFrameHandler(on_publication_error_frame_t &handler)
+    {
+        m_onErrorFrameHandler = handler;
+        return *this;
+    }
+
     static bool requestDriverTermination(
         const std::string &directory, const std::uint8_t *tokenBuffer, std::size_t tokenLength)
     {
@@ -457,28 +578,27 @@ public:
 
     static std::string defaultAeronPath()
     {
-        char path[1024];
-        std::size_t length = sizeof(path);
-        int result = aeron_default_path(path, length);
+        char path[AERON_MAX_PATH];
+        int result = aeron_default_path(path, sizeof(path));
 
         if (result < 0)
         {
             std::string errMsg = std::string("Failed to get default path, result: ") += std::to_string(result);
             throw IllegalStateException(errMsg, SOURCEINFO);
         }
-        else if (length <= static_cast<std::size_t>(result))
+        else if (AERON_MAX_PATH <= static_cast<std::size_t>(result))
         {
             std::string errMsg = std::string("Path information was truncated, buffer length: ");
-            errMsg += std::to_string(length);
+            errMsg += std::to_string(AERON_MAX_PATH);
             errMsg += ", path length: ";
             errMsg += std::to_string(result);
-            errMsg += ", path: ";
-            errMsg += std::string(path, 0, length);
+            errMsg += ", truncated path: ";
+            errMsg += std::string(path, 0, AERON_MAX_PATH);
 
             throw IllegalStateException(errMsg, SOURCEINFO);
         }
 
-        return { path, 0, length };
+        return { path, 0, (std::size_t)result };
     }
 
 private:
@@ -493,6 +613,7 @@ private:
     on_available_counter_t m_onAvailableCounterHandler = defaultOnAvailableCounterHandler;
     on_unavailable_counter_t m_onUnavailableCounterHandler = defaultOnUnavailableCounterHandler;
     on_close_client_t m_onCloseClientHandler = defaultOnCloseClientHandler;
+    on_publication_error_frame_t m_onErrorFrameHandler = defaultOnErrorFrameHandler;
 
     void attachCallbacksToContext()
     {
@@ -551,6 +672,14 @@ private:
         {
             throw IllegalArgumentException(std::string(aeron_errmsg()), SOURCEINFO);
         }
+
+        if (aeron_context_set_publication_error_frame_handler(
+            m_context,
+            errorFrameHandlerCallback,
+            const_cast<void *>(reinterpret_cast<const void *>(&m_onErrorFrameHandler))) < 0)
+        {
+            throw IllegalArgumentException(std::string(aeron_errmsg()), SOURCEINFO);
+        }
     }
 
     static void errorHandlerCallback(void *clientd, int errcode, const char *message)
@@ -601,6 +730,13 @@ private:
     {
         on_close_client_t &handler = *reinterpret_cast<on_close_client_t *>(clientd);
         handler();
+    }
+
+    static void errorFrameHandlerCallback(void *clientd, aeron_publication_error_values_t *error_frame)
+    {
+        on_publication_error_frame_t &handler = *reinterpret_cast<on_publication_error_frame_t *>(clientd);
+        aeron::status::PublicationErrorFrame errorFrame{error_frame};
+        handler(errorFrame);
     }
 };
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -123,14 +123,6 @@ public class ClusterComponentLogger implements ComponentLogger
 
         tempBuilder = addEventInstrumentation(
             tempBuilder,
-            DYNAMIC_JOIN_STATE_CHANGE,
-            "DynamicJoin",
-            ClusterInterceptor.DynamicJoinStateChange.class,
-            "logStateChange"
-        );
-
-        tempBuilder = addEventInstrumentation(
-            tempBuilder,
             CLUSTER_BACKUP_STATE_CHANGE,
             "ClusterBackupAgent",
             ClusterInterceptor.ClusterBackupStateChange.class,
@@ -240,6 +232,20 @@ public class ClusterComponentLogger implements ComponentLogger
             "ConsensusModuleAgent",
             ClusterInterceptor.ReplicationEnded.class,
             "logReplicationEnded");
+
+        tempBuilder = addEventInstrumentation(
+            tempBuilder,
+            STANDBY_SNAPSHOT_NOTIFICATION,
+            "ConsensusModuleAgent",
+            ClusterInterceptor.StandbySnapshotNotification.class,
+            "logStandbySnapshotNotification");
+
+        tempBuilder = addEventInstrumentation(
+            tempBuilder,
+            NEW_ELECTION,
+            "ConsensusModuleAgent",
+            ClusterInterceptor.NewElection.class,
+            "logNewElection");
 
         return tempBuilder;
     }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,7 +22,6 @@
 #include <stdbool.h>
 
 #define AERON_MAX_HOSTNAME_LEN (256)
-#define AERON_MAX_PATH (384)
 #define AERON_CHANNEL_STATUS_INDICATOR_NOT_ALLOCATED (-1)
 #define AERON_URI_INVALID_TAG (-1)
 
@@ -87,11 +86,22 @@ typedef struct aeron_subscribable_stct
     size_t length;
     size_t capacity;
     aeron_tetherable_position_t *array;
+    size_t resting_count;
     void (*add_position_hook_func)(void *clientd, volatile int64_t *value_addr);
     void (*remove_position_hook_func)(void *clientd, volatile int64_t *value_addr);
     void *clientd;
 }
 aeron_subscribable_t;
+
+void aeron_driver_subscribable_state(
+    aeron_subscribable_t *subscribable,
+    aeron_tetherable_position_t *tetherable_position,
+    aeron_subscription_tether_state_t state,
+    int64_t now_ns);
+
+size_t aeron_driver_subscribable_working_position_count(aeron_subscribable_t *subscribable);
+
+bool aeron_driver_subscribable_has_working_positions(aeron_subscribable_t *subscribable);
 
 typedef struct aeron_command_base_stct
 {
@@ -102,13 +112,14 @@ aeron_command_base_t;
 
 typedef struct aeron_feedback_delay_generator_state_stct aeron_feedback_delay_generator_state_t;
 
-typedef int64_t (*aeron_feedback_delay_generator_func_t)(aeron_feedback_delay_generator_state_t *state);
+typedef int64_t (*aeron_feedback_delay_generator_func_t)(aeron_feedback_delay_generator_state_t *state, bool retry);
 
 struct aeron_feedback_delay_generator_state_stct
 {
     struct static_delay_stct
     {
         int64_t delay_ns;
+        int64_t retry_ns;
     }
     static_delay;
 
@@ -121,7 +132,6 @@ struct aeron_feedback_delay_generator_state_stct
     }
     optimal_delay;
 
-    bool should_immediate_feedback;
     aeron_feedback_delay_generator_func_t delay_generator;
 };
 

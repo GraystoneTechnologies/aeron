@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,13 +15,20 @@
  */
 package io.aeron;
 
+import io.aeron.logbuffer.Header;
 import org.agrona.DirectBuffer;
 import org.agrona.MutableDirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
 
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.util.Arrays;
+
+import static io.aeron.Aeron.NULL_VALUE;
+import static io.aeron.logbuffer.FrameDescriptor.FLAGS_OFFSET;
+import static io.aeron.logbuffer.LogBufferDescriptor.computeFragmentedFrameLength;
+import static io.aeron.protocol.DataHeaderFlyweight.HEADER_LENGTH;
+import static io.aeron.protocol.HeaderFlyweight.FRAME_LENGTH_FIELD_OFFSET;
+import static java.nio.ByteOrder.LITTLE_ENDIAN;
 
 /**
  * Reusable Builder for appending a sequence of buffer fragments which grows internal capacity as needed.
@@ -38,8 +45,10 @@ public final class BufferBuilder
 
     private final boolean isDirect;
     private int limit;
-    private int nextTermOffset;
-    private final UnsafeBuffer buffer;
+    private int nextTermOffset = NULL_VALUE;
+    private final UnsafeBuffer buffer = new UnsafeBuffer();
+    final UnsafeBuffer headerBuffer = new UnsafeBuffer();
+    final Header completeHeader = new Header(0, 0);
 
     /**
      * Construct a buffer builder with an initial capacity of zero and isDirect false.
@@ -69,21 +78,26 @@ public final class BufferBuilder
     {
         if (initialCapacity < 0 || initialCapacity > MAX_CAPACITY)
         {
-            throw new IllegalArgumentException(
-                "initialCapacity outside range 0 - " + MAX_CAPACITY +
+            throw new IllegalArgumentException("initialCapacity outside range 0 - " + MAX_CAPACITY +
                 ": initialCapacity=" + initialCapacity);
         }
 
         this.isDirect = isDirect;
         if (isDirect)
         {
-            final ByteBuffer byteBuffer = ByteBuffer.allocateDirect(initialCapacity);
-            byteBuffer.order(ByteOrder.LITTLE_ENDIAN);
-            this.buffer = new UnsafeBuffer(byteBuffer);
+            if (initialCapacity > 0)
+            {
+                buffer.wrap(newDirectBuffer(initialCapacity));
+            }
+            headerBuffer.wrap(newDirectBuffer(HEADER_LENGTH));
         }
         else
         {
-            buffer = new UnsafeBuffer(new byte[initialCapacity]);
+            if (initialCapacity > 0)
+            {
+                buffer.wrap(new byte[initialCapacity]);
+            }
+            headerBuffer.wrap(new byte[HEADER_LENGTH]);
         }
     }
 
@@ -161,7 +175,10 @@ public final class BufferBuilder
     public BufferBuilder reset()
     {
         limit = 0;
-        nextTermOffset = 0;
+        nextTermOffset = NULL_VALUE;
+        completeHeader
+            .context(null)
+            .fragmentedFrameLength(NULL_VALUE);
         return this;
     }
 
@@ -172,7 +189,11 @@ public final class BufferBuilder
      */
     public BufferBuilder compact()
     {
-        resize(Math.max(INIT_MIN_CAPACITY, limit));
+        final int newCapacity = Math.max(INIT_MIN_CAPACITY, limit);
+        if (newCapacity < buffer.capacity())
+        {
+            resize(newCapacity);
+        }
 
         return this;
     }
@@ -193,6 +214,47 @@ public final class BufferBuilder
         limit += length;
 
         return this;
+    }
+
+    /**
+     * Capture information available in the header of the very first frame.
+     *
+     * @param header of the first frame.
+     * @return the builder for fluent API usage.
+     */
+    public BufferBuilder captureHeader(final Header header)
+    {
+        completeHeader
+            .initialTermId(header.initialTermId())
+            .positionBitsToShift(header.positionBitsToShift())
+            .offset(0)
+            .buffer(headerBuffer);
+
+        headerBuffer.putBytes(0, header.buffer(), header.offset(), HEADER_LENGTH);
+        return this;
+    }
+
+    /**
+     * Use the information from the header of the last frame to create a header for the assembled message, i.e. fixups
+     * the flags and the frame length.
+     *
+     * @param header of the last frame.
+     * @return complete message header.
+     */
+    public Header completeHeader(final Header header)
+    {
+        final int firstFrameLength = headerBuffer.getInt(FRAME_LENGTH_FIELD_OFFSET, LITTLE_ENDIAN);
+        final int fragmentedFrameLength = computeFragmentedFrameLength(limit, firstFrameLength - HEADER_LENGTH);
+        completeHeader
+            .context(header.context())
+            .fragmentedFrameLength(fragmentedFrameLength);
+
+        headerBuffer.putInt(FRAME_LENGTH_FIELD_OFFSET, HEADER_LENGTH + limit, LITTLE_ENDIAN);
+        // compute complete flags
+        headerBuffer.putByte(FLAGS_OFFSET, (byte)(headerBuffer.getByte(FLAGS_OFFSET) | header.flags()));
+        // compute the `fragmented frame length` of the complete message
+
+        return completeHeader;
     }
 
     private void ensureCapacity(final int additionalLength)
@@ -218,8 +280,7 @@ public final class BufferBuilder
     {
         if (isDirect)
         {
-            final ByteBuffer byteBuffer = ByteBuffer.allocateDirect(newCapacity);
-            byteBuffer.order(ByteOrder.LITTLE_ENDIAN);
+            final ByteBuffer byteBuffer = newDirectBuffer(newCapacity);
             buffer.getBytes(0, byteBuffer, 0, limit);
             buffer.wrap(byteBuffer);
         }
@@ -227,6 +288,13 @@ public final class BufferBuilder
         {
             buffer.wrap(Arrays.copyOf(buffer.byteArray(), newCapacity));
         }
+    }
+
+    private static ByteBuffer newDirectBuffer(final int newCapacity)
+    {
+        final ByteBuffer byteBuffer = ByteBuffer.allocateDirect(newCapacity);
+        byteBuffer.order(LITTLE_ENDIAN);
+        return byteBuffer;
     }
 
     static int findSuitableCapacity(final int capacity, final long requiredCapacity)
@@ -239,6 +307,7 @@ public final class BufferBuilder
             if (newCapacity > MAX_CAPACITY)
             {
                 newCapacity = MAX_CAPACITY;
+                break;
             }
         }
 

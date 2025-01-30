@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,10 +35,12 @@ final class SubscriptionParams
     boolean isRejoin = true;
     boolean isSparse = true;
     boolean isTether = true;
+    boolean isResponse = false;
     InferableBoolean group = InferableBoolean.INFER;
-    int initialWindowLength;
+    int receiverWindowLength;
 
-    static SubscriptionParams getSubscriptionParams(final ChannelUri channelUri, final MediaDriver.Context context)
+    static SubscriptionParams getSubscriptionParams(
+        final ChannelUri channelUri, final MediaDriver.Context context, final int publisherTermBufferLength)
     {
         final SubscriptionParams params = new SubscriptionParams();
 
@@ -113,8 +115,13 @@ final class SubscriptionParams
         final String groupStr = channelUri.get(GROUP_PARAM_NAME);
         params.group = null != groupStr ? InferableBoolean.parse(groupStr) : context.receiverGroupConsideration();
 
-        final int initialWindowLength = UdpChannel.parseBufferLength(channelUri, RECEIVER_WINDOW_LENGTH_PARAM_NAME);
-        params.initialWindowLength = 0 != initialWindowLength ? initialWindowLength : context.initialWindowLength();
+        final int rcvWndLength = UdpChannel.parseBufferLength(channelUri, RECEIVER_WINDOW_LENGTH_PARAM_NAME);
+        params.receiverWindowLength = Configuration.receiverWindowLength(
+            0 != publisherTermBufferLength ? publisherTermBufferLength :
+            (channelUri.isIpc() ? context.ipcTermBufferLength() : context.publicationTermBufferLength()),
+            0 != rcvWndLength ? rcvWndLength : context.initialWindowLength());
+
+        params.isResponse = CONTROL_MODE_RESPONSE.equals(channelUri.get(MDC_CONTROL_MODE_PARAM_NAME));
 
         return params;
     }
@@ -126,21 +133,19 @@ final class SubscriptionParams
         final MediaDriver.Context ctx,
         final String existingChannel)
     {
-        if (0 != channelSocketRcvbufLength && params.initialWindowLength > channelSocketRcvbufLength)
+        if (0 != channelSocketRcvbufLength && params.receiverWindowLength > channelSocketRcvbufLength)
         {
             throw new IllegalStateException(
-                "Initial window greater than SO_RCVBUF for channel: rcv-wnd=" + params.initialWindowLength +
+                "Initial window greater than SO_RCVBUF for channel: rcv-wnd=" + params.receiverWindowLength +
                 " so-rcvbuf=" + channelSocketRcvbufLength +
-                (null == existingChannel ? "" : (" existingChannel=" + existingChannel)) +
-                " channel=" + channel);
+                (null == existingChannel ? "" : (" existingChannel=" + existingChannel)) + " channel=" + channel);
         }
-        else if (0 == channelSocketRcvbufLength && params.initialWindowLength > ctx.osDefaultSocketRcvbufLength())
+        else if (0 == channelSocketRcvbufLength && params.receiverWindowLength > ctx.osDefaultSocketRcvbufLength())
         {
             throw new IllegalStateException(
-                "Initial window greater than SO_RCVBUF for channel: rcv-wnd=" + params.initialWindowLength +
+                "Initial window greater than SO_RCVBUF for channel: rcv-wnd=" + params.receiverWindowLength +
                 " so-rcvbuf=" + ctx.osDefaultSocketRcvbufLength() + " (OS default)" +
-                (null == existingChannel ? "" : (" existingChannel=" + existingChannel)) +
-                " channel=" + channel);
+                (null == existingChannel ? "" : (" existingChannel=" + existingChannel)) + " channel=" + channel);
         }
     }
 

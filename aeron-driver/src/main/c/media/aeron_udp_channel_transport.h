@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,9 @@
 #include "aeron_socket.h"
 #include "aeron_driver_common.h"
 #include "aeron_udp_channel_transport_bindings.h"
+#include "concurrent/aeron_distinct_error_log.h"
+#include "concurrent/aeron_counters_manager.h"
+#include "util/aeron_error.h"
 
 #define AERON_UDP_CHANNEL_TRANSPORT_MEDIA_RCV_TIMESTAMP_NONE (0x0)
 #define AERON_UDP_CHANNEL_TRANSPORT_MEDIA_RCV_TIMESTAMP_HW (0x1)
@@ -27,6 +30,17 @@
 #define AERON_UDP_CHANNEL_TRANSPORT_MEDIA_RCV_TIMESTAMP (0x3)
 #define AERON_UDP_CHANNEL_TRANSPORT_CHANNEL_RCV_TIMESTAMP (0x4)
 #define AERON_UDP_CHANNEL_TRANSPORT_CHANNEL_SND_TIMESTAMP (0x8)
+
+struct aeron_udp_channel_transport_params_stct
+{
+    size_t socket_rcvbuf;
+    size_t socket_sndbuf;
+    size_t mtu_length;
+    unsigned int multicast_if_index;
+    uint8_t ttl;
+    bool is_media_timestamping;
+};
+typedef struct aeron_udp_channel_transport_params_stct aeron_udp_channel_transport_params_t;
 
 typedef struct aeron_udp_channel_transport_stct
 {
@@ -38,6 +52,8 @@ typedef struct aeron_udp_channel_transport_stct
     void *bindings_clientd;
     void *destination_clientd;
     void *interceptor_clientds[AERON_UDP_CHANNEL_TRANSPORT_MAX_INTERCEPTORS];
+    aeron_distinct_error_log_t *error_log;
+    int64_t *errors_counter;
     uint32_t timestamp_flags;
 }
 aeron_udp_channel_transport_t;
@@ -49,11 +65,7 @@ int aeron_udp_channel_transport_init(
     struct sockaddr_storage *bind_addr,
     struct sockaddr_storage *multicast_if_addr,
     struct sockaddr_storage *connect_addr,
-    unsigned int multicast_if_index,
-    uint8_t ttl,
-    size_t socket_rcvbuf,
-    size_t socket_sndbuf,
-    bool is_media_timestamping,
+    aeron_udp_channel_transport_params_t *params,
     aeron_driver_context_t *context,
     aeron_udp_channel_transport_affinity_t affinity);
 
@@ -93,6 +105,13 @@ inline void aeron_udp_channel_transport_set_interceptor_clientd(
     aeron_udp_channel_transport_t *transport, int interceptor_index, void *clientd)
 {
     transport->interceptor_clientds[interceptor_index] = clientd;
+}
+
+inline void aeron_udp_channel_transport_log_error(aeron_udp_channel_transport_t *transport)
+{
+    aeron_distinct_error_log_record(transport->error_log, aeron_errcode(), aeron_errmsg());
+    aeron_counter_increment(transport->errors_counter, 1);
+    aeron_err_clear();
 }
 
 #endif //AERON_UDP_CHANNEL_TRANSPORT_H

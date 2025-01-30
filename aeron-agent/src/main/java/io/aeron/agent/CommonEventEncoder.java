@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -159,6 +159,26 @@ final class CommonEventEncoder
         final int encodedLength = encodeLogHeader(encodingBuffer, offset, captureLength, length);
         encodingBuffer.putBytes(offset + encodedLength, srcBuffer, srcOffset, captureLength);
         return encodedLength + captureLength;
+    }
+
+    static <E extends Enum<E>> int encodeStateChange(
+        final UnsafeBuffer encodingBuffer, final int offset, final E from, final E to)
+    {
+        int encodedLength = 0;
+
+        final String fromName = enumName(from);
+        final String toName = enumName(to);
+
+        encodingBuffer.putInt(
+            offset,
+            fromName.length() + STATE_SEPARATOR.length() + toName.length(),
+            LITTLE_ENDIAN);
+        encodedLength += SIZE_OF_INT;
+        encodedLength += encodingBuffer.putStringWithoutLengthAscii(offset + encodedLength, fromName);
+        encodedLength += encodingBuffer.putStringWithoutLengthAscii(offset + encodedLength, STATE_SEPARATOR);
+        encodedLength += encodingBuffer.putStringWithoutLengthAscii(offset + encodedLength, toName);
+
+        return encodedLength;
     }
 
     static <E extends Enum<E>> int encodeTrailingStateChange(

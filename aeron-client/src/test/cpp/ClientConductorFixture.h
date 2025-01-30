@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -100,7 +100,8 @@ public:
             DRIVER_TIMEOUT_MS,
             RESOURCE_LINGER_TIMEOUT_MS,
             INTER_SERVICE_TIMEOUT_NS,
-            PRE_TOUCH_MAPPED_MEMORY),
+            PRE_TOUCH_MAPPED_MEMORY,
+            "test-conductor"),
         m_errorHandler(defaultErrorHandler),
         m_onAvailableImageHandler(std::bind(&testing::NiceMock<MockClientConductorHandlers>::onNewImage, &m_handlers, _1)),
         m_onUnavailableImageHandler(std::bind(&testing::NiceMock<MockClientConductorHandlers>::onInactive, &m_handlers, _1)),

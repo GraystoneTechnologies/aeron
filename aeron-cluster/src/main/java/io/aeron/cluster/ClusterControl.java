@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -75,7 +75,12 @@ public class ClusterControl
         /**
          * Abort processing and terminate the cluster without taking a snapshot.
          */
-        ABORT(6);
+        ABORT(6),
+
+        /**
+         * Trigger a snapshot that will only occur on a cluster standby.
+         */
+        STANDBY_SNAPSHOT(7);
 
         private final int code;
 

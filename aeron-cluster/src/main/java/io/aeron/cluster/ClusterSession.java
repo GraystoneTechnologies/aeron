@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package io.aeron.cluster;
 
 import io.aeron.*;
 import io.aeron.archive.client.AeronArchive;
+import io.aeron.cluster.client.ClusterEvent;
 import io.aeron.cluster.client.ClusterException;
 import io.aeron.cluster.codecs.CloseReason;
 import io.aeron.cluster.codecs.EventCode;
@@ -25,10 +26,11 @@ import io.aeron.exceptions.RegistrationException;
 import io.aeron.logbuffer.BufferClaim;
 import org.agrona.*;
 import org.agrona.collections.ArrayUtil;
+import org.agrona.concurrent.errors.DistinctErrorLog;
 
 import java.util.Arrays;
 
-final class ClusterSession
+final class ClusterSession implements ClusterClientSession
 {
     static final byte[] NULL_PRINCIPAL = ArrayUtil.EMPTY_BYTE_ARRAY;
     static final int MAX_ENCODED_PRINCIPAL_LENGTH = 4 * 1024;
@@ -41,7 +43,7 @@ final class ClusterSession
 
     enum Action
     {
-        CLIENT, BACKUP, HEARTBEAT
+        CLIENT, BACKUP, HEARTBEAT, STANDBY_SNAPSHOT
     }
 
     private boolean hasNewLeaderEventPending = false;
@@ -61,6 +63,7 @@ final class ClusterSession
     private CloseReason closeReason = CloseReason.NULL_VAL;
     private byte[] encodedPrincipal = NULL_PRINCIPAL;
     private Action action = Action.CLIENT;
+    private Object requestInput = null;
 
     ClusterSession(final long sessionId, final int responseStreamId, final String responseChannel)
     {
@@ -68,33 +71,6 @@ final class ClusterSession
         this.responseStreamId = responseStreamId;
         this.responseChannel = responseChannel;
         state(State.INIT);
-    }
-
-    ClusterSession(
-        final long id,
-        final long correlationId,
-        final long openedLogPosition,
-        final long timeOfLastActivityNs,
-        final int responseStreamId,
-        final String responseChannel,
-        final CloseReason closeReason)
-    {
-        this.id = id;
-        this.responseStreamId = responseStreamId;
-        this.responseChannel = responseChannel;
-        this.openedLogPosition = openedLogPosition;
-        this.timeOfLastActivityNs = timeOfLastActivityNs;
-        this.correlationId = correlationId;
-        this.closeReason = closeReason;
-
-        if (CloseReason.NULL_VAL != closeReason)
-        {
-            state(State.CLOSING);
-        }
-        else
-        {
-            state(State.OPEN);
-        }
     }
 
     public void close(final Aeron aeron, final ErrorHandler errorHandler)
@@ -112,9 +88,55 @@ final class ClusterSession
         state(State.CLOSED);
     }
 
-    long id()
+    public long id()
     {
         return id;
+    }
+
+    public byte[] encodedPrincipal()
+    {
+        return encodedPrincipal;
+    }
+
+    public boolean isOpen()
+    {
+        return State.OPEN == state;
+    }
+
+    public Publication responsePublication()
+    {
+        return responsePublication;
+    }
+
+    public long timeOfLastActivityNs()
+    {
+        return timeOfLastActivityNs;
+    }
+
+    public void timeOfLastActivityNs(final long timeNs)
+    {
+        timeOfLastActivityNs = timeNs;
+    }
+
+    void loadSnapshotState(
+        final long correlationId,
+        final long openedLogPosition,
+        final long timeOfLastActivityNs,
+        final CloseReason closeReason)
+    {
+        this.openedLogPosition = openedLogPosition;
+        this.timeOfLastActivityNs = timeOfLastActivityNs;
+        this.correlationId = correlationId;
+        this.closeReason = closeReason;
+
+        if (CloseReason.NULL_VAL != closeReason)
+        {
+            state(State.CLOSING);
+        }
+        else
+        {
+            state(State.OPEN);
+        }
     }
 
     int responseStreamId()
@@ -207,7 +229,7 @@ final class ClusterSession
         return null != responsePublication && responsePublication.isConnected();
     }
 
-    public long tryClaim(final int length, final BufferClaim bufferClaim)
+    long tryClaim(final int length, final BufferClaim bufferClaim)
     {
         if (null == responsePublication)
         {
@@ -219,7 +241,7 @@ final class ClusterSession
         }
     }
 
-    public long offer(final DirectBuffer buffer, final int offset, final int length)
+    long offer(final DirectBuffer buffer, final int offset, final int length)
     {
         if (null == responsePublication)
         {
@@ -255,13 +277,44 @@ final class ClusterSession
     void open(final long openedLogPosition)
     {
         this.openedLogPosition = openedLogPosition;
-        encodedPrincipal = null;
         state(State.OPEN);
     }
 
-    byte[] encodedPrincipal()
+    boolean appendSessionToLogAndSendOpen(
+        final LogPublisher logPublisher,
+        final EgressPublisher egressPublisher,
+        final long leadershipTermId,
+        final int memberId,
+        final long nowNs,
+        final long clusterTimestamp)
     {
-        return encodedPrincipal;
+        if (responsePublication.availableWindow() > 0)
+        {
+            final long resultingPosition = logPublisher.appendSessionOpen(this, leadershipTermId, clusterTimestamp);
+            if (resultingPosition > 0)
+            {
+                open(resultingPosition);
+                timeOfLastActivityNs(nowNs);
+                sendSessionOpenEvent(egressPublisher, leadershipTermId, memberId);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    int sendSessionOpenEvent(
+        final EgressPublisher egressPublisher,
+        final long leadershipTermId,
+        final int memberId)
+    {
+        if (egressPublisher.sendEvent(this, leadershipTermId, memberId, EventCode.OK, ""))
+        {
+            clearOpenEventPending();
+            return 1;
+        }
+
+        return 0;
     }
 
     void lastActivityNs(final long timeNs, final long correlationId)
@@ -270,11 +323,26 @@ final class ClusterSession
         this.correlationId = correlationId;
     }
 
-    void reject(final EventCode code, final String responseDetail)
+    void reject(
+        final EventCode code,
+        final String responseDetail,
+        final DistinctErrorLog errorLog,
+        final int clusterMemberId)
     {
         this.eventCode = code;
         this.responseDetail = responseDetail;
         state(State.REJECTED);
+        if (null != errorLog)
+        {
+            errorLog.record(new ClusterEvent(
+                code + " " +
+                responseDetail + ", clusterMemberId=" + clusterMemberId + ", id=" + id));
+        }
+    }
+
+    void reject(final EventCode code, final String responseDetail)
+    {
+        reject(code, responseDetail, null, Aeron.NULL_VALUE);
     }
 
     EventCode eventCode()
@@ -285,16 +353,6 @@ final class ClusterSession
     String responseDetail()
     {
         return responseDetail;
-    }
-
-    long timeOfLastActivityNs()
-    {
-        return timeOfLastActivityNs;
-    }
-
-    void timeOfLastActivityNs(final long timeNs)
-    {
-        timeOfLastActivityNs = timeNs;
     }
 
     long correlationId()
@@ -347,9 +405,14 @@ final class ClusterSession
         this.action = action;
     }
 
-    Publication responsePublication()
+    void requestInput(final Object requestInput)
     {
-        return responsePublication;
+        this.requestInput = requestInput;
+    }
+
+    Object requestInput()
+    {
+        return requestInput;
     }
 
     static void checkEncodedPrincipalLength(final byte[] encodedPrincipal)

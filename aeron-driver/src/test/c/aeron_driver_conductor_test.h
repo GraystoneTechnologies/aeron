@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -40,11 +40,11 @@ extern "C"
 #define STR_HELPER(x) #x
 #define STR(x) STR_HELPER(x)
 
-#define CHANNEL_1 "aeron:udp?endpoint=localhost:40001"
-#define CHANNEL_1_UNRELIABLE "aeron:udp?endpoint=localhost:40001|reliable=false"
-#define CHANNEL_2 "aeron:udp?endpoint=localhost:40002"
-#define CHANNEL_3 "aeron:udp?endpoint=localhost:40003"
-#define CHANNEL_4 "aeron:udp?endpoint=localhost:40004"
+#define CHANNEL_1 "aeron:udp?endpoint=localhost:10001"
+#define CHANNEL_1_UNRELIABLE "aeron:udp?endpoint=localhost:10001|reliable=false"
+#define CHANNEL_2 "aeron:udp?endpoint=localhost:10002"
+#define CHANNEL_3 "aeron:udp?endpoint=localhost:10003"
+#define CHANNEL_4 "aeron:udp?endpoint=localhost:10004"
 #define CHANNEL_MDC_MANUAL "aeron:udp?control-mode=manual"
 #define INVALID_URI "aeron:udp://"
 
@@ -58,10 +58,10 @@ extern "C"
 #define MTU_1 (4096)
 #define MTU_2 (8192)
 
-#define CHANNEL_1_WITH_TAG_1001 "aeron:udp?endpoint=localhost:40001|tags=1001"
+#define CHANNEL_1_WITH_TAG_1001 "aeron:udp?endpoint=localhost:10001|tags=1001"
 #define CHANNEL_TAG_1001 "aeron:udp?tags=1001"
 
-#define CHANNEL_1_WITH_SESSION_ID_1 "aeron:udp?endpoint=localhost:40001|session-id=" STR(SESSION_ID_1_)
+#define CHANNEL_1_WITH_SESSION_ID_1 "aeron:udp?endpoint=localhost:10001|session-id=" STR(SESSION_ID_1_)
 
 #define SESSION_ID_1 (SESSION_ID_1_)
 #define SESSION_ID_3 (100000)
@@ -81,6 +81,9 @@ extern "C"
 #define CONTROL_UDP_PORT (43657)
 
 #define TEST_CONDUCTOR_CYCLE_TIME_THRESHOLD (600 * 1000 * 1000)
+
+#define CAPACITY (32 * 1024)
+typedef std::array<std::uint8_t, CAPACITY> buffer_t;
 
 static int64_t nano_time = 0;
 static bool free_map_raw_log = true;
@@ -209,6 +212,7 @@ struct TestDriverContext
         }
 
         m_context->threading_mode = AERON_THREADING_MODE_SHARED;
+        m_context->async_executor_threads = 0;
         m_context->cnc_map.length = aeron_cnc_length(m_context);
         m_cnc = std::unique_ptr<uint8_t[]>(new uint8_t[m_context->cnc_map.length]);
         m_context->cnc_map.addr = m_cnc.get();
@@ -241,6 +245,11 @@ struct TestDriverContext
     }
 
     aeron_driver_context_t *m_context = nullptr;
+    aeron_counters_manager_t m_counters_manager = {};
+    aeron_system_counters_t m_system_counters = {};
+    aeron_distinct_error_log_t m_error_log = {};
+    AERON_DECL_ALIGNED(buffer_t m_error_log_buffer, 16) = {};
+
     std::unique_ptr<uint8_t[]> m_cnc;
 };
 
@@ -304,6 +313,41 @@ public:
             &m_broadcast_receiver,
             m_context.m_context->to_clients_buffer,
             m_context.m_context->to_clients_buffer_length);
+
+        int64_t free_to_reuse_timeout_ms = 0;
+        if (m_context.m_context->counter_free_to_reuse_ns > 0)
+        {
+            free_to_reuse_timeout_ms = (int64_t)m_context.m_context->counter_free_to_reuse_ns / (1000 * 1000LL);
+            free_to_reuse_timeout_ms = free_to_reuse_timeout_ms <= 0 ? 1 : free_to_reuse_timeout_ms;
+        }
+
+        aeron_counters_manager_init(
+            &m_context.m_counters_manager,
+            m_context.m_context->counters_metadata_buffer,
+            AERON_COUNTERS_METADATA_BUFFER_LENGTH(m_context.m_context->counters_values_buffer_length),
+            m_context.m_context->counters_values_buffer,
+            m_context.m_context->counters_values_buffer_length,
+            m_context.m_context->cached_clock,
+            free_to_reuse_timeout_ms);
+
+        aeron_system_counters_init(&m_context.m_system_counters, &m_context.m_counters_manager);
+
+        aeron_distinct_error_log_init(
+            &m_context.m_error_log, m_context.m_error_log_buffer.data(), m_context.m_error_log_buffer.size(), aeron_epoch_clock);
+
+        m_context.m_context->counters_manager = &m_context.m_counters_manager;
+        m_context.m_context->system_counters = &m_context.m_system_counters;
+        m_context.m_context->error_log = &m_context.m_error_log;
+        m_context.m_context->error_buffer = m_context.m_error_log_buffer.data();
+        m_context.m_context->error_buffer_length = m_context.m_error_log_buffer.size();
+    }
+
+    ~DriverConductorTest()
+    {
+        aeron_broadcast_receiver_close(&m_broadcast_receiver);
+        aeron_system_counters_close(&m_context.m_system_counters);
+        aeron_counters_manager_close(&m_context.m_counters_manager);
+        aeron_distinct_error_log_close(&m_context.m_error_log);
     }
 
     size_t readAllBroadcastsFromConductor(aeron_broadcast_receiver_handler_t handler, size_t message_limit = SIZE_MAX)
@@ -612,7 +656,7 @@ public:
     }
 
 protected:
-    uint8_t m_command_buffer[AERON_MAX_PATH] = {};
+    uint8_t m_command_buffer[128 * 1024] = {};
     TestDriverContext m_context = {};
     TestDriverConductor m_conductor;
     aeron_broadcast_receiver_t m_broadcast_receiver = {};

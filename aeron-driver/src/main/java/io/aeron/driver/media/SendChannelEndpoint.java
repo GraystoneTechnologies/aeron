@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 package io.aeron.driver.media;
 
+import io.aeron.Aeron;
 import io.aeron.ChannelUri;
 import io.aeron.CommonContext;
 import io.aeron.ErrorCode;
@@ -25,12 +26,15 @@ import io.aeron.driver.Sender;
 import io.aeron.driver.status.MdcDestinations;
 import io.aeron.exceptions.ControlProtocolException;
 import io.aeron.protocol.DataHeaderFlyweight;
+import io.aeron.protocol.ErrorFlyweight;
 import io.aeron.protocol.NakFlyweight;
+import io.aeron.protocol.ResponseSetupFlyweight;
 import io.aeron.protocol.RttMeasurementFlyweight;
 import io.aeron.protocol.StatusMessageFlyweight;
 import io.aeron.status.ChannelEndpointStatus;
 import io.aeron.status.LocalSocketAddressStatus;
 import org.agrona.CloseHelper;
+import org.agrona.ErrorHandler;
 import org.agrona.MutableDirectBuffer;
 import org.agrona.collections.ArrayUtil;
 import org.agrona.collections.Long2ObjectHashMap;
@@ -49,9 +53,8 @@ import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 
 import static io.aeron.driver.media.SendChannelEndpoint.DESTINATION_TIMEOUT;
-import static io.aeron.driver.media.UdpChannelTransport.sendError;
-import static io.aeron.driver.status.SystemCounterDescriptor.NAK_MESSAGES_RECEIVED;
-import static io.aeron.driver.status.SystemCounterDescriptor.STATUS_MESSAGES_RECEIVED;
+import static io.aeron.driver.media.UdpChannelTransport.onSendError;
+import static io.aeron.driver.status.SystemCounterDescriptor.*;
 import static io.aeron.protocol.StatusMessageFlyweight.SEND_SETUP_FLAG;
 import static io.aeron.status.ChannelEndpointStatus.status;
 import static java.nio.ByteOrder.LITTLE_ENDIAN;
@@ -74,6 +77,7 @@ public class SendChannelEndpoint extends UdpChannelTransport
     private final AtomicCounter statusMessagesReceived;
     private final AtomicCounter nakMessagesReceived;
     private final AtomicCounter statusIndicator;
+    private final AtomicCounter errorMessagesReceived;
     private final boolean isChannelSendTimestampEnabled;
     private final EpochNanoClock sendTimestampClock;
     private final UnsafeBuffer bufferForTimestamping = new UnsafeBuffer();
@@ -94,21 +98,23 @@ public class SendChannelEndpoint extends UdpChannelTransport
             udpChannel,
             udpChannel.remoteControl(),
             udpChannel.localControl(),
-            udpChannel.hasExplicitControl() || udpChannel.isManualControlMode() ? null : udpChannel.remoteData(),
+            udpChannel.isMultiDestination() || udpChannel.isResponseControlMode() ? null : udpChannel.remoteData(),
+            context.senderPortManager(),
             context);
 
         nakMessagesReceived = context.systemCounters().get(NAK_MESSAGES_RECEIVED);
         statusMessagesReceived = context.systemCounters().get(STATUS_MESSAGES_RECEIVED);
+        errorMessagesReceived = context.systemCounters().get(ERROR_FRAMES_RECEIVED);
         this.statusIndicator = statusIndicator;
 
         MultiSndDestination multiSndDestination = null;
         if (udpChannel.isManualControlMode())
         {
-            multiSndDestination = new ManualSndMultiDestination(context.senderCachedNanoClock());
+            multiSndDestination = new ManualSndMultiDestination(context.senderCachedNanoClock(), errorHandler);
         }
-        else if (udpChannel.isDynamicControlMode() || udpChannel.hasExplicitControl())
+        else if (udpChannel.isDynamicControlMode())
         {
-            multiSndDestination = new DynamicSndMultiDestination(context.senderCachedNanoClock());
+            multiSndDestination = new DynamicSndMultiDestination(context.senderCachedNanoClock(), errorHandler);
         }
 
         this.multiSndDestination = multiSndDestination;
@@ -284,12 +290,48 @@ public class SendChannelEndpoint extends UdpChannelTransport
                 }
                 catch (final IOException ex)
                 {
-                    sendError(bytesToSend, ex, connectAddress);
+                    onSendError(ex, connectAddress, errorHandler);
                 }
             }
             else
             {
                 bytesSent = multiSndDestination.send(sendDatagramChannel, buffer, this, bytesToSend);
+            }
+        }
+
+        return bytesSent;
+    }
+
+    /**
+     * Send contents of a {@link ByteBuffer} to connected address.
+     * This is used on the sender side for performance over send(ByteBuffer, SocketAddress).
+     *
+     * @param buffer to send
+     * @param endpointAddress to send data to.
+     * @return number of bytes sent
+     */
+    public int send(final ByteBuffer buffer, final InetSocketAddress endpointAddress)
+    {
+        int bytesSent = 0;
+
+        if (isChannelSendTimestampEnabled)
+        {
+            applyChannelSendTimestamp(buffer);
+        }
+
+        if (null != sendDatagramChannel)
+        {
+            try
+            {
+                sendHook(buffer, endpointAddress);
+                bytesSent = sendDatagramChannel.send(buffer, endpointAddress);
+            }
+            catch (final PortUnreachableException ignore)
+            {
+            }
+            catch (final IOException ex)
+            {
+                onSendError(ex, connectAddress, errorHandler);
             }
         }
 
@@ -314,7 +356,7 @@ public class SendChannelEndpoint extends UdpChannelTransport
             {
                 timeOfLastResolutionNs = nowNs;
                 final String endpoint = udpChannel.channelUri().get(CommonContext.ENDPOINT_PARAM_NAME);
-                conductorProxy.reResolveEndpoint(endpoint, this, udpChannel.remoteData());
+                conductorProxy.reResolveEndpoint(endpoint, this, connectAddress);
             }
         }
     }
@@ -322,16 +364,18 @@ public class SendChannelEndpoint extends UdpChannelTransport
     /**
      * Callback back handler for received status messages.
      *
-     * @param msg        flyweight over the status message.
-     * @param buffer     containing the message.
-     * @param length     of the message.
-     * @param srcAddress of the message.
+     * @param msg            flyweight over the status message.
+     * @param buffer         containing the message.
+     * @param length         of the message.
+     * @param srcAddress     of the message.
+     * @param conductorProxy to send messages back to the conductor.
      */
     public void onStatusMessage(
         final StatusMessageFlyweight msg,
         final UnsafeBuffer buffer,
         final int length,
-        final InetSocketAddress srcAddress)
+        final InetSocketAddress srcAddress,
+        final DriverConductorProxy conductorProxy)
     {
         final int sessionId = msg.sessionId();
         final int streamId = msg.streamId();
@@ -348,12 +392,44 @@ public class SendChannelEndpoint extends UdpChannelTransport
         {
             if (SEND_SETUP_FLAG == (msg.flags() & SEND_SETUP_FLAG))
             {
-                publication.triggerSendSetupFrame();
+                publication.triggerSendSetupFrame(msg, srcAddress);
             }
             else
             {
-                publication.onStatusMessage(msg, srcAddress);
+                publication.onStatusMessage(msg, srcAddress, conductorProxy);
             }
+        }
+    }
+
+
+    /**
+     * Callback back handler for received error messages.
+     *
+     * @param msg            flyweight over the status message.
+     * @param buffer         containing the message.
+     * @param length         of the message.
+     * @param srcAddress     of the message.
+     * @param conductorProxy to send messages back to the conductor.
+     */
+    public void onError(
+        final ErrorFlyweight msg,
+        final UnsafeBuffer buffer,
+        final int length,
+        final InetSocketAddress srcAddress,
+        final DriverConductorProxy conductorProxy)
+    {
+        final int sessionId = msg.sessionId();
+        final int streamId = msg.streamId();
+
+        errorMessagesReceived.incrementOrdered();
+
+        final long destinationRegistrationId = (null != multiSndDestination) ?
+            multiSndDestination.findRegistrationId(msg, srcAddress) : Aeron.NULL_VALUE;
+
+        final NetworkPublication publication = publicationBySessionAndStreamId.get(compoundKey(sessionId, streamId));
+        if (null != publication)
+        {
+            publication.onError(msg, srcAddress, destinationRegistrationId, conductorProxy);
         }
     }
 
@@ -403,6 +479,36 @@ public class SendChannelEndpoint extends UdpChannelTransport
         }
     }
 
+
+    /**
+     * Callback to handle a received Response Setup frame.
+     *
+     * @param msg            of the Response Setup frame.
+     * @param unsafeBuffer   containing the Response Setup frame.
+     * @param length         of the Response Setup frame.
+     * @param srcAddress     the message came from.
+     * @param conductorProxy to send messages back to the conductor.
+     */
+    public void onResponseSetup(
+        final ResponseSetupFlyweight msg,
+        final UnsafeBuffer unsafeBuffer,
+        final int length,
+        final InetSocketAddress srcAddress,
+        final DriverConductorProxy conductorProxy)
+    {
+        final long key = compoundKey(msg.sessionId(), msg.streamId());
+        final NetworkPublication publication = publicationBySessionAndStreamId.get(key);
+
+        if (null != publication)
+        {
+            final long responseCorrelationId = publication.responseCorrelationId();
+            if (Aeron.NULL_VALUE != responseCorrelationId)
+            {
+                conductorProxy.responseSetup(responseCorrelationId, msg.responseSessionId());
+            }
+        }
+    }
+
     /**
      * Validate that the channel allows manual control for destinations.
      * <p>
@@ -421,10 +527,11 @@ public class SendChannelEndpoint extends UdpChannelTransport
      *
      * @param channelUri for the destination to be added.
      * @param address    of the destination to be added.
+     * @param registrationId of the destination.
      */
-    public void addDestination(final ChannelUri channelUri, final InetSocketAddress address)
+    public void addDestination(final ChannelUri channelUri, final InetSocketAddress address, final long registrationId)
     {
-        multiSndDestination.addDestination(channelUri, address);
+        multiSndDestination.addDestination(channelUri, address, registrationId);
     }
 
     /**
@@ -436,6 +543,16 @@ public class SendChannelEndpoint extends UdpChannelTransport
     public void removeDestination(final ChannelUri channelUri, final InetSocketAddress address)
     {
         multiSndDestination.removeDestination(channelUri, address);
+    }
+
+    /**
+     * Remove a destination from an MDC channel.
+     *
+     * @param destinationRegistrationId the registration id of the destination.
+     */
+    public void removeDestination(final long destinationRegistrationId)
+    {
+        multiSndDestination.removeDestination(destinationRegistrationId);
     }
 
     /**
@@ -501,8 +618,10 @@ public class SendChannelEndpoint extends UdpChannelTransport
 
             final int type =
                 bufferForTimestamping.getShort(DataHeaderFlyweight.TYPE_FIELD_OFFSET, LITTLE_ENDIAN) & 0xFFFF;
+            final int flags = bufferForTimestamping.getByte(DataHeaderFlyweight.FLAGS_FIELD_OFFSET) & 0xFF;
 
             if (DataHeaderFlyweight.HDR_TYPE_DATA == type &&
+                0 != (DataHeaderFlyweight.BEGIN_FLAG & flags) &&
                 !DataHeaderFlyweight.isHeartbeat(bufferForTimestamping, length))
             {
                 final int offset = udpChannel.channelSendTimestampOffset();
@@ -514,6 +633,17 @@ public class SendChannelEndpoint extends UdpChannelTransport
                 }
             }
         }
+    }
+
+    /**
+     * Does the channel have a matching tag?
+     *
+     * @param udpChannel with tag to match against.
+     * @return true if the channel matches on tag identity.
+     */
+    public boolean matchesTag(final UdpChannel udpChannel)
+    {
+        return udpChannel.matchesTag(super.udpChannel, null, connectAddress);
     }
 }
 
@@ -544,22 +674,28 @@ abstract class MultiSndDestination extends MultiSndDestinationRhsPadding
 
     Destination[] destinations = EMPTY_DESTINATIONS;
     final CachedNanoClock nanoClock;
+    final ErrorHandler errorHandler;
     AtomicCounter destinationsCounter = null;
 
-    MultiSndDestination(final CachedNanoClock nanoClock)
+    MultiSndDestination(final CachedNanoClock nanoClock, final ErrorHandler errorHandler)
     {
         this.nanoClock = nanoClock;
+        this.errorHandler = errorHandler;
     }
 
     abstract int send(DatagramChannel channel, ByteBuffer buffer, SendChannelEndpoint channelEndpoint, int bytesToSend);
 
     abstract void onStatusMessage(StatusMessageFlyweight msg, InetSocketAddress address);
 
-    void addDestination(final ChannelUri channelUri, final InetSocketAddress address)
+    void addDestination(final ChannelUri channelUri, final InetSocketAddress address, final long registrationId)
     {
     }
 
     void removeDestination(final ChannelUri channelUri, final InetSocketAddress address)
+    {
+    }
+
+    void removeDestination(final long destinationRegistrationId)
     {
     }
 
@@ -583,7 +719,8 @@ abstract class MultiSndDestination extends MultiSndDestinationRhsPadding
         final SendChannelEndpoint channelEndpoint,
         final int bytesToSend,
         final int position,
-        final InetSocketAddress destination)
+        final InetSocketAddress destination,
+        final ErrorHandler errorHandler)
     {
         int bytesSent = 0;
         try
@@ -604,18 +741,23 @@ abstract class MultiSndDestination extends MultiSndDestinationRhsPadding
         }
         catch (final IOException ex)
         {
-            sendError(bytesToSend, ex, destination);
+            onSendError(ex, destination, errorHandler);
         }
 
         return bytesSent;
+    }
+
+    public long findRegistrationId(final ErrorFlyweight msg, final InetSocketAddress srcAddress)
+    {
+        return Aeron.NULL_VALUE;
     }
 }
 
 class ManualSndMultiDestination extends MultiSndDestination
 {
-    ManualSndMultiDestination(final CachedNanoClock nanoClock)
+    ManualSndMultiDestination(final CachedNanoClock nanoClock, final ErrorHandler errorHandler)
     {
-        super(nanoClock);
+        super(nanoClock, errorHandler);
     }
 
     void onStatusMessage(final StatusMessageFlyweight msg, final InetSocketAddress address)
@@ -625,20 +767,15 @@ class ManualSndMultiDestination extends MultiSndDestination
 
         for (final Destination destination : destinations)
         {
-            if (destination.isReceiverIdValid &&
-                receiverId == destination.receiverId &&
-                address.getPort() == destination.port)
+            if (destination.isMatch(msg.receiverId(), address))
             {
+                if (!destination.isReceiverIdValid)
+                {
+                    destination.receiverId = receiverId;
+                    destination.isReceiverIdValid = true;
+                }
+
                 destination.timeOfLastActivityNs = nowNs;
-                break;
-            }
-            else if (!destination.isReceiverIdValid &&
-                address.getPort() == destination.port &&
-                address.getAddress().equals(destination.address.getAddress()))
-            {
-                destination.timeOfLastActivityNs = nowNs;
-                destination.receiverId = receiverId;
-                destination.isReceiverIdValid = true;
                 break;
             }
         }
@@ -659,15 +796,16 @@ class ManualSndMultiDestination extends MultiSndDestination
             roundRobinIndex = startingIndex = 0;
         }
 
+        int result = bytesToSend;
         for (int i = startingIndex; i < length; i++)
         {
             final Destination destination = destinations[i];
 
-            final int bytesSent = send(channel, buffer, channelEndpoint, bytesToSend, position, destination.address);
+            final int bytesSent = send(
+                channel, buffer, channelEndpoint, bytesToSend, position, destination.address, errorHandler);
             if (bytesSent < bytesToSend)
             {
-                roundRobinIndex = i;
-                return bytesSent;
+                result = bytesSent;
             }
         }
 
@@ -675,22 +813,22 @@ class ManualSndMultiDestination extends MultiSndDestination
         {
             final Destination destination = destinations[i];
 
-            final int bytesSent = send(channel, buffer, channelEndpoint, bytesToSend, position, destination.address);
+            final int bytesSent = send(
+                channel, buffer, channelEndpoint, bytesToSend, position, destination.address, errorHandler);
             if (bytesSent < bytesToSend)
             {
-                roundRobinIndex = i;
-                return bytesSent;
+                result = bytesSent;
             }
         }
 
-        return bytesToSend;
+        return result;
     }
 
-    void addDestination(final ChannelUri channelUri, final InetSocketAddress address)
+    void addDestination(final ChannelUri channelUri, final InetSocketAddress address, final long registrationId)
     {
-        destinations = ArrayUtil.add(
-            destinations,
-            new Destination(nanoClock.nanoTime(), channelUri.get(CommonContext.ENDPOINT_PARAM_NAME), address));
+        final Destination destination = new Destination(
+            nanoClock.nanoTime(), channelUri.get(CommonContext.ENDPOINT_PARAM_NAME), address, registrationId);
+        destinations = ArrayUtil.add(destinations, destination);
         destinationsCounter.setOrdered(destinations.length);
     }
 
@@ -701,6 +839,36 @@ class ManualSndMultiDestination extends MultiSndDestination
         for (final Destination destination : destinations)
         {
             if (destination.address.equals(address))
+            {
+                found = true;
+                break;
+            }
+
+            index++;
+        }
+
+        if (found)
+        {
+            if (1 == destinations.length)
+            {
+                destinations = EMPTY_DESTINATIONS;
+            }
+            else
+            {
+                destinations = ArrayUtil.remove(destinations, index);
+            }
+        }
+
+        destinationsCounter.setOrdered(destinations.length);
+    }
+
+    void removeDestination(final long destinationRegistrationId)
+    {
+        boolean found = false;
+        int index = 0;
+        for (final Destination destination : destinations)
+        {
+            if (destination.registrationId == destinationRegistrationId)
             {
                 found = true;
                 break;
@@ -748,13 +916,26 @@ class ManualSndMultiDestination extends MultiSndDestination
             }
         }
     }
+
+    public long findRegistrationId(final ErrorFlyweight msg, final InetSocketAddress address)
+    {
+        for (final Destination destination : destinations)
+        {
+            if (destination.isMatch(msg.receiverId(), address))
+            {
+                return destination.registrationId;
+            }
+        }
+
+        return Aeron.NULL_VALUE;
+    }
 }
 
 class DynamicSndMultiDestination extends MultiSndDestination
 {
-    DynamicSndMultiDestination(final CachedNanoClock nanoClock)
+    DynamicSndMultiDestination(final CachedNanoClock nanoClock, final ErrorHandler errorHandler)
     {
-        super(nanoClock);
+        super(nanoClock, errorHandler);
     }
 
     void onStatusMessage(final StatusMessageFlyweight msg, final InetSocketAddress address)
@@ -796,6 +977,8 @@ class DynamicSndMultiDestination extends MultiSndDestination
             roundRobinIndex = startingIndex = 0;
         }
 
+        int result = bytesToSend;
+
         for (int i = startingIndex; i < length; i++)
         {
             final Destination destination = destinations[i];
@@ -803,11 +986,10 @@ class DynamicSndMultiDestination extends MultiSndDestination
             if ((destination.timeOfLastActivityNs + DESTINATION_TIMEOUT) - nowNs >= 0)
             {
                 final int bytesSent = send(
-                    channel, buffer, channelEndpoint, bytesToSend, position, destination.address);
+                    channel, buffer, channelEndpoint, bytesToSend, position, destination.address, errorHandler);
                 if (bytesSent < bytesToSend)
                 {
-                    roundRobinIndex = i;
-                    return bytesSent;
+                    result = bytesSent;
                 }
             }
             else
@@ -823,11 +1005,10 @@ class DynamicSndMultiDestination extends MultiSndDestination
             if ((destination.timeOfLastActivityNs + DESTINATION_TIMEOUT) - nowNs >= 0)
             {
                 final int bytesSent = send(
-                    channel, buffer, channelEndpoint, bytesToSend, position, destination.address);
+                    channel, buffer, channelEndpoint, bytesToSend, position, destination.address, errorHandler);
                 if (bytesSent < bytesToSend)
                 {
-                    roundRobinIndex = i;
-                    return bytesSent;
+                    result = bytesSent;
                 }
             }
             else
@@ -841,7 +1022,7 @@ class DynamicSndMultiDestination extends MultiSndDestination
             removeInactiveDestinations(nowNs);
         }
 
-        return bytesToSend;
+        return result;
     }
 
     private void add(final Destination destination)
@@ -915,6 +1096,7 @@ abstract class DestinationRhsPadding extends DestinationHotFields
 final class Destination extends DestinationRhsPadding
 {
     long receiverId;
+    final long registrationId;
     boolean isReceiverIdValid;
     int port;
     InetSocketAddress address;
@@ -928,9 +1110,10 @@ final class Destination extends DestinationRhsPadding
         this.endpoint = null;
         this.address = address;
         this.port = address.getPort();
+        this.registrationId = Aeron.NULL_VALUE;
     }
 
-    Destination(final long nowMs, final String endpoint, final InetSocketAddress address)
+    Destination(final long nowMs, final String endpoint, final InetSocketAddress address, final long registrationId)
     {
         this.timeOfLastActivityNs = nowMs;
         this.receiverId = 0;
@@ -938,5 +1121,14 @@ final class Destination extends DestinationRhsPadding
         this.endpoint = endpoint;
         this.address = address;
         this.port = address.getPort();
+        this.registrationId = registrationId;
+    }
+
+    boolean isMatch(final long receiverId, final InetSocketAddress address)
+    {
+        return
+            (isReceiverIdValid && receiverId == this.receiverId && address.getPort() == this.port) ||
+            (!isReceiverIdValid &&
+                address.getPort() == this.port && address.getAddress().equals(this.address.getAddress()));
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,6 +29,8 @@ import io.aeron.archive.status.RecordingPos;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
 import io.aeron.logbuffer.LogBufferDescriptor;
+import io.aeron.test.EventLogExtension;
+import io.aeron.test.InterruptingTestCallback;
 import io.aeron.test.SystemTestWatcher;
 import io.aeron.test.TestContexts;
 import io.aeron.test.Tests;
@@ -38,6 +40,7 @@ import org.agrona.LangUtil;
 import org.agrona.concurrent.status.CountersReader;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -64,6 +67,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+@ExtendWith({ EventLogExtension.class, InterruptingTestCallback.class })
 class MigrateSegmentsTest
 {
     private static final String REPLAY_CHANNEL = "aeron:ipc";
@@ -256,7 +260,8 @@ class MigrateSegmentsTest
         try (Publication publication = aeron.addExclusivePublication(channelUri, streamParams.streamId()))
         {
             final CountersReader counters = aeron.countersReader();
-            final int counterId = Tests.awaitRecordingCounterId(counters, publication.sessionId());
+            final int counterId =
+                Tests.awaitRecordingCounterId(counters, publication.sessionId(), aeronArchive.archiveId());
 
             offerToPosition(publication, "ext-message-", extendPosition + SEGMENT_LENGTH + 1L);
             Tests.awaitPosition(counters, counterId, publication.position());
@@ -320,7 +325,8 @@ class MigrateSegmentsTest
         final long subscriptionId = aeronArchive.startRecording(
             channelUri, streamParams.streamId(), SourceLocation.LOCAL, false);
         final CountersReader counters = aeron.countersReader();
-        final int counterId = Tests.awaitRecordingCounterId(counters, publication.sessionId());
+        final int counterId =
+            Tests.awaitRecordingCounterId(counters, publication.sessionId(), aeronArchive.archiveId());
         final long recordingId = RecordingPos.getRecordingId(counters, counterId);
 
         offerToPosition(publication, "src-message-", recordingParams.recordedPosition());
@@ -839,7 +845,7 @@ class MigrateSegmentsTest
     }
 
     @SuppressWarnings("UnusedReturnValue")
-    private static class StreamParams
+    private static final class StreamParams
     {
         private String endpoint;
         private int initialTermId = 1337;
@@ -929,7 +935,7 @@ class MigrateSegmentsTest
     }
 
     @SuppressWarnings("UnusedReturnValue")
-    private static class RecordingParams
+    private static final class RecordingParams
     {
         private final StreamParams stream = new StreamParams();
         private long startPosition;
@@ -1027,7 +1033,7 @@ class MigrateSegmentsTest
     }
 
     @SuppressWarnings("UnusedReturnValue")
-    private static class TestCaseParams
+    private static final class TestCaseParams
     {
         private final RecordingParams source = new RecordingParams();
         private final RecordingParams destination = new RecordingParams();
@@ -1150,7 +1156,7 @@ class MigrateSegmentsTest
     }
 
     @SuppressWarnings("UnusedReturnValue")
-    private static class FailureCaseParams
+    private static final class FailureCaseParams
     {
         private final RecordingParams source = new RecordingParams();
         private final RecordingParams destination = new RecordingParams();

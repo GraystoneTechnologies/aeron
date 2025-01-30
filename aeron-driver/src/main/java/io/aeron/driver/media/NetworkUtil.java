@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -241,7 +241,7 @@ public final class NetworkUtil
         throw new IllegalArgumentException("how many bytes does an IP address have again?");
     }
 
-    private static int prefixLengthToIpV4Mask(final int subnetPrefix)
+    static int prefixLengthToIpV4Mask(final int subnetPrefix)
     {
         return 0 == subnetPrefix ? 0 : -(1 << 32 - subnetPrefix);
     }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -81,13 +81,13 @@ public class SegmentInspector
         while (offset < length)
         {
             dataHeaderFlyweight.wrap(buffer, offset, length - offset);
-            out.println(offset + ": " + dataHeaderFlyweight);
 
             final int frameLength = dataHeaderFlyweight.frameLength();
             if (frameLength < DataHeaderFlyweight.HEADER_LENGTH)
             {
                 break;
             }
+            out.println(offset + ": " + dataHeaderFlyweight);
 
             final int limit = min(frameLength - HEADER_LENGTH, messageDumpLimit);
             out.println(LogInspector.formatBytes(buffer, offset + HEADER_LENGTH, limit));

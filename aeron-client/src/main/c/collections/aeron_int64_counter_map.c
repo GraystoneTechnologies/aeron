@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -50,4 +50,8 @@ extern int aeron_int64_counter_map_get_and_dec(aeron_int64_counter_map_t *map, c
 
 extern void aeron_int64_counter_map_for_each(
     aeron_int64_counter_map_t *map, aeron_int64_counter_map_for_each_func_t func, void *clientd);
+
+extern void aeron_int64_counter_map_remove_if(
+    aeron_int64_counter_map_t *map, aeron_int64_counter_map_predicate_func_t func, void *clientd);
+
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -120,7 +120,15 @@ final class ClusterEventDissector
 
         builder.append(": memberId=").append(memberId);
         builder.append(' ');
-        buffer.getStringAscii(absoluteOffset, builder);
+        buffer.getStringAscii(absoluteOffset, builder, LITTLE_ENDIAN);
+    }
+
+    static void dissectNoOp(
+        final ClusterEventCode eventCode,
+        final MutableDirectBuffer buffer,
+        final int offset,
+        final StringBuilder builder)
+    {
     }
 
     static void dissectElectionStateChange(
@@ -149,7 +157,8 @@ final class ClusterEventDissector
         absoluteOffset += SIZE_OF_INT;
 
         builder.append(": memberId=").append(memberId).append(' ');
-        buffer.getStringAscii(absoluteOffset, builder);
+        absoluteOffset += SIZE_OF_INT + buffer.getStringAscii(absoluteOffset, builder, LITTLE_ENDIAN);
+
         builder.append(" leaderId=").append(leaderId);
         builder.append(" candidateTermId=").append(candidateTermId);
         builder.append(" leadershipTermId=").append(leadershipTermId);
@@ -157,6 +166,8 @@ final class ClusterEventDissector
         builder.append(" logLeadershipTermId=").append(logLeadershipTermId);
         builder.append(" appendPosition=").append(appendPosition);
         builder.append(" catchupPosition=").append(catchupPosition);
+        builder.append(" reason=");
+        buffer.getStringAscii(absoluteOffset, builder, LITTLE_ENDIAN);
     }
 
     static void dissectCanvassPosition(
@@ -570,5 +581,69 @@ final class ClusterEventDissector
         builder.append(" dstRecordingId=").append(dstRecordingId);
         builder.append(" position=").append(position);
         builder.append(" hasSynced=").append(hasSynced);
+    }
+
+    public static void dissectStandbySnapshotNotification(
+        final ClusterEventCode eventCode,
+        final MutableDirectBuffer buffer,
+        final int offset,
+        final StringBuilder builder)
+    {
+        int absoluteOffset = offset;
+        absoluteOffset += dissectLogHeader(CONTEXT, eventCode, buffer, absoluteOffset, builder);
+
+        final long recordingId = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_LONG;
+        final long leadershipTermId = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_LONG;
+        final long termBaseLeadershipPosition = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_LONG;
+        final long logPosition = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_LONG;
+        final long timestamp = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_LONG;
+        final int memberId = buffer.getInt(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_INT;
+        final int serviceId = buffer.getInt(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_INT;
+
+        builder.append(": memberId=").append(memberId);
+        builder.append(" recordingId=").append(recordingId);
+        builder.append(" leadershipTermId=").append(leadershipTermId);
+        builder.append(" termBaseLeadershipPosition=").append(termBaseLeadershipPosition);
+        builder.append(" logPosition=").append(logPosition);
+        builder.append(" timestamp=").append(timestamp);
+        builder.append(" timeUnit=");
+        absoluteOffset += buffer.getStringAscii(absoluteOffset, builder, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_INT;
+        builder.append(" serviceId=").append(serviceId);
+        builder.append(" archiveEndpoint=");
+        absoluteOffset += buffer.getStringAscii(absoluteOffset, builder, LITTLE_ENDIAN);
+    }
+
+    public static void dissectNewElection(
+        final ClusterEventCode eventCode,
+        final MutableDirectBuffer buffer,
+        final int offset,
+        final StringBuilder builder)
+    {
+        int absoluteOffset = offset;
+        absoluteOffset += dissectLogHeader(CONTEXT, eventCode, buffer, absoluteOffset, builder);
+
+        final long leadershipTermId = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_LONG;
+        final long logPosition = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_LONG;
+        final long appendPosition = buffer.getLong(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_LONG;
+        final int memberId = buffer.getInt(absoluteOffset, LITTLE_ENDIAN);
+        absoluteOffset += SIZE_OF_INT;
+
+        builder.append(": memberId=").append(memberId);
+        builder.append(" leadershipTermId=").append(leadershipTermId);
+        builder.append(" logPosition=").append(logPosition);
+        builder.append(" appendPosition=").append(appendPosition);
+        builder.append(" reason=");
+        buffer.getStringAscii(absoluteOffset, builder, LITTLE_ENDIAN);
     }
 }

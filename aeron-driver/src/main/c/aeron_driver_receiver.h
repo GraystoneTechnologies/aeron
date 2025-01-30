@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -110,6 +110,7 @@ void aeron_driver_receiver_on_remove_endpoint(void *clientd, void *item);
 void aeron_driver_receiver_on_add_subscription(void *clientd, void *item);
 void aeron_driver_receiver_on_remove_subscription(void *clientd, void *item);
 void aeron_driver_receiver_on_add_subscription_by_session(void *clientd, void *item);
+void aeron_driver_receiver_on_request_setup(void *clientd, void *item);
 void aeron_driver_receiver_on_remove_subscription_by_session(void *clientd, void *item);
 
 void aeron_driver_receiver_on_add_destination(void *clientd, void *item);
@@ -121,6 +122,8 @@ void aeron_driver_receiver_on_remove_publication_image(void *clientd, void *item
 void aeron_driver_receiver_on_remove_matching_state(void *clientd, void *item);
 
 void aeron_driver_receiver_on_resolution_change(void *clientd, void *item);
+
+void aeron_driver_receiver_on_invalidate_image(void *clientd, void *item);
 
 int aeron_driver_receiver_add_pending_setup(
     aeron_driver_receiver_t *receiver,

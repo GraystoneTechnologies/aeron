@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,43 +18,24 @@ package io.aeron.driver;
 import io.aeron.driver.media.ReceiveChannelEndpoint;
 import io.aeron.driver.media.ReceiveDestinationTransport;
 import io.aeron.driver.media.UdpChannel;
-import org.agrona.concurrent.AgentTerminationException;
-import org.agrona.concurrent.QueuedPipe;
+import org.agrona.concurrent.OneToOneConcurrentArrayQueue;
 import org.agrona.concurrent.status.AtomicCounter;
 
 import java.net.InetSocketAddress;
 
-import static io.aeron.driver.ThreadingMode.INVOKER;
-import static io.aeron.driver.ThreadingMode.SHARED;
-
 /**
  * Proxy for offering into the {@link Receiver} Thread's command queue.
  */
-final class ReceiverProxy
+final class ReceiverProxy extends CommandProxy
 {
-    private final ThreadingMode threadingMode;
-    private final QueuedPipe<Runnable> commandQueue;
-    private final AtomicCounter failCount;
-
     private Receiver receiver;
 
     ReceiverProxy(
-        final ThreadingMode threadingMode, final QueuedPipe<Runnable> commandQueue, final AtomicCounter failCount)
+        final ThreadingMode threadingMode,
+        final OneToOneConcurrentArrayQueue<Runnable> commandQueue,
+        final AtomicCounter failCount)
     {
-        this.threadingMode = threadingMode;
-        this.commandQueue = commandQueue;
-        this.failCount = failCount;
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    public String toString()
-    {
-        return "ReceiverProxy{" +
-            "threadingMode=" + threadingMode +
-            ", failCount=" + failCount +
-            '}';
+        super(threadingMode, commandQueue, failCount);
     }
 
     void receiver(final Receiver receiver)
@@ -65,11 +46,6 @@ final class ReceiverProxy
     Receiver receiver()
     {
         return receiver;
-    }
-
-    boolean isApplyingBackpressure()
-    {
-        return commandQueue.remainingCapacity() < 1;
     }
 
     void addSubscription(final ReceiveChannelEndpoint mediaEndpoint, final int streamId)
@@ -205,25 +181,30 @@ final class ReceiverProxy
         }
     }
 
-    private boolean notConcurrent()
+    void requestSetup(
+        final ReceiveChannelEndpoint channelEndpoint,
+        final int streamId,
+        final int sessionId)
     {
-        return threadingMode == SHARED || threadingMode == INVOKER;
+        if (notConcurrent())
+        {
+            receiver.onRequestSetup(channelEndpoint, streamId, sessionId);
+        }
+        else
+        {
+            offer(() -> receiver.onRequestSetup(channelEndpoint, streamId, sessionId));
+        }
     }
 
-    private void offer(final Runnable cmd)
+    void rejectImage(final long imageCorrelationId, final long position, final String reason)
     {
-        while (!commandQueue.offer(cmd))
+        if (notConcurrent())
         {
-            if (!failCount.isClosed())
-            {
-                failCount.increment();
-            }
-
-            Thread.yield();
-            if (Thread.currentThread().isInterrupted())
-            {
-                throw new AgentTerminationException("interrupted");
-            }
+            receiver.onRejectImage(imageCorrelationId, position, reason);
+        }
+        else
+        {
+            offer(() -> receiver.onRejectImage(imageCorrelationId, position, reason));
         }
     }
 }

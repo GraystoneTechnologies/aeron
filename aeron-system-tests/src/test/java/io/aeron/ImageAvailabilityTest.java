@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,12 +17,15 @@ package io.aeron;
 
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
+import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.test.InterruptAfter;
 import io.aeron.test.InterruptingTestCallback;
 import io.aeron.test.SystemTestWatcher;
 import io.aeron.test.Tests;
 import io.aeron.test.driver.TestMediaDriver;
 import org.agrona.CloseHelper;
+import org.agrona.DirectBuffer;
+import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -34,6 +37,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static java.nio.charset.StandardCharsets.US_ASCII;
 import static java.util.Arrays.asList;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -184,6 +188,82 @@ class ImageAvailabilityTest
 
             assertEquals(2, availableImageCount.get());
             assertEquals(2, unavailableImageCount.get());
+        }
+    }
+
+    @ParameterizedTest
+    @MethodSource("channels")
+    @InterruptAfter(10)
+    void shouldGetEndOfStreamPosition(final String channel)
+    {
+        final DirectBuffer message = new UnsafeBuffer("hello word".getBytes(US_ASCII));
+
+        try (Subscription sub = aeron.addSubscription(channel, STREAM_ID);
+            Publication pub = aeron.addPublication(channel, STREAM_ID))
+        {
+            while (!sub.isConnected() || !pub.isConnected())
+            {
+                Tests.yield();
+                aeron.conductorAgentInvoker().invoke();
+            }
+
+            final Image image = sub.imageAtIndex(0);
+            assertEquals(Long.MAX_VALUE, image.endOfStreamPosition());
+
+            final int numMessages = 10;
+            for (int i = 0; i < numMessages; i++)
+            {
+                while (pub.offer(message) < 0)
+                {
+                    Tests.yield();
+                }
+            }
+
+            assertEquals(Long.MAX_VALUE, image.endOfStreamPosition());
+
+            int messagesRemaining = numMessages;
+            final FragmentHandler noopFragmentHandler = (buffer, offset, length, header) -> {};
+            while (0 < messagesRemaining)
+            {
+                messagesRemaining -= image.poll(noopFragmentHandler, 10);
+            }
+
+            assertEquals(Long.MAX_VALUE, image.endOfStreamPosition());
+
+            for (int i = 0; i < numMessages; i++)
+            {
+                while (pub.offer(message) < 0)
+                {
+                    Tests.yield();
+                }
+            }
+
+            messagesRemaining = numMessages;
+            while (5 < messagesRemaining)
+            {
+                messagesRemaining -= image.poll(noopFragmentHandler, 1);
+            }
+
+            CloseHelper.quietClose(pub);
+            long eosPosition;
+            while (Long.MAX_VALUE == (eosPosition = image.endOfStreamPosition()))
+            {
+                Tests.yield();
+            }
+
+            assertFalse(image.isEndOfStream());
+
+            while (0 < messagesRemaining)
+            {
+                messagesRemaining -= image.poll(noopFragmentHandler, 1);
+            }
+
+            while (!image.isEndOfStream())
+            {
+                Tests.yield();
+            }
+
+            assertEquals(eosPosition, image.position());
         }
     }
 }

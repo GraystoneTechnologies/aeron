@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -85,8 +85,8 @@ int aeron_driver_sender_init(
     sender->sender_proxy.fail_counter =
         aeron_system_counter_addr(system_counters, AERON_SYSTEM_COUNTER_SENDER_PROXY_FAILS);
     sender->sender_proxy.threading_mode = context->threading_mode;
-    sender->sender_proxy.on_add_endpoint_func = context->sender_proxy_on_add_endpoint_func;
-    sender->sender_proxy.on_remove_endpoint_func = context->sender_proxy_on_remove_endpoint_func;
+    sender->sender_proxy.log.on_add_endpoint = context->log.sender_proxy_on_add_endpoint;
+    sender->sender_proxy.log.on_remove_endpoint = context->log.sender_proxy_on_remove_endpoint;
 
     sender->network_publications.array = NULL;
     sender->network_publications.length = 0;
@@ -95,7 +95,7 @@ int aeron_driver_sender_init(
     sender->round_robin_index = 0;
     sender->duty_cycle_counter = 0;
     sender->duty_cycle_ratio = context->send_to_sm_poll_ratio;
-    sender->status_message_read_timeout_ns = context->status_message_timeout_ns / 2;
+    sender->status_message_read_timeout_ns = (int64_t)(context->status_message_timeout_ns / 2);
     sender->control_poll_timeout_ns = 0;
     sender->total_bytes_sent_counter = aeron_system_counter_addr(system_counters, AERON_SYSTEM_COUNTER_BYTES_SENT);
     sender->errors_counter = aeron_system_counter_addr(system_counters, AERON_SYSTEM_COUNTER_ERRORS);
@@ -104,8 +104,11 @@ int aeron_driver_sender_init(
         system_counters, AERON_SYSTEM_COUNTER_STATUS_MESSAGES_RECEIVED);
     sender->nak_messages_received_counter = aeron_system_counter_addr(
         system_counters, AERON_SYSTEM_COUNTER_NAK_MESSAGES_RECEIVED);
+    sender->error_messages_received_counter = aeron_system_counter_addr(
+        system_counters, AERON_SYSTEM_COUNTER_ERROR_FRAMES_RECEIVED);
     sender->resolution_changes_counter = aeron_system_counter_addr(
         system_counters, AERON_SYSTEM_COUNTER_RESOLUTION_CHANGES);
+    sender->short_sends_counter = aeron_system_counter_addr(system_counters, AERON_SYSTEM_COUNTER_SHORT_SENDS);
 
     int64_t now_ns = context->nano_clock();
     sender->re_resolution_deadline_ns = now_ns + (int64_t)context->re_resolution_check_interval_ns;
@@ -129,8 +132,6 @@ int aeron_driver_sender_do_work(void *clientd)
 {
     aeron_driver_sender_t *sender = (aeron_driver_sender_t *)clientd;
 
-    const size_t vlen = sender->recv_buffers.vector_capacity;
-
     int64_t now_ns = sender->context->nano_clock();
     aeron_clock_update_cached_nano_time(sender->context->sender_cached_clock, now_ns);
 
@@ -141,30 +142,28 @@ int aeron_driver_sender_do_work(void *clientd)
         sender->sender_proxy.command_queue, aeron_driver_sender_on_rb_command_queue, sender, AERON_COMMAND_DRAIN_LIMIT);
 
     int64_t bytes_received = 0;
+    int64_t short_sends_before = aeron_counter_get(sender->short_sends_counter);
     int bytes_sent = aeron_driver_sender_do_send(sender, now_ns);
 
     if (0 == bytes_sent ||
         ++sender->duty_cycle_counter >= sender->duty_cycle_ratio ||
-        now_ns > sender->control_poll_timeout_ns)
+        now_ns > sender->control_poll_timeout_ns ||
+        short_sends_before < aeron_counter_get(sender->short_sends_counter))
     {
-        struct mmsghdr mmsghdr[AERON_DRIVER_SENDER_IO_VECTOR_LENGTH_MAX];
-
-        for (size_t i = 0; i < vlen; i++)
-        {
-            mmsghdr[i].msg_hdr.msg_name = &sender->recv_buffers.addrs[i];
-            mmsghdr[i].msg_hdr.msg_namelen = sizeof(sender->recv_buffers.addrs[i]);
-            mmsghdr[i].msg_hdr.msg_iov = &sender->recv_buffers.iov[i];
-            mmsghdr[i].msg_hdr.msg_iovlen = 1;
-            mmsghdr[i].msg_hdr.msg_flags = 0;
-            mmsghdr[i].msg_hdr.msg_control = NULL;
-            mmsghdr[i].msg_hdr.msg_controllen = 0;
-            mmsghdr[i].msg_len = 0;
-        }
+        struct mmsghdr mmsghdr[1];
+        mmsghdr[0].msg_hdr.msg_name = &sender->recv_buffers.addrs[0];
+        mmsghdr[0].msg_hdr.msg_namelen = sizeof(sender->recv_buffers.addrs[0]);
+        mmsghdr[0].msg_hdr.msg_iov = &sender->recv_buffers.iov[0];
+        mmsghdr[0].msg_hdr.msg_iovlen = 1;
+        mmsghdr[0].msg_hdr.msg_flags = 0;
+        mmsghdr[0].msg_hdr.msg_control = NULL;
+        mmsghdr[0].msg_hdr.msg_controllen = 0;
+        mmsghdr[0].msg_len = 0;
 
         int poll_result = sender->poller_poll_func(
             &sender->poller,
             mmsghdr,
-            vlen,
+            1,
             &bytes_received,
             sender->data_paths.recv_func,
             sender->recvmmsg_func,
@@ -178,7 +177,7 @@ int aeron_driver_sender_do_work(void *clientd)
 
         if (sender->context->re_resolution_check_interval_ns > 0 && (sender->re_resolution_deadline_ns - now_ns) < 0)
         {
-            sender->re_resolution_deadline_ns = now_ns + sender->context->re_resolution_check_interval_ns;
+            sender->re_resolution_deadline_ns = (int64_t)(now_ns + sender->context->re_resolution_check_interval_ns);
             aeron_udp_transport_poller_check_send_endpoint_re_resolutions(
                 &sender->poller, now_ns, sender->context->conductor_proxy);
         }
@@ -334,7 +333,8 @@ void aeron_driver_sender_on_add_destination(void *clientd, void *command)
     aeron_driver_sender_t *sender = (aeron_driver_sender_t *)clientd;
     aeron_command_destination_t *cmd = (aeron_command_destination_t *)command;
 
-    if (aeron_send_channel_endpoint_add_destination(cmd->endpoint, cmd->uri, &cmd->control_address) < 0)
+    if (aeron_send_channel_endpoint_add_destination(
+        cmd->endpoint, cmd->uri, &cmd->control_address, cmd->destination_registration_id) < 0)
     {
         AERON_APPEND_ERR("%s", "sender on_add_destination");
         aeron_driver_sender_log_error(sender);
@@ -348,6 +348,25 @@ void aeron_driver_sender_on_remove_destination(void *clientd, void *command)
     aeron_uri_t *old_uri = NULL;
 
     if (aeron_send_channel_endpoint_remove_destination(cmd->endpoint, &cmd->control_address, &old_uri) < 0)
+    {
+        AERON_APPEND_ERR("%s", "sender on_remove_destination");
+        aeron_driver_sender_log_error(sender);
+    }
+
+    if (NULL != old_uri)
+    {
+        aeron_driver_conductor_proxy_on_delete_send_destination(sender->context->conductor_proxy, old_uri);
+    }
+}
+
+void aeron_driver_sender_on_remove_destination_by_id(void *clientd, void *command)
+{
+    aeron_driver_sender_t *sender = (aeron_driver_sender_t *)clientd;
+    aeron_command_destination_by_id_t *cmd = (aeron_command_destination_by_id_t *)command;
+    aeron_uri_t *old_uri = NULL;
+
+    if (aeron_send_channel_endpoint_remove_destination_by_id(
+        cmd->endpoint, cmd->destination_registration_id, &old_uri) < 0)
     {
         AERON_APPEND_ERR("%s", "sender on_remove_destination");
         aeron_driver_sender_log_error(sender);

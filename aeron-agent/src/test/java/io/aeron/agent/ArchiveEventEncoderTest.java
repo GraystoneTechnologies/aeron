@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,30 +34,34 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 class ArchiveEventEncoderTest
 {
+    enum State
+    {
+        ALPHA, BETA
+    }
+
     private final UnsafeBuffer buffer = new UnsafeBuffer(new byte[MAX_EVENT_LENGTH]);
 
     @Test
-    void testEncodeSessionStateChange()
+    void testEncodeControlSessionStateChange()
     {
         final int offset = 24;
         final TimeUnit from = DAYS;
         final TimeUnit to = MILLISECONDS;
         final long sessionId = Long.MAX_VALUE;
-        final long position = 9823742;
         final String payload = from.name() + STATE_SEPARATOR + to.name();
-        final int length = payload.length() + 2 * SIZE_OF_LONG + SIZE_OF_INT;
+        final String reason = "test reason for now";
+        final int length = payload.length() + SIZE_OF_LONG + SIZE_OF_INT + SIZE_OF_INT + reason.length();
         final int captureLength = captureLength(length);
 
-        final int encodedLength = encodeSessionStateChange(
-            buffer, offset, captureLength, length, from, to, sessionId, position);
+        final int encodedLength = encodeControlSessionStateChange(
+            buffer, offset, captureLength, length, from, to, sessionId, reason);
 
-        assertEquals(encodedLength(sessionStateChangeLength(from, to)), encodedLength);
+        assertEquals(encodedLength(sessionStateChangeLength(from, to, reason)), encodedLength);
         assertEquals(captureLength, buffer.getInt(offset, LITTLE_ENDIAN));
         assertEquals(length, buffer.getInt(offset + SIZE_OF_INT, LITTLE_ENDIAN));
         assertNotEquals(0, buffer.getLong(offset + SIZE_OF_INT * 2, LITTLE_ENDIAN));
         assertEquals(sessionId, buffer.getLong(offset + LOG_HEADER_LENGTH));
-        assertEquals(position, buffer.getLong(offset + LOG_HEADER_LENGTH + SIZE_OF_LONG));
-        assertEquals(payload, buffer.getStringAscii(offset + LOG_HEADER_LENGTH + 2 * SIZE_OF_LONG));
+        assertEquals(payload, buffer.getStringAscii(offset + LOG_HEADER_LENGTH + SIZE_OF_LONG));
     }
 
     @Test
@@ -66,8 +70,11 @@ class ArchiveEventEncoderTest
         final ChronoUnit from = ChronoUnit.ERAS;
         final ChronoUnit to = ChronoUnit.MILLENNIA;
         final String payload = from.name() + STATE_SEPARATOR + to.name();
+        final String reason = "hfskhflkdhfldshlfkhllkshflkhsldfhaslkfhsaklhflksahdflsahlhalks";
 
-        assertEquals(payload.length() + 2 * SIZE_OF_LONG + SIZE_OF_INT, sessionStateChangeLength(from, to));
+        assertEquals(
+            payload.length() + SIZE_OF_LONG + SIZE_OF_INT * 2 + reason.length(),
+            sessionStateChangeLength(from, to, reason));
     }
 
     @Test
@@ -106,5 +113,83 @@ class ArchiveEventEncoderTest
         assertNotEquals(0, buffer.getLong(offset + SIZE_OF_INT * 2, LITTLE_ENDIAN));
         assertEquals(catalogLength, buffer.getLong(offset + LOG_HEADER_LENGTH));
         assertEquals(newCatalogLength, buffer.getLong(offset + LOG_HEADER_LENGTH + SIZE_OF_LONG));
+    }
+
+    @Test
+    void testEncodeReplaySessionStateChange()
+    {
+        int offset = 24;
+        final int length = replaySessionStateChangeLength(State.ALPHA, State.BETA, "reason");
+        final int captureLength = captureLength(length);
+
+        encodeReplaySessionStateChange(buffer, offset, captureLength, length,
+            State.ALPHA, State.BETA, 1, 2, 3, "reason");
+
+        assertEquals(captureLength, buffer.getInt(offset, LITTLE_ENDIAN));
+        assertEquals(length, buffer.getInt(offset + SIZE_OF_INT, LITTLE_ENDIAN));
+        assertNotEquals(0, buffer.getLong(offset + 2 * SIZE_OF_INT, LITTLE_ENDIAN));
+        offset += LOG_HEADER_LENGTH;
+
+        assertEquals(1, buffer.getLong(offset, LITTLE_ENDIAN));
+        offset += SIZE_OF_LONG;
+        assertEquals(2, buffer.getLong(offset, LITTLE_ENDIAN));
+        offset += SIZE_OF_LONG;
+        assertEquals(3, buffer.getLong(offset, LITTLE_ENDIAN));
+        offset += SIZE_OF_LONG;
+        assertEquals("ALPHA -> BETA", buffer.getStringAscii(offset));
+        offset += SIZE_OF_INT + "ALPHA -> BETA".length();
+        assertEquals("reason", buffer.getStringAscii(offset));
+    }
+
+    @Test
+    void testEncodeRecordingSessionStateChange()
+    {
+        int offset = 24;
+        final int length = recordingSessionStateChangeLength(State.ALPHA, State.BETA, "reason");
+        final int captureLength = captureLength(length);
+
+        encodeRecordingSessionStateChange(buffer, offset, captureLength, length,
+            State.ALPHA, State.BETA, 1, 2, "reason");
+
+        assertEquals(captureLength, buffer.getInt(offset, LITTLE_ENDIAN));
+        assertEquals(length, buffer.getInt(offset + SIZE_OF_INT, LITTLE_ENDIAN));
+        assertNotEquals(0, buffer.getLong(offset + 2 * SIZE_OF_INT, LITTLE_ENDIAN));
+        offset += LOG_HEADER_LENGTH;
+
+        assertEquals(1, buffer.getLong(offset, LITTLE_ENDIAN));
+        offset += SIZE_OF_LONG;
+        assertEquals(2, buffer.getLong(offset, LITTLE_ENDIAN));
+        offset += SIZE_OF_LONG;
+        assertEquals("ALPHA -> BETA", buffer.getStringAscii(offset));
+        offset += SIZE_OF_INT + "ALPHA -> BETA".length();
+        assertEquals("reason", buffer.getStringAscii(offset));
+    }
+
+    @Test
+    void testEncodeReplicationSessionStateChange()
+    {
+        int offset = 24;
+        final int length = replicationSessionStateChangeLength(State.ALPHA, State.BETA, "reason");
+        final int captureLength = captureLength(length);
+
+        encodeReplicationSessionStateChange(buffer, offset, captureLength, length,
+            State.ALPHA, State.BETA, 1, 2, 3, 4, "reason");
+
+        assertEquals(captureLength, buffer.getInt(offset, LITTLE_ENDIAN));
+        assertEquals(length, buffer.getInt(offset + SIZE_OF_INT, LITTLE_ENDIAN));
+        assertNotEquals(0, buffer.getLong(offset + 2 * SIZE_OF_INT, LITTLE_ENDIAN));
+        offset += LOG_HEADER_LENGTH;
+
+        assertEquals(1, buffer.getLong(offset, LITTLE_ENDIAN));
+        offset += SIZE_OF_LONG;
+        assertEquals(2, buffer.getLong(offset, LITTLE_ENDIAN));
+        offset += SIZE_OF_LONG;
+        assertEquals(3, buffer.getLong(offset, LITTLE_ENDIAN));
+        offset += SIZE_OF_LONG;
+        assertEquals(4, buffer.getLong(offset, LITTLE_ENDIAN));
+        offset += SIZE_OF_LONG;
+        assertEquals("ALPHA -> BETA", buffer.getStringAscii(offset));
+        offset += SIZE_OF_INT + "ALPHA -> BETA".length();
+        assertEquals("reason", buffer.getStringAscii(offset));
     }
 }

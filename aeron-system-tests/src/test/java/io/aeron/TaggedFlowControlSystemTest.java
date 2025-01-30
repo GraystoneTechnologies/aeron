@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -119,7 +119,7 @@ class TaggedFlowControlSystemTest
     @AfterEach
     void after()
     {
-        CloseHelper.closeAll(clientB, clientA, driverB, driverA);
+        CloseHelper.closeAll(subscriptionB, subscriptionA, publication, clientB, clientA, driverB, driverA);
     }
 
     private static Stream<Arguments> strategyConfigurations()
@@ -131,7 +131,7 @@ class TaggedFlowControlSystemTest
             Arguments.of(null, null, null, "|fc=tagged,g:123", "|gtag=123"));
     }
 
-    private static class State
+    private static final class State
     {
         private int numMessagesToSend;
         private int numMessagesLeftToSend;
@@ -459,10 +459,8 @@ class TaggedFlowControlSystemTest
 
         subscriptionA = clientA.addSubscription(uriWithGroupTag, STREAM_ID);
 
-        while (!publication.isConnected())
-        {
-            Tests.sleep(1);
-        }
+        Tests.awaitConnected(publication);
+        Tests.awaitConnected(subscriptionA);
     }
 
     @Test

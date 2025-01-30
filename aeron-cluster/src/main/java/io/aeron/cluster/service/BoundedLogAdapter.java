@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package io.aeron.cluster.service;
 
 import io.aeron.BufferBuilder;
 import io.aeron.Image;
+import io.aeron.cluster.ConsensusModule;
 import io.aeron.cluster.client.*;
 import io.aeron.cluster.codecs.*;
 import io.aeron.logbuffer.*;
@@ -71,6 +72,7 @@ final class BoundedLogAdapter implements ControlledFragmentHandler, AutoCloseabl
         else if ((flags & BEGIN_FRAG_FLAG) == BEGIN_FRAG_FLAG)
         {
             builder.reset()
+                .captureHeader(header)
                 .append(buffer, offset, length)
                 .nextTermOffset(BitUtil.align(offset + length + HEADER_LENGTH, FRAME_ALIGNMENT));
         }
@@ -82,7 +84,7 @@ final class BoundedLogAdapter implements ControlledFragmentHandler, AutoCloseabl
 
             if ((flags & END_FRAG_FLAG) == END_FRAG_FLAG)
             {
-                action = onMessage(builder.buffer(), 0, builder.limit(), header);
+                action = onMessage(builder.buffer(), 0, builder.limit(), builder.completeHeader(header));
 
                 if (Action.ABORT == action)
                 {
@@ -221,11 +223,15 @@ final class BoundedLogAdapter implements ControlledFragmentHandler, AutoCloseabl
                     messageHeaderDecoder.blockLength(),
                     messageHeaderDecoder.version());
 
+                final int flags = ClusterActionRequestDecoder.flagsNullValue() != actionRequestDecoder.flags() ?
+                    actionRequestDecoder.flags() : ConsensusModule.CLUSTER_ACTION_FLAGS_DEFAULT;
+
                 agent.onServiceAction(
                     actionRequestDecoder.leadershipTermId(),
                     actionRequestDecoder.logPosition(),
                     actionRequestDecoder.timestamp(),
-                    actionRequestDecoder.action());
+                    actionRequestDecoder.action(),
+                    flags);
                 break;
 
             case NewLeadershipTermEventDecoder.TEMPLATE_ID:
@@ -247,17 +253,7 @@ final class BoundedLogAdapter implements ControlledFragmentHandler, AutoCloseabl
                 break;
 
             case MembershipChangeEventDecoder.TEMPLATE_ID:
-                membershipChangeEventDecoder.wrap(
-                    buffer,
-                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
-                    messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
-
-                agent.onMembershipChange(
-                    membershipChangeEventDecoder.logPosition(),
-                    membershipChangeEventDecoder.timestamp(),
-                    membershipChangeEventDecoder.changeType(),
-                    membershipChangeEventDecoder.memberId());
+                // Removed Dynamic Join.
                 break;
         }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,8 +20,7 @@ import org.agrona.concurrent.UnsafeBuffer;
 import java.nio.ByteBuffer;
 
 /**
- * Represents the collection of term and associated state buffers for the image between a publisher and subscriber
- * image for the replicated log.
+ * Represents the collection of raw metadata and associated term buffers for publication and image logs.
  */
 public interface RawLog extends AutoCloseable
 {

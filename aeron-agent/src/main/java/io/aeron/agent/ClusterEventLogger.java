@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -171,6 +171,7 @@ public final class ClusterEventLogger
      * @param logLeadershipTermId of the node.
      * @param appendPosition      of the node.
      * @param catchupPosition     of the node.
+     * @param reason              for the state transition to occur.
      */
     public <E extends Enum<E>> void logElectionStateChange(
         final int memberId,
@@ -182,9 +183,10 @@ public final class ClusterEventLogger
         final long logPosition,
         final long logLeadershipTermId,
         final long appendPosition,
-        final long catchupPosition)
+        final long catchupPosition,
+        final String reason)
     {
-        final int length = electionStateChangeLength(oldState, newState);
+        final int length = electionStateChangeLength(oldState, newState, reason);
         final int captureLength = captureLength(length);
         final int encodedLength = encodedLength(captureLength);
         final ManyToOneRingBuffer ringBuffer = this.ringBuffer;
@@ -208,7 +210,8 @@ public final class ClusterEventLogger
                     logPosition,
                     logLeadershipTermId,
                     appendPosition,
-                    catchupPosition);
+                    catchupPosition,
+                    reason);
             }
             finally
             {
@@ -312,7 +315,7 @@ public final class ClusterEventLogger
     }
 
     /**
-     * Log the catchup position message
+     * Log the catchup position message.
      *
      * @param memberId         of the current cluster node.
      * @param leadershipTermId leadership term to catch up on
@@ -356,7 +359,7 @@ public final class ClusterEventLogger
     }
 
     /**
-     * Log the stop catchup message
+     * Log the stop catchup message.
      *
      * @param memberId         of the current cluster node.
      * @param leadershipTermId current leadershipTermId.
@@ -590,8 +593,8 @@ public final class ClusterEventLogger
      * Log addition of a passive member to the cluster.
      *
      * @param memberId        of the current cluster node.
-     * @param correlationId   correlationId for responding to the addition of the passive member
-     * @param memberEndpoints the endpoints for the new member
+     * @param correlationId   correlationId for responding to the addition of the passive member.
+     * @param memberEndpoints the endpoints for the new member.
      */
     public void logOnAddPassiveMember(final int memberId, final long correlationId, final String memberEndpoints)
     {
@@ -624,12 +627,12 @@ public final class ClusterEventLogger
     /**
      * Log the appending of a session close event to the log.
      *
-     * @param memberId         member (leader) publishing the event
-     * @param sessionId        session id of the session be closed
-     * @param closeReason      reason to close the session
-     * @param leadershipTermId current leadership term id
-     * @param timestamp        the current timestamp
-     * @param timeUnit         units for the timestamp
+     * @param memberId         member (leader) publishing the event.
+     * @param sessionId        session id of the session be closed.
+     * @param closeReason      reason to close the session.
+     * @param leadershipTermId current leadership term id.
+     * @param timestamp        the current timestamp.
+     * @param timeUnit         units for the timestamp.
      */
     public void logAppendSessionClose(
         final int memberId,
@@ -671,9 +674,9 @@ public final class ClusterEventLogger
     /**
      * Log the receiving of a termination position event.
      *
-     * @param memberId              that received the termination position.
-     * @param logLeadershipTermId   leadership term for the supplied position.
-     * @param logPosition           position to terminate at.
+     * @param memberId            that received the termination position.
+     * @param logLeadershipTermId leadership term for the supplied position.
+     * @param logPosition         position to terminate at.
      */
     public void logTerminationPosition(
         final int memberId,
@@ -709,10 +712,10 @@ public final class ClusterEventLogger
     /**
      * Log the receiving of an acknowledgement to a termination position event.
      *
-     * @param memberId              that received the termination ack.
-     * @param logLeadershipTermId   leadership term for the supplied position.
-     * @param logPosition           position to terminate at.
-     * @param senderMemberId        member sending the ack.
+     * @param memberId            that received the termination ack.
+     * @param logLeadershipTermId leadership term for the supplied position.
+     * @param logPosition         position to terminate at.
+     * @param senderMemberId      member sending the ack.
      */
     public void logTerminationAck(
         final int memberId,
@@ -750,13 +753,13 @@ public final class ClusterEventLogger
     /**
      * Log an ack received from a cluster service.
      *
-     * @param memberId      memberId receiving the ack.
-     * @param logPosition   position in the log when the ack was sent.
-     * @param timestamp     timestamp when the ack was sent.
-     * @param timeUnit      time unit used for the timestamp.
-     * @param ackId         id of the ack.
-     * @param relevantId    associated id used in the ack, e.g. recordingId for snapshot acks.
-     * @param serviceId     the id of the service that sent the ack.
+     * @param memberId    memberId receiving the ack.
+     * @param logPosition position in the log when the ack was sent.
+     * @param timestamp   timestamp when the ack was sent.
+     * @param timeUnit    time unit used for the timestamp.
+     * @param ackId       id of the ack.
+     * @param relevantId  associated id used in the ack, e.g. recordingId for snapshot acks.
+     * @param serviceId   the id of the service that sent the ack.
      */
     public void logServiceAck(
         final int memberId,
@@ -800,13 +803,13 @@ public final class ClusterEventLogger
     /**
      * Log a replication end event.
      *
-     * @param memberId          memberId running the replication.
-     * @param purpose           the reason for the replication.
-     * @param channel           the channel used to connect to the source archive.
-     * @param srcRecordingId    source recording id.
-     * @param dstRecordingId    destination recording id.
-     * @param position          the position where the recording ended.
-     * @param hasSynced         was the sync event been received for the replication.
+     * @param memberId       memberId running the replication.
+     * @param purpose        the reason for the replication.
+     * @param channel        the channel used to connect to the source archive.
+     * @param srcRecordingId source recording id.
+     * @param dstRecordingId destination recording id.
+     * @param position       the position where the recording ended.
+     * @param hasSynced      was the sync event been received for the replication.
      */
     public void logReplicationEnded(
         final int memberId,
@@ -839,6 +842,106 @@ public final class ClusterEventLogger
                     dstRecordingId,
                     position,
                     hasSynced);
+            }
+            finally
+            {
+                ringBuffer.commit(index);
+            }
+        }
+    }
+
+    /**
+     * Log a standby snapshot notification.
+     *
+     * @param memberId            memberId receiving the notification.
+     * @param recordingId         the recording id of the standby snapshot in the remote archive.
+     * @param leadershipTermId    the leadershipTermId of the standby snapshot.
+     * @param termBaseLogPosition the termBaseLogPosition of the standby snapshot.
+     * @param logPosition         the position of the standby snapshot when it is taken.
+     * @param timestamp           the cluster timestamp when the snapshot is taken.
+     * @param timeUnit            the cluster time unit.
+     * @param serviceId           the serviceId for the snapshot.
+     * @param archiveEndpoint     the endpoint holding the standby snapshot.
+     */
+    public void logStandbySnapshotNotification(
+        final int memberId,
+        final long recordingId,
+        final long leadershipTermId,
+        final long termBaseLogPosition,
+        final long logPosition,
+        final long timestamp,
+        final TimeUnit timeUnit,
+        final int serviceId,
+        final String archiveEndpoint)
+    {
+        final int length = ClusterEventEncoder.standbySnapshotNotificationLength(timeUnit, archiveEndpoint);
+        final int captureLength = captureLength(length);
+        final int encodedLength = encodedLength(captureLength);
+        final ManyToOneRingBuffer ringBuffer = this.ringBuffer;
+        final int index = ringBuffer.tryClaim(STANDBY_SNAPSHOT_NOTIFICATION.toEventCodeId(), encodedLength);
+
+        if (index > 0)
+        {
+            try
+            {
+                ClusterEventEncoder.encodeStandbySnapshotNotification(
+                    (UnsafeBuffer)ringBuffer.buffer(),
+                    index,
+                    captureLength,
+                    length,
+                    memberId,
+                    recordingId,
+                    leadershipTermId,
+                    termBaseLogPosition,
+                    logPosition,
+                    timestamp,
+                    timeUnit,
+                    serviceId,
+                    archiveEndpoint);
+            }
+            finally
+            {
+                ringBuffer.commit(index);
+            }
+        }
+    }
+
+    /**
+     * Log the start of the new election.
+     *
+     * @param memberId         memberId which start the election.
+     * @param leadershipTermId of the member.
+     * @param logPosition      the log position.
+     * @param appendPosition   the append position.
+     * @param reason           for election to be started.
+     */
+    public void logNewElection(
+        final int memberId,
+        final long leadershipTermId,
+        final long logPosition,
+        final long appendPosition,
+        final String reason)
+    {
+        final int length = ClusterEventEncoder.newElectionLength(reason);
+        final int captureLength = captureLength(length);
+        final int encodedLength = encodedLength(captureLength);
+        final ManyToOneRingBuffer ringBuffer = this.ringBuffer;
+        final int index = ringBuffer.tryClaim(NEW_ELECTION.toEventCodeId(), encodedLength);
+
+        if (index > 0)
+        {
+            try
+            {
+                ClusterEventEncoder.encodeNewElection(
+                    (UnsafeBuffer)ringBuffer.buffer(),
+                    index,
+                    captureLength,
+                    length,
+                    memberId,
+                    leadershipTermId,
+                    logPosition,
+                    appendPosition,
+                    reason);
             }
             finally
             {

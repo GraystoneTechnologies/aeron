@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -92,7 +92,7 @@ final class CommonEventDissector
     {
         int encodedLength = 0;
 
-        final int addressLength = buffer.getInt(offset + encodedLength);
+        final int addressLength = buffer.getInt(offset + encodedLength, LITTLE_ENDIAN);
         encodedLength += SIZE_OF_INT;
 
         if (4 == addressLength)

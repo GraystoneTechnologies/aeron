@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -356,7 +356,7 @@ TEST_F(TimestampsTest, shouldPutTimestampInMessagesReservedValueWithMergedMds)
         pubAPosition,
         pubAConstants.position_bits_to_shift,
         pubAConstants.initial_term_id);
-    int32_t termOffset = (int32_t)(pubAPosition & (pubAConstants.term_buffer_length - 1));
+    auto termOffset = (int32_t)(pubAPosition & (pubAConstants.term_buffer_length - 1));
 
     std::stringstream publicationBStream;
     publicationBStream << destinationB;

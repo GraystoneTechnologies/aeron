@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -38,7 +38,7 @@ import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 
-import static io.aeron.logbuffer.FrameDescriptor.END_FRAG_FLAG;
+import static io.aeron.logbuffer.FrameDescriptor.UNFRAGMENTED;
 import static java.util.Arrays.asList;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.*;
@@ -135,7 +135,7 @@ class FragmentedMessageTest
                 assertEquals(srcBuffer.getByte(i), capturedBuffer.getByte(i), "same at i=" + i);
             }
 
-            assertEquals(END_FRAG_FLAG, headerArg.getValue().flags());
+            assertEquals(UNFRAGMENTED, headerArg.getValue().flags());
         }
     }
 }

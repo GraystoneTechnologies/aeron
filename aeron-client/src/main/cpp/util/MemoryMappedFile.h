@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,10 +21,10 @@
 #include "util/Export.h"
 
 #ifdef _WIN32
-    #include <cstddef>
-    typedef void * HANDLE;
+#include <cstddef>
+typedef void * HANDLE;
 #else
-    #include <sys/types.h>
+#include <sys/types.h>
 #endif
 
 namespace aeron { namespace util

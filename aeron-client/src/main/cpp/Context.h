@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@ class Image;
 /**
  * Used to represent a null value for when some value is not yet set.
  */
-constexpr const std::int32_t NULL_VALUE = -1;
+static constexpr const std::int32_t NULL_VALUE = -1;
 
 /**
  * Function called by Aeron to deliver notification of an available image.
@@ -102,7 +102,6 @@ typedef std::function<void(
  * @param registrationId for the counter.
  * @param counterId      that is available.
  */
-
 typedef std::function<void(
     CountersReader &countersReader,
     std::int64_t registrationId,
@@ -132,6 +131,8 @@ typedef std::function<void()> on_close_client_t;
 const static long NULL_TIMEOUT = -1;
 const static long DEFAULT_MEDIA_DRIVER_TIMEOUT_MS = 10000;
 const static long DEFAULT_RESOURCE_LINGER_MS = 5000;
+const static long DEFAULT_IDLE_SLEEP_DURATION_MS = 16;
+const static int MAX_CLIENT_NAME_LENGTH = 100;
 
 /**
  * The Default handler for Aeron runtime exceptions.
@@ -204,6 +205,11 @@ public:
     /// @cond HIDDEN_SYMBOLS
     this_t &conclude()
     {
+        if (clientName().length() > MAX_CLIENT_NAME_LENGTH)
+        {
+            throw util::IllegalArgumentException("clientName length must <= 100", SOURCEINFO);
+        }
+
         if (!m_isOnNewExclusivePublicationHandlerSet)
         {
             m_onNewExclusivePublicationHandler = m_onNewPublicationHandler;
@@ -223,6 +229,28 @@ public:
     {
         m_dirName = directory;
         return *this;
+    }
+
+    /**
+     * Set the name for this Aeron client.
+     *
+     * @param clientName to assign.
+     * @return reference to this Context instance.
+     */
+    inline this_t &clientName(const std::string &clientName)
+    {
+        m_clientName = clientName;
+        return *this;
+    }
+
+    /**
+     * Get the name of this Aeron client.
+     *
+     * @return name of the client or empty string.
+     */
+    inline std::string clientName()
+    {
+        return m_clientName;
     }
 
     /**
@@ -349,10 +377,32 @@ public:
     }
 
     /**
+     * Set the amount of time, in milliseconds, that the client conductor will sleep when idle.
+     *
+     * @param value number of milliseconds.
+     * @return reference to this Context instance
+     */
+    inline this_t &idleSleepDuration(long value)
+    {
+        m_idleSleepDuration = value;
+        return *this;
+    }
+
+    /**
+     * Get the amount of time, in milliseconds, that the client conductor will sleep when idle.
+     *
+     * @return value in number of milliseconds.
+     */
+    long idleSleepDuration() const
+    {
+        return m_idleSleepDuration;
+    }
+
+    /**
      * Set the amount of time, in milliseconds, that this client will wait until it determines the
      * Media Driver is unavailable. When this happens a DriverTimeoutException will be generated for the error handler.
      *
-     * @param value Number of milliseconds.
+     * @param value number of milliseconds.
      * @return reference to this Context instance
      * @see errorHandler
      */
@@ -378,7 +428,7 @@ public:
      * Set the amount of time, in milliseconds, that this client will to linger inactive connections and internal
      * arrays before they are freed.
      *
-     * @param value Number of milliseconds.
+     * @param value number of milliseconds.
      * @return reference to this Context instance
      */
     inline this_t &resourceLingerTimeout(long value)
@@ -418,6 +468,7 @@ public:
 
 private:
     std::string m_dirName = defaultAeronPath();
+    std::string m_clientName;
     exception_handler_t m_exceptionHandler = defaultErrorHandler;
     on_new_publication_t m_onNewPublicationHandler = defaultOnNewPublicationHandler;
     on_new_publication_t m_onNewExclusivePublicationHandler = defaultOnNewPublicationHandler;
@@ -427,6 +478,7 @@ private:
     on_available_counter_t m_onAvailableCounterHandler = defaultOnAvailableCounterHandler;
     on_unavailable_counter_t m_onUnavailableCounterHandler = defaultOnUnavailableCounterHandler;
     on_close_client_t m_onCloseClientHandler = defaultOnCloseClientHandler;
+    long m_idleSleepDuration = DEFAULT_IDLE_SLEEP_DURATION_MS;
     long m_mediaDriverTimeout = DEFAULT_MEDIA_DRIVER_TIMEOUT_MS;
     long m_resourceLingerTimeout = DEFAULT_RESOURCE_LINGER_MS;
     bool m_useConductorAgentInvoker = false;

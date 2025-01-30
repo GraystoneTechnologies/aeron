@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,6 +32,7 @@
 #include "aeron_system_counters.h"
 #include "aeron_cnc_file_descriptor.h"
 #include "aeron_duty_cycle_tracker.h"
+#include "aeron_port_manager.h"
 
 #define AERON_COMMAND_RB_CAPACITY (128 * 1024)
 #define AERON_COMMAND_RB_RESERVE (1024)
@@ -80,6 +81,25 @@ typedef void (*aeron_driver_flow_control_strategy_on_receiver_change_func_t)(
     const char *channel,
     size_t receiver_count);
 
+typedef void (*aeron_driver_nak_message_func_t)(
+    const struct sockaddr_storage *address,
+    int32_t session_id,
+    int32_t stream_id,
+    int32_t term_id,
+    int32_t term_offset,
+    int32_t nak_length,
+    size_t channel_length,
+    const char *channel);
+
+typedef void (*aeron_driver_resend_func_t)(
+    int32_t session_id,
+    int32_t stream_id,
+    int32_t term_id,
+    int32_t term_offset,
+    int32_t resend_length,
+    size_t channel_length,
+    const char *channel);
+
 typedef void (*aeron_driver_name_resolver_on_resolve_t)(
     aeron_name_resolver_t *name_resolver,
     int64_t duration_ns,
@@ -94,9 +114,13 @@ typedef void (*aeron_driver_name_resolver_on_lookup_t)(
     bool is_re_lookup,
     const char *resolved_name);
 
+typedef void (*aeron_driver_name_resolver_on_host_name_t)(
+    int64_t duration_ns,
+    const char *host_name);
+
 typedef struct aeron_driver_context_stct
 {
-    char *aeron_dir;                                        /* aeron.dir */
+    char aeron_dir[AERON_MAX_PATH];                         /* aeron.dir */
     aeron_threading_mode_t threading_mode;                  /* aeron.threading.mode = DEDICATED */
     aeron_inferable_boolean_t receiver_group_consideration; /* aeron.receiver.group.consideration = INFER */
     bool dirs_delete_on_start;                              /* aeron.dir.delete.on.start = false */
@@ -125,8 +149,10 @@ typedef struct aeron_driver_context_stct
     uint64_t retransmit_unicast_delay_ns;                   /* aeron.retransmit.unicast.delay = 0 */
     uint64_t retransmit_unicast_linger_ns;                  /* aeron.retransmit.unicast.linger = 60ms */
     uint64_t nak_unicast_delay_ns;                          /* aeron.nak.unicast.delay = 60ms */
+    uint64_t nak_unicast_retry_delay_ratio;                 /* aeron.nak.unicast.retry.delay.ratio = 100 */
     uint64_t nak_multicast_max_backoff_ns;                  /* aeron.nak.multicast.max.backoff = 60ms */
     uint64_t re_resolution_check_interval_ns;               /* aeron.driver.reresolution.check.interval = 1s */
+    uint64_t low_file_store_warning_threshold;              /* aeron.low.file.store.warning.threshold = 160MB */
     size_t to_driver_buffer_length;                         /* aeron.conductor.buffer.length = 1MB + trailer*/
     size_t to_clients_buffer_length;                        /* aeron.clients.buffer.length = 1MB + trailer */
     size_t counters_values_buffer_length;                   /* aeron.counters.buffer.length = 1MB */
@@ -151,10 +177,14 @@ typedef struct aeron_driver_context_stct
     uint32_t sender_io_vector_capacity;                     /* aeron.sender.io.vector.capacity = 2 */
     uint32_t network_publication_max_messages_per_send;     /* aeron.network.publication.max.messages.per.send = 2 */
     uint32_t resource_free_limit;                           /* aeron.driver.resource.free.limit = 10 */
+    uint32_t async_executor_threads;                        /* aeron.driver.async.executor.threads = 1 */
+    uint32_t max_resend;                                    /* aeron.max.resend = 16 */
 
     int32_t conductor_cpu_affinity_no;                      /* aeron.conductor.cpu.affinity = -1 */
     int32_t receiver_cpu_affinity_no;                       /* aeron.receiver.cpu.affinity = -1 */
     int32_t sender_cpu_affinity_no;                         /* aeron.sender.cpu.affinity = -1 */
+    int32_t stream_session_limit;                           /* aeron.driver.stream.session.limit = INT32_MAX */
+    bool enable_experimental_features;                      /* aeron.enable.experimental.features = false */
 
     struct                                                  /* aeron.receiver.receiver.tag = <unset> */
     {
@@ -235,25 +265,29 @@ typedef struct aeron_driver_context_stct
     aeron_system_counters_t *system_counters;
     aeron_distinct_error_log_t *error_log;
 
-    aeron_driver_conductor_to_driver_interceptor_func_t to_driver_interceptor_func;
-    aeron_driver_conductor_to_client_interceptor_func_t to_client_interceptor_func;
-
-    aeron_on_remove_publication_cleanup_func_t remove_publication_cleanup_func;
-    aeron_on_remove_subscription_cleanup_func_t remove_subscription_cleanup_func;
-    aeron_on_remove_image_cleanup_func_t remove_image_cleanup_func;
-
-    aeron_on_endpoint_change_func_t sender_proxy_on_add_endpoint_func;
-    aeron_on_endpoint_change_func_t sender_proxy_on_remove_endpoint_func;
-    aeron_on_endpoint_change_func_t receiver_proxy_on_add_endpoint_func;
-    aeron_on_endpoint_change_func_t receiver_proxy_on_remove_endpoint_func;
-
-    aeron_untethered_subscription_state_change_func_t untethered_subscription_state_change_func;
-
-    aeron_driver_name_resolver_on_neighbor_change_func_t name_resolution_on_neighbor_added_func;
-    aeron_driver_name_resolver_on_neighbor_change_func_t name_resolution_on_neighbor_removed_func;
-
-    aeron_driver_flow_control_strategy_on_receiver_change_func_t flow_control_on_receiver_added_func;
-    aeron_driver_flow_control_strategy_on_receiver_change_func_t flow_control_on_receiver_removed_func;
+    struct
+    {
+        aeron_driver_conductor_to_driver_interceptor_func_t to_driver_interceptor;
+        aeron_driver_conductor_to_client_interceptor_func_t to_client_interceptor;
+        aeron_on_remove_publication_cleanup_func_t remove_publication_cleanup;
+        aeron_on_remove_subscription_cleanup_func_t remove_subscription_cleanup;
+        aeron_on_remove_image_cleanup_func_t remove_image_cleanup;
+        aeron_on_endpoint_change_func_t sender_proxy_on_add_endpoint;
+        aeron_on_endpoint_change_func_t sender_proxy_on_remove_endpoint;
+        aeron_on_endpoint_change_func_t receiver_proxy_on_add_endpoint;
+        aeron_on_endpoint_change_func_t receiver_proxy_on_remove_endpoint;
+        aeron_untethered_subscription_state_change_func_t untethered_subscription_on_state_change;
+        aeron_driver_name_resolver_on_neighbor_change_func_t name_resolution_on_neighbor_added;
+        aeron_driver_name_resolver_on_neighbor_change_func_t name_resolution_on_neighbor_removed;
+        aeron_driver_flow_control_strategy_on_receiver_change_func_t flow_control_on_receiver_added;
+        aeron_driver_flow_control_strategy_on_receiver_change_func_t flow_control_on_receiver_removed;
+        aeron_driver_name_resolver_on_resolve_t on_name_resolve;
+        aeron_driver_name_resolver_on_lookup_t on_name_lookup;
+        aeron_driver_name_resolver_on_host_name_t on_host_name;
+        aeron_driver_nak_message_func_t send_nak_message;
+        aeron_driver_nak_message_func_t on_nak_message;
+        aeron_driver_resend_func_t resend;
+    } log;
 
     aeron_driver_termination_validator_func_t termination_validator_func;
     void *termination_validator_state;
@@ -274,11 +308,9 @@ typedef struct aeron_driver_context_stct
     const char *resolver_name;
     const char *resolver_interface;
     const char *resolver_bootstrap_neighbor;
+    const char *name_resolver_init_args;
     aeron_name_resolver_supplier_func_t name_resolver_supplier_func;
     aeron_name_resolver_supplier_func_t driver_name_resolver_bootstrap_resolver_supplier_func;
-    const char *name_resolver_init_args;
-    aeron_driver_name_resolver_on_resolve_t on_name_resolve_func;
-    aeron_driver_name_resolver_on_lookup_t on_name_lookup_func;
 
     aeron_duty_cycle_tracker_t *conductor_duty_cycle_tracker;
     aeron_duty_cycle_tracker_t *sender_duty_cycle_tracker;
@@ -288,6 +320,11 @@ typedef struct aeron_driver_context_stct
     aeron_duty_cycle_stall_tracker_t sender_duty_cycle_stall_tracker;
     aeron_duty_cycle_stall_tracker_t receiver_duty_cycle_stall_tracker;
     aeron_duty_cycle_stall_tracker_t name_resolver_time_stall_tracker;
+
+    aeron_port_manager_t *sender_port_manager;
+    aeron_port_manager_t *receiver_port_manager;
+    aeron_wildcard_port_manager_t sender_wildcard_port_manager;
+    aeron_wildcard_port_manager_t receiver_wildcard_port_manager;
 
     aeron_dl_loaded_libs_state_t *dynamic_libs;
     aeron_driver_context_bindings_clientd_entry_t *bindings_clientd_entries;
@@ -320,6 +357,8 @@ int aeron_driver_context_validate_mtu_length(uint64_t mtu_length);
 
 size_t aeron_cnc_length(aeron_driver_context_t *context);
 
+int aeron_driver_context_run_storage_checks(aeron_driver_context_t *context, uint64_t log_length);
+
 int aeron_driver_context_bindings_clientd_create_entries(aeron_driver_context_t *context);
 int aeron_driver_context_bindings_clientd_delete_entries(aeron_driver_context_t *context);
 int aeron_driver_context_bindings_clientd_find_first_free_index(aeron_driver_context_t *context);
@@ -330,7 +369,7 @@ aeron_driver_context_bindings_clientd_entry_t *aeron_driver_context_bindings_cli
 
 inline void aeron_cnc_version_signal_cnc_ready(aeron_cnc_metadata_t *metadata, int32_t cnc_version)
 {
-    AERON_PUT_VOLATILE(metadata->cnc_version, cnc_version);
+    AERON_SET_RELEASE(metadata->cnc_version, cnc_version);
 }
 
 inline size_t aeron_producer_window_length(size_t producer_window_length, size_t term_length)

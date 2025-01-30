@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -118,7 +118,7 @@ public abstract class Publication implements AutoCloseable
         this.termBufferLength = logBuffers.termLength();
         this.maxMessageLength = FrameDescriptor.computeMaxMessageLength(termBufferLength);
         this.maxPayloadLength = LogBufferDescriptor.mtuLength(logMetaDataBuffer) - HEADER_LENGTH;
-        this.maxFramedLength = computeFramedLength(maxMessageLength, maxPayloadLength);
+        this.maxFramedLength = computeFragmentedFrameLength(maxMessageLength, maxPayloadLength);
         this.maxPossiblePosition = termBufferLength * (1L << 31);
         this.conductor = clientConductor;
         this.channel = channel;
@@ -230,7 +230,7 @@ public abstract class Publication implements AutoCloseable
     /**
      * Maximum length of a message payload that fits within a message fragment.
      * <p>
-     * This is he MTU length minus the message fragment header length.
+     * This is the MTU length minus the message fragment header length.
      *
      * @return maximum message fragment payload length.
      */
@@ -545,7 +545,7 @@ public abstract class Publication implements AutoCloseable
      *     }
      * }</pre>
      *
-     * @param length      of the range to claim, in bytes..
+     * @param length      of the range to claim, in bytes.
      * @param bufferClaim to be populated if the claim succeeds.
      * @return The new stream position, otherwise a negative error value of {@link #NOT_CONNECTED},
      * {@link #BACK_PRESSURED}, {@link #ADMIN_ACTION}, {@link #CLOSED}, or {@link #MAX_POSITION_EXCEEDED}.
@@ -586,6 +586,21 @@ public abstract class Publication implements AutoCloseable
     }
 
     /**
+     * Remove a previously added destination manually from a multi-destination-cast Publication.
+     *
+     * @param registrationId for the destination to remove.
+     */
+    public void removeDestination(final long registrationId)
+    {
+        if (isClosed)
+        {
+            throw new AeronException("Publication is closed");
+        }
+
+        conductor.removeDestination(originalRegistrationId, registrationId);
+    }
+
+    /**
      * Asynchronously add a destination manually to a multi-destination-cast Publication.
      * <p>
      * Errors will be delivered asynchronously to the {@link Aeron.Context#errorHandler()}. Completion can be
@@ -621,6 +636,25 @@ public abstract class Publication implements AutoCloseable
         }
 
         return conductor.asyncRemoveDestination(registrationId, endpointChannel);
+    }
+
+    /**
+     * Asynchronously remove a previously added destination from a multi-destination-cast Publication by registrationId.
+     * <p>
+     * Errors will be delivered asynchronously to the {@link Aeron.Context#errorHandler()}. Completion can be
+     * tracked by passing the returned correlation id to {@link Aeron#isCommandActive(long)}.
+     *
+     * @param destinationRegistrationId for the destination to remove.
+     * @return the correlationId for the command.
+     */
+    public long asyncRemoveDestination(final long destinationRegistrationId)
+    {
+        if (isClosed)
+        {
+            throw new AeronException("Publication is closed");
+        }
+
+        return conductor.asyncRemoveDestination(registrationId, destinationRegistrationId);
     }
 
     void internalClose()
@@ -679,15 +713,6 @@ public abstract class Publication implements AutoCloseable
         }
     }
 
-    static int computeFramedLength(final int length, final int maxPayloadLength)
-    {
-        final int numMaxPayloads = length / maxPayloadLength;
-        final int remainingPayload = length % maxPayloadLength;
-        final int lastFrameLength = remainingPayload > 0 ? align(remainingPayload + HEADER_LENGTH, FRAME_ALIGNMENT) : 0;
-
-        return (numMaxPayloads * (maxPayloadLength + HEADER_LENGTH)) + lastFrameLength;
-    }
-
     static int validateAndComputeLength(final int lengthOne, final int lengthTwo)
     {
         if (lengthOne < 0)
@@ -710,8 +735,8 @@ public abstract class Publication implements AutoCloseable
     }
 
     /**
-     * Returns a string representation of a position.  Generally used for errors.  If the position is a valid error then
-     * String name of the error will be returned.  If the value is 0 or greater the text will be "NONE". If the position
+     * Returns a string representation of a position. Generally used for errors. If the position is a valid error then
+     * String name of the error will be returned. If the value is 0 or greater the text will be "NONE". If the position
      * is negative, but not a known error code then "UNKNOWN" will be returned.
      *
      * @param position position value returned from a call to offer.

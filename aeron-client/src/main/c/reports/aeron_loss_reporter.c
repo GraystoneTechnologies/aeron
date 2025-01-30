@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -65,7 +65,7 @@ aeron_loss_reporter_entry_offset_t aeron_loss_reporter_create_entry(
         ptr += sizeof(int32_t);
         memcpy(ptr, source, source_length);
 
-        AERON_PUT_ORDERED(entry->observation_count, 1);
+        AERON_SET_RELEASE(entry->observation_count, 1);
 
         entry_offset = (aeron_loss_reporter_entry_offset_t)reporter->next_record_offset;
         reporter->next_record_offset += AERON_ALIGN(required_capacity, AERON_LOSS_REPORTER_ENTRY_ALIGNMENT);
@@ -78,11 +78,39 @@ aeron_loss_reporter_entry_offset_t aeron_loss_reporter_create_entry(
     return entry_offset;
 }
 
-extern void aeron_loss_reporter_record_observation(
+void aeron_loss_reporter_record_observation(
     aeron_loss_reporter_t *reporter,
     aeron_loss_reporter_entry_offset_t offset,
     int64_t bytes_lost,
-    int64_t timestamp_ms);
+    int64_t timestamp_ms)
+{
+    if (offset >= 0)
+    {
+        uint8_t *ptr = reporter->buffer + offset;
+        aeron_loss_reporter_entry_t *entry = (aeron_loss_reporter_entry_t *)ptr;
+#if defined(__clang__) && defined(AERON_CPU_ARM)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-but-set-variable"
+#endif
+        int64_t dest;
+
+        AERON_SET_RELEASE(entry->last_observation_timestamp, timestamp_ms);
+
+        // this is aligned as far as usage goes. And should perform fine.
+#if defined(__clang__) && defined(AERON_CPU_ARM)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Watomic-alignment"
+#endif
+        AERON_GET_AND_ADD_INT64(dest, entry->total_bytes_lost, bytes_lost);
+        AERON_GET_AND_ADD_INT64(dest, entry->observation_count, INT64_C(1));
+#if defined(__clang__) && defined(AERON_CPU_ARM)
+#pragma clang diagnostic pop
+#endif
+    }
+}
+#if defined(__clang__) && defined(AERON_CPU_ARM)
+#pragma clang diagnostic pop
+#endif
 
 int aeron_loss_reporter_resolve_filename(const char *directory, char *filename_buffer, size_t filename_buffer_length)
 {
@@ -101,7 +129,7 @@ size_t aeron_loss_reporter_read(
         aeron_loss_reporter_entry_t *entry = (aeron_loss_reporter_entry_t *)ptr;
 
         int64_t observation_count;
-        AERON_GET_VOLATILE(observation_count, entry->observation_count);
+        AERON_GET_ACQUIRE(observation_count, entry->observation_count);
         if (observation_count <= 0)
         {
             break;
@@ -120,10 +148,10 @@ size_t aeron_loss_reporter_read(
         const char *source = (const char *)ptr;
 
         int64_t total_bytes_lost;
-        AERON_GET_VOLATILE(total_bytes_lost, entry->total_bytes_lost);
+        AERON_GET_ACQUIRE(total_bytes_lost, entry->total_bytes_lost);
 
         int64_t last_observation_timestamp;
-        AERON_GET_VOLATILE(last_observation_timestamp, entry->last_observation_timestamp);
+        AERON_GET_ACQUIRE(last_observation_timestamp, entry->last_observation_timestamp);
 
         entry_func(
             clientd,

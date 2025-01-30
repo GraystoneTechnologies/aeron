@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -83,7 +83,7 @@ int aeron_init(aeron_t **client, aeron_context_t *context)
 
     if (aeron_agent_init(
         &_client->runner,
-        "[aeron-client-conductor]",
+        "aeron-client-conductor",
         _client,
         _client->context->agent_on_start_func,
         _client->context->agent_on_start_state,
@@ -202,10 +202,10 @@ void aeron_print_counters_format(
     size_t label_length,
     void *clientd)
 {
-    char buffer[AERON_MAX_PATH];
+    char buffer[AERON_COUNTERS_MANAGER_METADATA_LENGTH];
     aeron_print_counters_stream_out_t *out = (aeron_print_counters_stream_out_t *)clientd;
 
-    snprintf(buffer, AERON_MAX_PATH - 1, "%3" PRId32 ": %20" PRId64 " - %.*s\r\n",
+    snprintf(buffer, sizeof(buffer), "%3" PRId32 ": %20" PRId64 " - %.*s\r\n",
         id, value, (int)label_length, label);
     out->stream_out(buffer);
 }
@@ -217,7 +217,7 @@ void aeron_print_counters(aeron_t *client, void (*stream_out)(const char *))
         return;
     }
 
-    aeron_print_counters_stream_out_t out;
+    aeron_print_counters_stream_out_t out = { .stream_out = stream_out };
 
     aeron_counters_reader_foreach_counter(&client->conductor.counters_reader, aeron_print_counters_format, &out);
 }
@@ -351,7 +351,7 @@ int aeron_async_add_publication_poll(aeron_publication_t **publication, aeron_as
     *publication = NULL;
 
     aeron_client_registration_status_t registration_status;
-    AERON_GET_VOLATILE(registration_status, async->registration_status);
+    AERON_GET_ACQUIRE(registration_status, async->registration_status);
 
     switch (registration_status)
     {
@@ -419,7 +419,7 @@ int aeron_async_add_exclusive_publication_poll(
     *publication = NULL;
 
     aeron_client_registration_status_t registration_status;
-    AERON_GET_VOLATILE(registration_status, async->registration_status);
+    AERON_GET_ACQUIRE(registration_status, async->registration_status);
 
     switch (registration_status)
     {
@@ -449,7 +449,7 @@ int aeron_async_add_exclusive_publication_poll(
         case AERON_CLIENT_TIMEOUT_MEDIA_DRIVER:
         {
             AERON_SET_ERR(
-                AERON_CLIENT_ERROR_DRIVER_TIMEOUT, "%s", "async_add_publication no response from media driver");
+                AERON_CLIENT_ERROR_DRIVER_TIMEOUT, "%s", "async_add_exclusive_publication no response from media driver");
             aeron_async_cmd_free(async);
             return -1;
         }
@@ -519,7 +519,7 @@ int aeron_async_add_subscription_poll(aeron_subscription_t **subscription, aeron
     *subscription = NULL;
 
     aeron_client_registration_status_t registration_status;
-    AERON_GET_VOLATILE(registration_status, async->registration_status);
+    AERON_GET_ACQUIRE(registration_status, async->registration_status);
 
     switch (registration_status)
     {
@@ -549,7 +549,7 @@ int aeron_async_add_subscription_poll(aeron_subscription_t **subscription, aeron
         case AERON_CLIENT_TIMEOUT_MEDIA_DRIVER:
         {
             AERON_SET_ERR(
-                AERON_CLIENT_ERROR_DRIVER_TIMEOUT, "%s", "async_add_publication no response from media driver");
+                AERON_CLIENT_ERROR_DRIVER_TIMEOUT, "%s", "async_add_subscription no response from media driver");
             aeron_async_cmd_free(async);
             return -1;
         }
@@ -616,7 +616,7 @@ int aeron_async_add_counter_poll(aeron_counter_t **counter, aeron_async_add_coun
     *counter = NULL;
 
     aeron_client_registration_status_t registration_status;
-    AERON_GET_VOLATILE(registration_status, async->registration_status);
+    AERON_GET_ACQUIRE(registration_status, async->registration_status);
 
     switch (registration_status)
     {
@@ -646,7 +646,7 @@ int aeron_async_add_counter_poll(aeron_counter_t **counter, aeron_async_add_coun
         case AERON_CLIENT_TIMEOUT_MEDIA_DRIVER:
         {
             AERON_SET_ERR(
-                AERON_CLIENT_ERROR_DRIVER_TIMEOUT, "%s", "async_add_publication no response from media driver");
+                AERON_CLIENT_ERROR_DRIVER_TIMEOUT, "%s", "async_add_counter no response from media driver");
             aeron_async_cmd_free(async);
             return -1;
         }
@@ -658,6 +658,37 @@ int aeron_async_add_counter_poll(aeron_counter_t **counter, aeron_async_add_coun
             return -1;
         }
     }
+}
+
+int aeron_async_add_static_counter(
+    aeron_async_add_counter_t **async,
+    aeron_t *client,
+    int32_t type_id,
+    const uint8_t *key_buffer,
+    size_t key_buffer_length,
+    const char *label_buffer,
+    size_t label_buffer_length,
+    int64_t registration_id)
+{
+    if (NULL == async || NULL == client)
+    {
+        AERON_SET_ERR(
+            EINVAL,
+            "Parameters must not be null, async: %s, client: %s",
+            AERON_NULL_STR(async),
+            AERON_NULL_STR(client));
+        return -1;
+    }
+
+    return aeron_client_conductor_async_add_static_counter(
+        async,
+        &client->conductor,
+        type_id,
+        key_buffer,
+        key_buffer_length,
+        label_buffer,
+        label_buffer_length,
+        registration_id);
 }
 
 static int aeron_async_destination_poll(aeron_async_destination_t *async)
@@ -681,7 +712,7 @@ static int aeron_async_destination_poll(aeron_async_destination_t *async)
     }
 
     aeron_client_registration_status_t registration_status;
-    AERON_GET_VOLATILE(registration_status, async->registration_status);
+    AERON_GET_ACQUIRE(registration_status, async->registration_status);
 
     switch (registration_status)
     {
@@ -766,6 +797,28 @@ int aeron_publication_async_remove_destination(
     }
 
     return aeron_client_conductor_async_remove_publication_destination(async, &client->conductor, publication, uri);
+}
+
+int aeron_publication_async_remove_destination_by_id(
+    aeron_async_destination_t **async,
+    aeron_t *client,
+    aeron_publication_t *publication,
+    int64_t destination_registration_id)
+{
+    if (NULL == async || NULL == client || NULL == publication)
+    {
+        AERON_SET_ERR(
+            EINVAL,
+            "Parameters must not be null, async: %s, client: %s, publication: %s, destination_registration_id: %" PRId64,
+            AERON_NULL_STR(async),
+            AERON_NULL_STR(client),
+            AERON_NULL_STR(publication),
+            destination_registration_id);
+        return -1;
+    }
+
+    return aeron_client_conductor_async_remove_publication_destination_by_id(
+        async, &client->conductor, publication, destination_registration_id);
 }
 
 int aeron_subscription_async_add_destination(
@@ -861,14 +914,43 @@ int aeron_exclusive_publication_async_remove_destination(
         async, &client->conductor, publication, uri);
 }
 
-int aeron_client_handler_cmd_await_processed(aeron_client_handler_cmd_t *cmd)
+int aeron_exclusive_publication_async_remove_destination_by_id(
+    aeron_async_destination_t **async,
+    aeron_t *client,
+    aeron_exclusive_publication_t *publication,
+    int64_t destination_registration_id)
+{
+    if (NULL == async || NULL == client || NULL == publication)
+    {
+        AERON_SET_ERR(
+            EINVAL,
+            "Parameters must not be null, async: %s, client: %s, publication: %s, destination_registration_id: %" PRId64,
+            AERON_NULL_STR(async),
+            AERON_NULL_STR(client),
+            AERON_NULL_STR(publication),
+            destination_registration_id);
+        return -1;
+    }
+
+    return aeron_client_conductor_async_remove_exclusive_publication_destination_by_id(
+        async, &client->conductor, publication, destination_registration_id);
+}
+
+int aeron_client_handler_cmd_await_processed(aeron_client_handler_cmd_t *cmd, uint64_t timeout_ms)
 {
     bool processed = cmd->processed;
-
+    int64_t deadline_ms = (int64_t)(aeron_epoch_clock() + timeout_ms);
+    
     while (!processed)
     {
+        if (deadline_ms <= aeron_epoch_clock())
+        {
+            AERON_SET_ERR(ETIMEDOUT, "%s", "time out waiting for client conductor thread to process message");
+            return -1;
+        }
+
         sched_yield();
-        AERON_GET_VOLATILE(processed, cmd->processed);
+        AERON_GET_ACQUIRE(processed, cmd->processed);
     }
 
     return 0;
@@ -895,7 +977,7 @@ int aeron_add_available_counter_handler(aeron_t *client, aeron_on_available_coun
         return -1;
     }
 
-    return aeron_client_handler_cmd_await_processed(&cmd);
+    return aeron_client_handler_cmd_await_processed(&cmd, aeron_context_get_driver_timeout_ms(client->context));
 }
 
 int aeron_remove_available_counter_handler(aeron_t *client, aeron_on_available_counter_pair_t *pair)
@@ -919,7 +1001,7 @@ int aeron_remove_available_counter_handler(aeron_t *client, aeron_on_available_c
         return -1;
     }
 
-    return aeron_client_handler_cmd_await_processed(&cmd);
+    return aeron_client_handler_cmd_await_processed(&cmd, aeron_context_get_driver_timeout_ms(client->context));
 }
 
 int aeron_add_unavailable_counter_handler(aeron_t *client, aeron_on_unavailable_counter_pair_t *pair)
@@ -943,7 +1025,7 @@ int aeron_add_unavailable_counter_handler(aeron_t *client, aeron_on_unavailable_
         return -1;
     }
 
-    return aeron_client_handler_cmd_await_processed(&cmd);
+    return aeron_client_handler_cmd_await_processed(&cmd, aeron_context_get_driver_timeout_ms(client->context));
 }
 
 int aeron_remove_unavailable_counter_handler(aeron_t *client, aeron_on_unavailable_counter_pair_t *pair)
@@ -967,7 +1049,7 @@ int aeron_remove_unavailable_counter_handler(aeron_t *client, aeron_on_unavailab
         return -1;
     }
 
-    return aeron_client_handler_cmd_await_processed(&cmd);
+    return aeron_client_handler_cmd_await_processed(&cmd, aeron_context_get_driver_timeout_ms(client->context));
 }
 
 int aeron_add_close_handler(aeron_t *client, aeron_on_close_client_pair_t *pair)
@@ -991,7 +1073,7 @@ int aeron_add_close_handler(aeron_t *client, aeron_on_close_client_pair_t *pair)
         return -1;
     }
 
-    return aeron_client_handler_cmd_await_processed(&cmd);
+    return aeron_client_handler_cmd_await_processed(&cmd, aeron_context_get_driver_timeout_ms(client->context));
 }
 
 int aeron_remove_close_handler(aeron_t *client, aeron_on_close_client_pair_t *pair)
@@ -1015,5 +1097,5 @@ int aeron_remove_close_handler(aeron_t *client, aeron_on_close_client_pair_t *pa
         return -1;
     }
 
-    return aeron_client_handler_cmd_await_processed(&cmd);
+    return aeron_client_handler_cmd_await_processed(&cmd, aeron_context_get_driver_timeout_ms(client->context));
 }

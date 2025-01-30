@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package io.aeron.agent;
 
 import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.ringbuffer.ManyToOneRingBuffer;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -33,7 +34,8 @@ import static io.aeron.agent.AgentTests.verifyLogHeader;
 import static io.aeron.agent.CommonEventEncoder.*;
 import static io.aeron.agent.DriverEventCode.*;
 import static io.aeron.agent.DriverEventEncoder.untetheredSubscriptionStateChangeLength;
-import static io.aeron.agent.DriverEventLogger.*;
+import static io.aeron.agent.DriverEventLogger.MAX_HOST_NAME_LENGTH;
+import static io.aeron.agent.DriverEventLogger.toEventCodeId;
 import static io.aeron.agent.EventConfiguration.MAX_EVENT_LENGTH;
 import static io.aeron.test.Tests.generateStringWithSuffix;
 import static java.nio.ByteBuffer.allocate;
@@ -44,6 +46,7 @@ import static org.agrona.BitUtil.*;
 import static org.agrona.concurrent.ringbuffer.RecordDescriptor.*;
 import static org.agrona.concurrent.ringbuffer.RingBufferDescriptor.TAIL_POSITION_OFFSET;
 import static org.agrona.concurrent.ringbuffer.RingBufferDescriptor.TRAILER_LENGTH;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class DriverEventLoggerTest
@@ -279,7 +282,7 @@ class DriverEventLoggerTest
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
+    @ValueSource(booleans = { false, true })
     void logResolve(final boolean isReResolution) throws UnknownHostException
     {
         final int recordOffset = 64;
@@ -323,10 +326,10 @@ class DriverEventLoggerTest
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
+    @ValueSource(booleans = { false, true })
     void logLookup(final boolean isReLookup)
     {
-        final int recordOffset = 30;
+        final int recordOffset = align(30, ALIGNMENT);
         logBuffer.putLong(CAPACITY + TAIL_POSITION_OFFSET, recordOffset);
 
         final String resolverName = generateStringWithSuffix("my-resolver", "*", 1000);
@@ -358,5 +361,92 @@ class DriverEventLoggerTest
         index += SIZE_OF_INT + name.length();
 
         assertEquals(resolvedName, logBuffer.getStringAscii(index, LITTLE_ENDIAN));
+    }
+
+    @Test
+    void logHost()
+    {
+        final int recordOffset = 64;
+        logBuffer.putLong(CAPACITY + TAIL_POSITION_OFFSET, recordOffset);
+
+        final long durationNs = TimeUnit.DAYS.toNanos(1);
+        final String hostName = generateStringWithSuffix("host-name", "e", 1000);
+        final String expectedHostName = hostName.substring(0, MAX_HOST_NAME_LENGTH - 3) + "...";
+        final int captureLength = SIZE_OF_LONG +
+            trailingStringLength(hostName, MAX_HOST_NAME_LENGTH);
+
+        logger.logHostName(durationNs, hostName);
+
+        verifyLogHeader(
+            logBuffer, recordOffset, toEventCodeId(NAME_RESOLUTION_HOST_NAME), captureLength, captureLength);
+
+        int index = encodedMsgOffset(recordOffset) + LOG_HEADER_LENGTH;
+
+        assertEquals(durationNs, logBuffer.getLong(index, LITTLE_ENDIAN));
+        index += SIZE_OF_LONG;
+
+        assertEquals(expectedHostName, logBuffer.getStringAscii(index, LITTLE_ENDIAN));
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = DriverEventCode.class, names = { "NAK_SENT", "NAK_RECEIVED" })
+    void logNakMessage(final DriverEventCode eventCode)
+    {
+        final InetSocketAddress inetSocketAddress = new InetSocketAddress("192.168.1.1", 10001);
+
+        final int sessionId = 9821374;
+        final int streamId = 988234;
+        final int termId = 89324;
+        final int termOffset = 9862314;
+        final int length = 1239;
+        final String channel =
+            "aeron:udp?endpoint=localhost:10000|term-length=1m|init-term-id=0|term-id=0|term-offset=0";
+        final int recordOffset = 64;
+        final int captureLength = socketAddressLength(inetSocketAddress) + (6 * SIZE_OF_INT) + channel.length();
+
+        logBuffer.putLong(CAPACITY + TAIL_POSITION_OFFSET, recordOffset);
+        logger.logNakMessage(eventCode, inetSocketAddress, sessionId, streamId, termId, termOffset, length, channel);
+        verifyLogHeader(
+            logBuffer, recordOffset, toEventCodeId(eventCode), captureLength, captureLength);
+
+        final StringBuilder sb = new StringBuilder();
+        DriverEventDissector.dissectNak(eventCode, logBuffer, encodedMsgOffset(recordOffset), sb);
+
+        final String expectedMessagePattern =
+            "\\[[0-9]+\\.[0-9]+] DRIVER: " + eventCode + " \\[124/124]: address=192.168.1.1:10001 " +
+            "sessionId=9821374 streamId=988234 termId=89324 termOffset=9862314 length=1239 channel=" +
+            "aeron:udp\\?endpoint=localhost:10000\\|term-length=1m\\|init-term-id=0\\|term-id=0\\|term-offset=0";
+
+        assertThat(sb.toString(), Matchers.matchesPattern(expectedMessagePattern));
+    }
+
+    @Test
+    void logResend()
+    {
+        final int sessionId = 9821374;
+        final int streamId = 988234;
+        final int termId = 89324;
+        final int termOffset = 9862314;
+        final int length = 1239;
+        final int recordOffset = 64;
+        final String channel =
+            "aeron:udp?endpoint=localhost:10000|term-length=1m|init-term-id=0|term-id=0|term-offset=0";
+        final int captureLength = 6 * SIZE_OF_INT + channel.length();
+
+        logBuffer.putLong(CAPACITY + TAIL_POSITION_OFFSET, recordOffset);
+        logger.logResend(sessionId, streamId, termId, termOffset, length, channel);
+        verifyLogHeader(
+            logBuffer, recordOffset, toEventCodeId(RESEND), captureLength, captureLength);
+
+        final StringBuilder sb = new StringBuilder();
+        DriverEventDissector.dissectResend(logBuffer, encodedMsgOffset(recordOffset), sb);
+
+        final String expectedMessagePattern =
+            "\\[[0-9]+\\.[0-9]+] DRIVER: RESEND \\[112/112]: sessionId=9821374 streamId=988234 termId=89324 " +
+            "termOffset=9862314 length=1239 " +
+            "channel=" +
+            "aeron:udp\\?endpoint=localhost:10000\\|term-length=1m\\|init-term-id=0\\|term-id=0\\|term-offset=0";
+
+        assertThat(sb.toString(), Matchers.matchesPattern(expectedMessagePattern));
     }
 }

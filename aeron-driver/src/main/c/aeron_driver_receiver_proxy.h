@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,8 +28,11 @@ typedef struct aeron_driver_receiver_proxy_stct
 {
     aeron_driver_receiver_t *receiver;
     aeron_threading_mode_t threading_mode;
-    aeron_on_endpoint_change_func_t on_add_endpoint_func;
-    aeron_on_endpoint_change_func_t on_remove_endpoint_func;
+    struct
+    {
+        aeron_on_endpoint_change_func_t on_add_endpoint;
+        aeron_on_endpoint_change_func_t on_remove_endpoint;
+    } log;
     aeron_mpsc_rb_t *command_queue;
     int64_t *fail_counter;
 }
@@ -60,6 +63,12 @@ void aeron_driver_receiver_proxy_on_remove_subscription(
     int32_t stream_id);
 
 void aeron_driver_receiver_proxy_on_add_subscription_by_session(
+    aeron_driver_receiver_proxy_t *receiver_proxy,
+    aeron_receive_channel_endpoint_t *endpoint,
+    int32_t stream_id,
+    int32_t session_id);
+
+void aeron_driver_receiver_proxy_on_request_setup(
     aeron_driver_receiver_proxy_t *receiver_proxy,
     aeron_receive_channel_endpoint_t *endpoint,
     int32_t stream_id,
@@ -114,6 +123,27 @@ typedef struct aeron_command_on_remove_matching_state_stct
 }
 aeron_command_on_remove_matching_state_t;
 
+typedef struct aeron_command_receiver_resolution_change_stct
+{
+    aeron_command_base_t base;
+    const char *endpoint_name;
+    void *endpoint;
+    void *destination;
+    struct sockaddr_storage new_addr;
+}
+aeron_command_receiver_resolution_change_t;
+
+typedef struct aeron_command_receiver_invalidate_image_stct
+{
+    aeron_command_base_t base;
+    int64_t image_correlation_id;
+    int64_t position;
+    int32_t reason_length;
+    uint8_t reason_text[1];
+}
+aeron_command_receiver_invalidate_image_t;
+
+
 void aeron_driver_receiver_proxy_on_add_publication_image(
     aeron_driver_receiver_proxy_t *receiver_proxy,
     aeron_receive_channel_endpoint_t *endpoint,
@@ -131,17 +161,12 @@ void aeron_driver_receiver_proxy_on_remove_init_in_progress(
     aeron_receive_channel_endpoint_t *endpoint,
     int32_t session_id,
     int32_t stream_id);
-
-typedef struct aeron_command_receiver_resolution_change_stct
-{
-    aeron_command_base_t base;
-    const char *endpoint_name;
-    void *endpoint;
-    void *destination;
-    struct sockaddr_storage new_addr;
-}
-aeron_command_receiver_resolution_change_t;
-
+void aeron_driver_receiver_proxy_on_invalidate_image(
+    aeron_driver_receiver_proxy_t *receiver_proxy,
+    int64_t image_correlation_id,
+    int64_t position,
+    int32_t reason_length,
+    const char *reason);
 void aeron_driver_receiver_proxy_on_resolution_change(
     aeron_driver_receiver_proxy_t *receiver_proxy,
     const char *endpoint_name,

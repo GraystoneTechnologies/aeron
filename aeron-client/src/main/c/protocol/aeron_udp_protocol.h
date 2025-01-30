@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2023 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -79,6 +79,18 @@ typedef struct aeron_status_message_header_stct
 }
 aeron_status_message_header_t;
 
+struct aeron_error_stct
+{
+    aeron_frame_header_t frame_header;
+    int32_t session_id;
+    int32_t stream_id;
+    int64_t receiver_id;
+    int64_t group_tag;
+    int32_t error_code;
+    int32_t error_length;
+};
+typedef struct aeron_error_stct aeron_error_t;
+
 typedef struct aeron_status_message_optional_header_stct
 {
     int64_t group_tag;
@@ -128,30 +140,40 @@ typedef struct aeron_resolution_header_ipv6_stct
 }
 aeron_resolution_header_ipv6_t;
 
-typedef struct aeron_option_hdeader_stct
+typedef struct aeron_option_header_stct
 {
     uint16_t option_length;
     uint16_t type;
 }
 aeron_option_header_t;
+
+typedef struct aeron_response_setup_header_stct
+{
+    aeron_frame_header_t frame_header;
+    int32_t session_id;
+    int32_t stream_id;
+    int32_t response_session_id;
+}
+aeron_response_setup_header_t;
 #pragma pack(pop)
 
 int aeron_udp_protocol_group_tag(aeron_status_message_header_t *sm, int64_t *group_tag);
 
 #define AERON_FRAME_HEADER_VERSION (0)
 
-#define AERON_HDR_TYPE_PAD (0x00)
-#define AERON_HDR_TYPE_DATA (0x01)
-#define AERON_HDR_TYPE_NAK (0x02)
-#define AERON_HDR_TYPE_SM (0x03)
-#define AERON_HDR_TYPE_ERR (0x04)
-#define AERON_HDR_TYPE_SETUP (0x05)
-#define AERON_HDR_TYPE_RTTM (0x06)
-#define AERON_HDR_TYPE_RES (0x07)
-#define AERON_HDR_TYPE_ATS_DATA (0x08)
-#define AERON_HDR_TYPE_ATS_SETUP (0x09)
-#define AERON_HDR_TYPE_ATS_SM (0x0A)
-#define AERON_HDR_TYPE_EXT (0xFFFF)
+#define AERON_HDR_TYPE_PAD (INT16_C(0x00))
+#define AERON_HDR_TYPE_DATA (INT16_C(0x01))
+#define AERON_HDR_TYPE_NAK (INT16_C(0x02))
+#define AERON_HDR_TYPE_SM (INT16_C(0x03))
+#define AERON_HDR_TYPE_ERR (INT16_C(0x04))
+#define AERON_HDR_TYPE_SETUP (INT16_C(0x05))
+#define AERON_HDR_TYPE_RTTM (INT16_C(0x06))
+#define AERON_HDR_TYPE_RES (INT16_C(0x07))
+#define AERON_HDR_TYPE_ATS_DATA (INT16_C(0x08))
+#define AERON_HDR_TYPE_ATS_SETUP (INT16_C(0x09))
+#define AERON_HDR_TYPE_ATS_SM (INT16_C(0x0A))
+#define AERON_HDR_TYPE_RSP_SETUP (INT16_C(0x0B))
+#define AERON_HDR_TYPE_EXT (INT16_C(-1))
 
 #define AERON_DATA_HEADER_LENGTH (sizeof(aeron_data_header_t))
 
@@ -159,12 +181,15 @@ int aeron_udp_protocol_group_tag(aeron_status_message_header_t *sm, int64_t *gro
 #define AERON_DATA_HEADER_END_FLAG (UINT8_C(0x40))
 #define AERON_DATA_HEADER_EOS_FLAG (UINT8_C(0x20))
 
-#define AERON_DATA_HEADER_UNFRAGMENTED (UINT8_C(AERON_DATA_HEADER_BEGIN_FLAG | AERON_DATA_HEADER_END_FLAG))
+#define AERON_DATA_HEADER_UNFRAGMENTED (AERON_DATA_HEADER_BEGIN_FLAG | AERON_DATA_HEADER_END_FLAG)
 
 #define AERON_DATA_HEADER_DEFAULT_RESERVED_VALUE (INT64_C(0))
 
 #define AERON_STATUS_MESSAGE_HEADER_SEND_SETUP_FLAG (UINT8_C(0x80))
 #define AERON_STATUS_MESSAGE_HEADER_EOS_FLAG (UINT8_C(0x40))
+
+#define AERON_SETUP_HEADER_SEND_RESPONSE_FLAG (UINT8_C(0x80))
+#define AERON_SETUP_HEADER_GROUP_FLAG (UINT8_C(0x40))
 
 #define AERON_RTTM_HEADER_REPLY_FLAG (UINT8_C(0x80))
 
@@ -185,6 +210,10 @@ int aeron_udp_protocol_group_tag(aeron_status_message_header_t *sm, int64_t *gro
 #define AERON_OPT_HDR_TYPE_ATS_GROUP_TAG (UINT16_C(0x0007))
 
 #define AERON_OPT_HDR_ALIGNMENT (4u)
+
+#define AERON_ERROR_MAX_TEXT_LENGTH (1023)
+#define AERON_ERROR_MAX_FRAME_LENGTH (sizeof(aeron_error_t) + AERON_ERROR_MAX_TEXT_LENGTH)
+#define AERON_ERROR_HAS_GROUP_TAG_FLAG (0x08)
 
 inline size_t aeron_res_header_address_length(int8_t res_type)
 {
