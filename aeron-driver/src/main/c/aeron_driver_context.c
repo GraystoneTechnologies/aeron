@@ -210,6 +210,7 @@ static void aeron_driver_untethered_subscription_state_change_null(
 #define AERON_SENDER_MAX_MESSAGES_PER_SEND_DEFAULT UINT32_C(2)
 #define AERON_DRIVER_RESOURCE_FREE_LIMIT_DEFAULT UINT32_C(10)
 #define AERON_DRIVER_ASYNC_EXECUTOR_THREADS_DEFAULT UINT32_C(1)
+#define AERON_DRIVER_ASYNC_EXECUTOR_CPU_AFFINITY_DEFAULT (-1)
 #define AERON_CPU_AFFINITY_DEFAULT (-1)
 #define AERON_DRIVER_CONNECT_DEFAULT true
 #define AERON_ENABLE_EXPERIMENTAL_FEATURES_DEFAULT false
@@ -438,6 +439,7 @@ int aeron_driver_context_init(aeron_driver_context_t **context)
     _context->network_publication_max_messages_per_send = AERON_SENDER_MAX_MESSAGES_PER_SEND_DEFAULT;
     _context->resource_free_limit = AERON_DRIVER_RESOURCE_FREE_LIMIT_DEFAULT;
     _context->async_executor_threads = AERON_DRIVER_ASYNC_EXECUTOR_THREADS_DEFAULT;
+    _context->async_executor_cpu_affinity_no = AERON_DRIVER_ASYNC_EXECUTOR_CPU_AFFINITY_DEFAULT;
     _context->connect_enabled = AERON_DRIVER_CONNECT_DEFAULT;
     _context->conductor_cpu_affinity_no = AERON_CPU_AFFINITY_DEFAULT;
     _context->sender_cpu_affinity_no = AERON_CPU_AFFINITY_DEFAULT;
@@ -671,6 +673,12 @@ int aeron_driver_context_init(aeron_driver_context_t **context)
         AERON_SENDER_CPU_AFFINITY_ENV_VAR,
         getenv(AERON_SENDER_CPU_AFFINITY_ENV_VAR),
         _context->sender_cpu_affinity_no,
+        -1,
+        255);
+    _context->async_executor_cpu_affinity_no = aeron_config_parse_int32(
+        AERON_DRIVER_ASYNC_EXECUTOR_CPU_AFFINITY_ENV_VAR,
+        getenv(AERON_DRIVER_ASYNC_EXECUTOR_CPU_AFFINITY_ENV_VAR),
+        _context->async_executor_cpu_affinity_no,
         -1,
         255);
 
@@ -3094,15 +3102,19 @@ void aeron_set_thread_affinity_on_start(void *state, const char *role_name)
 {
     aeron_driver_context_t *context = (aeron_driver_context_t *)state;
     int result = 0;
-    if (0 == strcmp("conductor", role_name) && 0 <= context->conductor_cpu_affinity_no)
+    if (0 <= context->conductor_cpu_affinity_no &&
+       (0 == strcmp("conductor", role_name) ||
+        0 == strcmp("[conductor, sender, receiver]", role_name)))
     {
         result = aeron_thread_set_affinity(role_name, (uint8_t)context->conductor_cpu_affinity_no);
     }
-    else if (0 == strcmp("sender", role_name) && 0 <= context->sender_cpu_affinity_no)
+    else if (0 <= context->sender_cpu_affinity_no &&
+            (0 == strcmp("sender", role_name) ||
+             0 == strcmp("[sender, receiver]", role_name)))
     {
         result = aeron_thread_set_affinity(role_name, (uint8_t)context->sender_cpu_affinity_no);
     }
-    else if (0 == strcmp("receiver", role_name) && 0 <= context->receiver_cpu_affinity_no)
+    else if (0 <= context->receiver_cpu_affinity_no && 0 == strcmp("receiver", role_name))
     {
         result = aeron_thread_set_affinity(role_name, (uint8_t)context->receiver_cpu_affinity_no);
     }
