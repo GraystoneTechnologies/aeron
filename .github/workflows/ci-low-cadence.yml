@@ -4,19 +4,18 @@ on:
   workflow_call:
   workflow_dispatch:
   repository_dispatch:
-   types: run-slow-tests
-# Graystone: do not run on cron
-#  schedule:
-#    - cron: '0 0,12 * * *'
+    types: run-slow-tests
+  schedule:
+    - cron: '0 0,12 * * *'
   push:
     branches:
       - master
-      - graystone
- pull_request:
-   types: [opened, synchronize]
-   branches:
-     - master
-     - graystone
+      - 'release/**'
+  pull_request:
+    types: [opened, synchronize]
+    branches:
+      - master
+      - 'release/**'
 
 concurrency:
   group: ci-low-cadence-${{ github.workflow }}-${{ github.ref }}
