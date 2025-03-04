@@ -8,12 +8,12 @@ on:
   push:
     branches:
       - master
-      - 'release/**'
+      - graystone
   pull_request:
     types: [opened, synchronize]
     branches:
       - master
-      - 'release/**'
+      - graystone
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
