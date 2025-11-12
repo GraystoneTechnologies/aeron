@@ -322,7 +322,7 @@ void aeron_ipc_publication_clean_buffer(aeron_ipc_publication_t *publication, in
 
         memset(
             publication->mapped_raw_log.term_buffers[dirty_index].addr + term_offset + sizeof(int64_t),
-            0xAB,
+            0xFF,
             length - sizeof(int64_t));
 
         uint64_t *ptr = (uint64_t *)(publication->mapped_raw_log.term_buffers[dirty_index].addr + term_offset);
